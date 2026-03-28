@@ -102,3 +102,4 @@ Respond ONLY with a JSON object like this:
 
             except Exception as e:
                 logger.error(f"Error on {symbol}: {e}")
+```"​​​​​​​​​​​​​​​​
