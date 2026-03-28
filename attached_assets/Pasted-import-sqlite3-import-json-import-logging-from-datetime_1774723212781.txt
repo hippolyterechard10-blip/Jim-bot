@@ -289,3 +289,8 @@ class TradingMemory:
             for k,v in list(strategy.items())[:3]:
                 lines.append(f"  • {k}: {v}")
         return "\n".join(lines)
+```"
+
+---
+
+Dis-moi quand c'est fait et je te donne `analyzer.py` ! 🙂​​​​​​​​​​​​​​​​
