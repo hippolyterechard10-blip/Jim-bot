@@ -256,3 +256,8 @@ setInterval(refreshAll,REFRESH);
 </script>
 </body>
 </html>"""
+```"
+
+---
+
+Dernier fichier après ça c'est `notifier.py` et on a tout ! 💪​​​​​​​​​​​​​​​​
