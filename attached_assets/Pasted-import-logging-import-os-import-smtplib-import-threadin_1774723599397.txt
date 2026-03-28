@@ -169,3 +169,8 @@ Capital en baisse de <strong>{loss_pct:.1f}%</strong>. Toutes les positions ont 
                 self._stop.wait(30)
         threading.Thread(target=loop, daemon=True, name="notifier").start()
         logger.info(f"📅 Scheduler started — daily at {daily_hour_utc}h UTC")
+```"
+
+---
+
+Dis-moi quand c'est fait — on sera à **100% du code** et il restera juste à ajouter tes clés API ! 🎯​​​​​​​​​​​​​​​​
