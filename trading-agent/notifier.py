@@ -149,23 +149,35 @@ Capital en baisse de <strong>{loss_pct:.1f}%</strong>. Toutes les positions ont 
 <div class="lesson">Alerte si 3 pertes consécutives détectées</div>"""
         return _send("[Trading Agent] ✅ Email de test — OK", _html("Test de configuration", content))
 
+    def _already_sent_today(self, key: str, date_str: str) -> bool:
+        """Check SQLite so restarts don't re-send emails for the same date."""
+        return self.memory.get_memory(key) == date_str
+
+    def _mark_sent(self, key: str, date_str: str):
+        self.memory.set_memory(key, date_str, category="email_scheduler")
+
     def start_scheduler(self, daily_hour_utc=20):
         self._stop.clear()
-        sent_today = None
-        sent_weekly = None
         def loop():
-            nonlocal sent_today, sent_weekly
             while not self._stop.is_set():
                 now = datetime.now(timezone.utc)
                 today = now.strftime("%Y-%m-%d")
-                week = now.strftime("%Y-W%W")
-                if now.hour == daily_hour_utc and sent_today != today:
-                    self.send_daily_summary()
-                    sent_today = today
-                if now.weekday() == 0 and now.hour == 8 and sent_weekly != week:
-                    report = self.analyzer.generate_performance_report("weekly")
-                    _send(f"[Trading Agent] Rapport hebdomadaire", _html("Rapport hebdo", f'<div class="st">Analyse Claude</div><p style="font-size:12px;line-height:1.7;white-space:pre-wrap">{report}</p>'))
-                    sent_weekly = week
+                week  = now.strftime("%Y-W%W")
+
+                if now.hour == daily_hour_utc:
+                    if not self._already_sent_today("email.last_daily_sent", today):
+                        self.send_daily_summary()
+                        self._mark_sent("email.last_daily_sent", today)
+
+                if now.weekday() == 0 and now.hour == 8:
+                    if not self._already_sent_today("email.last_weekly_sent", week):
+                        report = self.analyzer.generate_performance_report("weekly")
+                        _send("[Trading Agent] Rapport hebdomadaire",
+                              _html("Rapport hebdo",
+                                    f'<div class="st">Analyse Claude</div>'
+                                    f'<p style="font-size:12px;line-height:1.7;white-space:pre-wrap">{report}</p>'))
+                        self._mark_sent("email.last_weekly_sent", week)
+
                 self._stop.wait(30)
         threading.Thread(target=loop, daemon=True, name="notifier").start()
-        logger.info(f"📅 Scheduler started — daily at {daily_hour_utc}h UTC")
+        logger.info(f"📅 Scheduler started — daily at {daily_hour_utc}h UTC (persisted dedup via SQLite)")
