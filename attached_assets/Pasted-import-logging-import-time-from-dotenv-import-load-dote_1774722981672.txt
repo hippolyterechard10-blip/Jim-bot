@@ -66,3 +66,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+```"
+
+---
+
+Une fois que Replit confirme, dis-moi et on passe à la **dernière étape : installer les dépendances et ajouter tes clés API** dans Replit. 🎯​​​​​​​​​​​​​​​​
