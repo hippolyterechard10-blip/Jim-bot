@@ -148,3 +148,8 @@ Be direct and critical."""
         if 0 < stats.get("profit_factor", 1) < 1:
             alerts.append(f"📉 Profit factor < 1 ({stats['profit_factor']})")
         return alerts
+```"
+
+---
+
+Dis-moi quand c'est bon, on enchaîne avec `dashboard.py` ! 🙂​​​​​​​​​​​​​​​​
