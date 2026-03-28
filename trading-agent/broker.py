@@ -35,7 +35,11 @@ class AlpacaBroker:
 
     def get_bars(self, symbol, timeframe="1Min", limit=50):
         try:
-            bars = self.api.get_bars(symbol, timeframe, limit=limit).df
+            is_crypto = "/" in symbol
+            if is_crypto:
+                bars = self.api.get_crypto_bars(symbol, timeframe, limit=limit).df
+            else:
+                bars = self.api.get_bars(symbol, timeframe, limit=limit).df
             return bars
         except Exception as e:
             logger.error(f"get_bars error for {symbol}: {e}")

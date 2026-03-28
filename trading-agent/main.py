@@ -28,7 +28,7 @@ def main():
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
-    start_dashboard(memory, analyzer, port=8080)
+    start_dashboard(memory, analyzer, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
     notifier.send_test_email()
 
