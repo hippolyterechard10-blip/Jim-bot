@@ -21,8 +21,8 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# we don't run through pnpm to make startup faster in production
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+# Starts the trading agent in the background, then runs the API server in the foreground
+args = ["bash", "start-production.sh"]
 
 [services.production.run.env]
 PORT = "8080"
