@@ -30,7 +30,6 @@ def main():
 
     start_dashboard(memory, analyzer, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
-    notifier.send_test_email()
 
     logger.info("✅ All systems running. Starting trading loop...")
 
