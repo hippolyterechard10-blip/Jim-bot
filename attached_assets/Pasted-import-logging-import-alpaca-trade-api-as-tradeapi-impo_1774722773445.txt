@@ -73,3 +73,4 @@ class AlpacaBroker:
         except Exception as e:
             logger.error(f"close_all_positions error: {e}")
             return False
+```"​​​​​​​​​​​​​​​​
