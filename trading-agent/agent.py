@@ -28,6 +28,8 @@ class TradingAgent:
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
         self._low_water: dict = {}
+        # Symbols for which partial profit has already been taken this session
+        self._partial_taken: set = set()
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
         """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
@@ -43,12 +45,35 @@ class TradingAgent:
             return
 
         for pos in positions:
+            # Only process LONG positions here
+            try:
+                if getattr(pos, "side", "long") == "short" or float(pos.qty) < 0:
+                    continue
+            except Exception:
+                continue
+
             symbol = pos.symbol
             try:
                 current_price = float(pos.current_price)
+                current_qty   = abs(float(pos.qty))
                 trail_pct = (config.TRAILING_STOP_CRYPTO
                              if self._is_crypto(symbol)
                              else config.TRAILING_STOP_STOCK)
+
+                # ── Partial profit taking ──────────────────────────────────
+                unrealised_pct = float(getattr(pos, "unrealized_plpc", 0))
+                if (unrealised_pct >= config.PARTIAL_PROFIT_PCT
+                        and symbol not in self._partial_taken
+                        and current_qty > 0):
+                    sell_qty = round(current_qty * config.PARTIAL_PROFIT_RATIO, 4)
+                    if sell_qty > 0:
+                        logger.info(
+                            f"💰 PARTIAL PROFIT LONG: {symbol} "
+                            f"+{unrealised_pct*100:.1f}% — selling {sell_qty} "
+                            f"({config.PARTIAL_PROFIT_RATIO*100:.0f}% of {current_qty})"
+                        )
+                        self.broker.place_order(symbol, sell_qty, "sell")
+                        self._partial_taken.add(symbol)
 
                 # Initialise high-water mark on first sight after (re)start
                 if symbol not in self._high_water:
@@ -74,6 +99,7 @@ class TradingAgent:
                     closed = self.broker.close_position(symbol)
                     if closed:
                         del self._high_water[symbol]
+                        self._partial_taken.discard(symbol)
                         # Try to log the close in memory
                         if self.memory:
                             try:
@@ -118,10 +144,28 @@ class TradingAgent:
             symbol = pos.symbol
             try:
                 current_price = float(pos.current_price)
+                current_qty   = abs(qty_val)
                 is_crypto_pos = self._is_crypto(symbol)
                 trail_pct = (config.TRAILING_STOP_SHORT_CRYPTO
                              if is_crypto_pos
                              else config.TRAILING_STOP_SHORT_STOCK)
+
+                # ── Partial profit taking ──────────────────────────────────
+                # unrealized_plpc is positive when a short is profitable
+                short_key = f"short:{symbol}"
+                unrealised_pct = float(getattr(pos, "unrealized_plpc", 0))
+                if (unrealised_pct >= config.PARTIAL_PROFIT_PCT
+                        and short_key not in self._partial_taken
+                        and current_qty > 0):
+                    cover_qty = round(current_qty * config.PARTIAL_PROFIT_RATIO, 4)
+                    if cover_qty > 0:
+                        logger.info(
+                            f"💰 PARTIAL PROFIT SHORT: {symbol} "
+                            f"+{unrealised_pct*100:.1f}% — covering {cover_qty} "
+                            f"({config.PARTIAL_PROFIT_RATIO*100:.0f}% of {current_qty})"
+                        )
+                        self.broker.place_order(symbol, cover_qty, "buy")
+                        self._partial_taken.add(short_key)
 
                 # Initialise low-water mark on first sight after (re)start
                 if symbol not in self._low_water:
@@ -148,6 +192,7 @@ class TradingAgent:
                     covered = self.broker.place_order(symbol, cover_qty, "buy")
                     if covered:
                         del self._low_water[symbol]
+                        self._partial_taken.discard(f"short:{symbol}")
                         if self.memory:
                             try:
                                 open_trades = self.memory.get_recent_trades(limit=50)

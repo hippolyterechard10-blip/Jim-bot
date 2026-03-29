@@ -28,6 +28,10 @@ MAX_SHORT_SIZE_PCT   = 0.15   # Max 15% of portfolio per short position
 SHORT_ENTRY_RSI_MIN  = 70     # RSI must be above this to short
 SHORT_ENTRY_CONF_MAX = 0.30   # Claude confidence must be below this
 
+# Partial profit taking
+PARTIAL_PROFIT_PCT   = 0.05   # Take partial profits at +5% unrealised gain
+PARTIAL_PROFIT_RATIO = 0.50   # Sell / cover this fraction of the position (50%)
+
 # Universe
 CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD", "SHIB/USD", "MATIC/USD"]
 STOCK_SYMBOLS = ["AAPL", "NVDA", "TSLA", "META", "GOOGL", "MSFT", "AMD"]
