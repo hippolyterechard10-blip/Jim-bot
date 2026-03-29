@@ -375,6 +375,7 @@ def build_strategy_prompt(
     patterns: dict,
     session_ctx: dict,
     memory_context: str = "",
+    market_context: str = "",
 ) -> str:
     """
     Construit un prompt complet pour Claude avec tout le contexte stratégique.
@@ -425,6 +426,8 @@ def build_strategy_prompt(
 - Take profit: +10% (or +2% for scalps)
 - Max 5 open positions
 - If session is mid_day or bad hours: confidence must be >0.85 to trade
+
+{market_context}
 
 {memory_context}
 

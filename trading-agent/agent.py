@@ -3,6 +3,7 @@ import logging
 import uuid
 import anthropic
 import config
+from scanner import MarketScanner
 from strategy import (
     compute_indicators,
     compute_opportunity_score,
@@ -26,6 +27,7 @@ class TradingAgent:
         self.risk = risk_manager
         self.memory = memory
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        self.scanner = MarketScanner()
         # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
@@ -218,7 +220,7 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Short trailing stop error for {symbol}: {e}")
 
-    def analyze_market(self, symbol, bars):
+    def analyze_market(self, symbol, bars, market_context: str = ""):
         if bars is None or bars.empty:
             return None
 
@@ -246,6 +248,7 @@ class TradingAgent:
             patterns=patterns,
             session_ctx=session_ctx,
             memory_context=memory_context,
+            market_context=market_context,
         )
 
         try:
@@ -281,8 +284,9 @@ class TradingAgent:
         session = session_ctx["session"]
         logger.info(f"📅 Session: {session} ({session_ctx['time_et']}) — stocks: {session_ctx['good_for_stocks']} | crypto: {session_ctx['good_for_crypto']}")
 
+        dynamic_watchlist = self.scanner.get_dynamic_watchlist()
         symbols_to_scan = []
-        for symbol in config.ALL_SYMBOLS:
+        for symbol in dynamic_watchlist:
             is_crypto = "/" in symbol
             if is_crypto and not is_crypto_good_hours():
                 continue
@@ -293,6 +297,9 @@ class TradingAgent:
         if not symbols_to_scan:
             logger.info("😴 No symbols to scan in current session — crypto off-hours and market closed")
             return
+
+        # Build market context once per cycle (news sentiment + top movers + calendar)
+        market_context = self.scanner.build_market_context()
 
         symbols_data = {}
         for symbol in symbols_to_scan:
@@ -356,7 +363,7 @@ class TradingAgent:
                 data = symbols_data[symbol]
                 bars = data["bars"]
 
-                decision = self.analyze_market(symbol, bars)
+                decision = self.analyze_market(symbol, bars, market_context=market_context)
                 if not decision:
                     continue
 

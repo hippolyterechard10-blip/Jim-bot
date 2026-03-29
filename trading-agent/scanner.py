@@ -1,0 +1,180 @@
+"""
+scanner.py — Dynamic Top Movers + News Sentiment
+"""
+import logging
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+import requests
+import alpaca_trade_api as tradeapi
+import config
+
+logger = logging.getLogger(__name__)
+
+ECONOMIC_EVENTS = [
+    {"date": "2026-04-02", "event": "Fed Meeting"},
+    {"date": "2026-04-03", "event": "Jobs Report (NFP)"},
+    {"date": "2026-04-14", "event": "CPI Inflation"},
+    {"date": "2026-04-29", "event": "Fed Meeting"},
+    {"date": "2026-05-08", "event": "Jobs Report"},
+    {"date": "2026-05-13", "event": "CPI Inflation"},
+    {"date": "2026-06-17", "event": "Fed Meeting"},
+]
+
+NEWS_FEEDS = [
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+    "https://feeds.reuters.com/reuters/businessNews",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+]
+
+BULLISH_KEYWORDS = ["rate cut", "fed pivot", "strong jobs", "beat expectations",
+    "record high", "bull market", "stimulus", "better than expected", "upgrade"]
+
+BEARISH_KEYWORDS = ["tariff", "trade war", "recession", "rate hike", "layoffs",
+    "miss expectations", "downgrade", "inflation surge", "trump tariff",
+    "china trade", "worse than expected", "hawkish"]
+
+HIGH_ALERT_KEYWORDS = ["trump", "federal reserve", "emergency rate",
+    "war", "sanctions", "default", "collapse", "crisis"]
+
+class MarketScanner:
+    def __init__(self):
+        self.api = tradeapi.REST(
+            config.ALPACA_API_KEY,
+            config.ALPACA_SECRET_KEY,
+            config.ALPACA_BASE_URL
+        )
+        self._news_cache = {"headlines": [], "sentiment": "neutral", "cached_at": None}
+        self._movers_cache = {"symbols": [], "cached_at": None}
+        logger.info("✅ MarketScanner initialized")
+
+    def get_top_movers(self, top_n=6):
+        now = datetime.now(timezone.utc)
+        if self._movers_cache["cached_at"]:
+            age = (now - self._movers_cache["cached_at"]).total_seconds()
+            if age < 900 and self._movers_cache["symbols"]:
+                return self._movers_cache["symbols"]
+        try:
+            assets = self.api.list_assets(status="active", asset_class="us_equity")
+            tradeable = [a for a in assets if a.tradable and a.fractionable]
+            symbols = [a.symbol for a in tradeable[:500]]
+            snapshots = self.api.get_snapshots(symbols)
+            movers = []
+            for symbol, snap in snapshots.items():
+                try:
+                    if not snap.daily_bar or not snap.prev_daily_bar:
+                        continue
+                    prev = snap.prev_daily_bar.close
+                    curr = snap.daily_bar.close
+                    if prev <= 0:
+                        continue
+                    change_pct = ((curr - prev) / prev) * 100
+                    volume = snap.daily_bar.volume
+                    if abs(change_pct) >= 3 and volume > 100000:
+                        movers.append({
+                            "symbol": symbol,
+                            "price": round(curr, 4),
+                            "change_pct": round(change_pct, 2),
+                            "volume": volume,
+                            "direction": "up" if change_pct > 0 else "down",
+                        })
+                except Exception:
+                    continue
+            movers.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+            top = movers[:top_n]
+            self._movers_cache = {"symbols": top, "cached_at": now}
+            mover_labels = [f"{m['symbol']} {m['change_pct']:+.1f}%" for m in top]
+            logger.info(f"🔥 Top movers: {mover_labels}")
+            return top
+        except Exception as e:
+            logger.error(f"get_top_movers error: {e}")
+            return []
+
+    def get_dynamic_watchlist(self):
+        from strategy import is_good_stock_window
+        watchlist = list(config.CRYPTO_SYMBOLS)
+        if is_good_stock_window():
+            movers = self.get_top_movers(top_n=6)
+            mover_symbols = [m["symbol"] for m in movers]
+            watchlist = mover_symbols + watchlist
+            logger.info(f"📋 Dynamic watchlist: {watchlist}")
+        return watchlist
+
+    def fetch_news_headlines(self):
+        now = datetime.now(timezone.utc)
+        if self._news_cache["cached_at"]:
+            age = (now - self._news_cache["cached_at"]).total_seconds()
+            if age < 600:
+                return self._news_cache["headlines"]
+        headlines = []
+        for feed_url in NEWS_FEEDS:
+            try:
+                resp = requests.get(feed_url, timeout=5)
+                root = ET.fromstring(resp.content)
+                for item in root.findall(".//item")[:5]:
+                    title = item.find("title")
+                    if title is not None and title.text:
+                        headlines.append(title.text.strip())
+            except Exception as e:
+                logger.warning(f"RSS error: {e}")
+        self._news_cache["headlines"] = headlines
+        self._news_cache["cached_at"] = now
+        return headlines
+
+    def analyze_sentiment(self):
+        headlines = self.fetch_news_headlines()
+        if not headlines:
+            return {"sentiment": "neutral", "score": 0, "alerts": []}
+        score = 0
+        alerts = []
+        text = " ".join(headlines).lower()
+        for kw in BULLISH_KEYWORDS:
+            if kw in text:
+                score += 1
+        for kw in BEARISH_KEYWORDS:
+            if kw in text:
+                score -= 1
+        for kw in HIGH_ALERT_KEYWORDS:
+            if kw in text:
+                alerts.append(f"⚡ HIGH ALERT: '{kw.upper()}' detected in headlines")
+        if score >= 3: sentiment = "very_bullish"
+        elif score >= 1: sentiment = "bullish"
+        elif score <= -3: sentiment = "very_bearish"
+        elif score <= -1: sentiment = "bearish"
+        else: sentiment = "neutral"
+        logger.info(f"📰 Sentiment: {sentiment} (score: {score})")
+        return {"sentiment": sentiment, "score": score, "alerts": alerts, "headlines": headlines[:3]}
+
+    def check_economic_calendar(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for event in ECONOMIC_EVENTS:
+            if event["date"] == today:
+                return {"event": event["event"], "timing": "today",
+                    "note": f"⚡ {event['event']} TODAY — high volatility expected"}
+        return {"event": None, "note": ""}
+
+    def build_market_context(self, symbol=None):
+        sentiment = self.analyze_sentiment()
+        calendar = self.check_economic_calendar()
+        movers = self.get_top_movers(top_n=6)
+        lines = ["=== MARKET INTELLIGENCE ==="]
+        emoji = {"very_bullish":"🚀","bullish":"🟢","neutral":"⚪","bearish":"🔴","very_bearish":"💀"}
+        lines.append(f"📰 NEWS: {emoji.get(sentiment['sentiment'],'⚪')} {sentiment['sentiment'].upper()} (score: {sentiment['score']})")
+        for alert in sentiment.get("alerts", []):
+            lines.append(f"  {alert}")
+        if calendar["event"]:
+            lines.append(f"📅 CALENDAR: {calendar['note']}")
+        if movers:
+            lines.append("🔥 TOP MOVERS:")
+            for m in movers[:4]:
+                lines.append(f"  {'↑' if m['direction']=='up' else '↓'} {m['symbol']}: {m['change_pct']:+.1f}%")
+        if symbol:
+            sm = next((m for m in movers if m["symbol"] == symbol), None)
+            if sm:
+                lines.append(f"⭐ {symbol} IS A TOP MOVER: {sm['change_pct']:+.1f}%")
+        if sentiment["sentiment"] in ["very_bullish", "bullish"]:
+            lines.append("💡 Conditions favorable for LONG positions")
+        elif sentiment["sentiment"] in ["very_bearish", "bearish"]:
+            lines.append("💡 Conditions favorable for SHORT positions — tighten stops on longs")
+        else:
+            lines.append("💡 Neutral market — stick to technical signals only")
+        return "\n".join(lines)
