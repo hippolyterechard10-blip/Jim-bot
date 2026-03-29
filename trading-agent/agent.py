@@ -140,7 +140,12 @@ class TradingAgent:
                         confidence=confidence,
                     )
 
-                min_confidence = 0.85 if session in ("mid_day", "after_hours", "closed", "weekend") else 0.7
+                if session == "weekend":
+                    min_confidence = 0.70
+                elif session in ("mid_day", "after_hours", "closed"):
+                    min_confidence = 0.85
+                else:
+                    min_confidence = 0.70
 
                 if action == "buy" and confidence >= min_confidence:
                     qty = self.risk.get_position_size(symbol, current_price)
