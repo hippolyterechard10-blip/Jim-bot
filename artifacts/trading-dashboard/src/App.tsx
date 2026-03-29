@@ -2,6 +2,11 @@ import { useEffect, useState } from "react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
+const CRYPTO_SYMBOLS = ["BTC/USD","ETH/USD","SOL/USD","AVAX/USD","DOGE/USD","XRP/USD","LINK/USD","SHIB/USD"];
+const STOCK_SYMBOLS  = ["AAPL","NVDA","TSLA","META","GOOGL","MSFT","AMD"];
+const ETF_SYMBOLS    = ["QQQ","SPY","ARKK"];
+const ALL_SYMBOLS    = [...CRYPTO_SYMBOLS, ...STOCK_SYMBOLS, ...ETF_SYMBOLS];
+
 interface Trade {
   symbol: string;
   action: string;
@@ -57,6 +62,47 @@ function ConfBar({ value }: { value: number }) {
         <div className={`${color} h-full rounded-full transition-all`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-xs text-slate-400 w-8 text-right">{pct}%</span>
+    </div>
+  );
+}
+
+function SymbolCard({ symbol, decision }: { symbol: string; decision?: Decision }) {
+  const isCrypto = symbol.includes("/");
+  const ticker = symbol.replace("/USD", "").replace("/", "");
+  const d = decision?.decision?.toUpperCase() ?? null;
+  const conf = decision ? Math.round(decision.confidence * 100) : null;
+
+  const signalColor = d === "BUY"  ? "border-emerald-600/60 bg-emerald-900/20"
+                    : d === "SELL" ? "border-red-600/60 bg-red-900/20"
+                    : decision     ? "border-slate-700 bg-slate-800/60"
+                    :                "border-slate-800 bg-slate-800/30 opacity-50";
+
+  const textColor  = d === "BUY"  ? "text-emerald-400"
+                    : d === "SELL" ? "text-red-400"
+                    : "text-slate-400";
+
+  return (
+    <div className={`rounded-lg border px-3 py-2.5 flex flex-col gap-1 transition-colors ${signalColor}`}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold text-white">{ticker}</span>
+        <span className="text-[9px] text-slate-600 uppercase">{isCrypto ? "crypto" : "stock"}</span>
+      </div>
+      {d ? (
+        <>
+          <span className={`text-[11px] font-semibold ${textColor}`}>{d}</span>
+          <div className="flex items-center gap-1">
+            <div className="flex-1 bg-slate-700 rounded-full h-1 overflow-hidden">
+              <div
+                className={`h-full rounded-full ${d === "BUY" ? "bg-emerald-500" : d === "SELL" ? "bg-red-500" : "bg-slate-500"}`}
+                style={{ width: `${conf}%` }}
+              />
+            </div>
+            <span className="text-[9px] text-slate-500">{conf}%</span>
+          </div>
+        </>
+      ) : (
+        <span className="text-[10px] text-slate-600">en attente…</span>
+      )}
     </div>
   );
 }
@@ -174,6 +220,30 @@ export default function App() {
         />
       </div>
 
+      {/* Watchlist grid */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Watchlist</h2>
+          <span className="text-xs text-slate-700">{ALL_SYMBOLS.length} actifs · weekend = crypto seulement</span>
+        </div>
+        <div className="mb-2">
+          <p className="text-[10px] text-slate-600 mb-2 uppercase tracking-wider">Crypto</p>
+          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
+            {CRYPTO_SYMBOLS.map(s => (
+              <SymbolCard key={s} symbol={s} decision={latestBySymbol[s]} />
+            ))}
+          </div>
+        </div>
+        <div className="mt-3">
+          <p className="text-[10px] text-slate-600 mb-2 uppercase tracking-wider">Actions &amp; ETF · marché fermé le weekend</p>
+          <div className="grid grid-cols-4 sm:grid-cols-10 gap-2">
+            {[...STOCK_SYMBOLS, ...ETF_SYMBOLS].map(s => (
+              <SymbolCard key={s} symbol={s} decision={latestBySymbol[s]} />
+            ))}
+          </div>
+        </div>
+      </div>
+
       {/* Two-column layout */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
 
@@ -281,7 +351,7 @@ export default function App() {
                     No trades executed yet.
                     <br />
                     <span className="text-xs mt-1 block">
-                      Agent needs ≥85% confidence (weekend) to place orders. Signals are being logged above.
+                      L'agent requiert ≥70% de confiance pour passer un ordre. Les signaux sont enregistrés ci-dessus.
                     </span>
                   </td>
                 </tr>
