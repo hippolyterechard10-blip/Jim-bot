@@ -317,19 +317,28 @@ class TradingAgent:
         #   score > 60 → bullish signal   → Claude evaluates for long
         #   score < 30 → bearish signal   → Claude evaluates for short
         #   30 ≤ score ≤ 60 → ambiguous   → skip (no API cost)
-        passed_long, passed_short, skipped = [], [], []
+        passed_long, passed_short, skipped, no_short_crypto = [], [], [], []
         for symbol in ranked:
             data = symbols_data[symbol]
+            is_crypto = "/" in symbol
             opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
             data["opportunity_score"] = opp_score
             if opp_score > SCORE_LONG_MIN:
                 passed_long.append(symbol)
             elif opp_score < SCORE_SHORT_MAX:
-                passed_short.append(symbol)
+                if is_crypto:
+                    # Alpaca spot does not support crypto shorts — log and skip
+                    no_short_crypto.append(f"{symbol}({opp_score})")
+                else:
+                    passed_short.append(symbol)
             else:
                 skipped.append(f"{symbol}({opp_score})")
 
         passed = passed_long + passed_short
+        if no_short_crypto:
+            logger.info(
+                f"📉 Bearish crypto (no short on Alpaca spot): {', '.join(no_short_crypto)}"
+            )
         if skipped:
             logger.info(
                 f"⚡ Pre-filter: {len(skipped)} skipped (30≤score≤60) — {', '.join(skipped)}"
@@ -337,7 +346,7 @@ class TradingAgent:
         logger.info(
             f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols — "
             f"long candidates: {passed_long or 'none'} | "
-            f"short candidates: {passed_short or 'none'}"
+            f"short candidates (stocks/ETF only): {passed_short or 'none'}"
         )
 
         claude_confidences: dict = {}  # populated during Claude pass, consumed in short pass
