@@ -14,7 +14,9 @@ from strategy import (
     is_crypto_good_hours,
 )
 
-OPPORTUNITY_THRESHOLD = 60  # Skip Claude API call if score below this
+SCORE_LONG_MIN  = 60   # Score above this → bullish signal → call Claude (long candidate)
+SCORE_SHORT_MAX = 30   # Score below this → bearish signal → call Claude (short candidate)
+# Scores between 30–60 = ambiguous, no clear signal → skip Claude entirely
 
 logger = logging.getLogger(__name__)
 
@@ -311,20 +313,32 @@ class TradingAgent:
         ranked = rank_symbols({s: d for s, d in symbols_data.items()})
         logger.info(f"🔍 Scanning {len(ranked)} symbols — top: {ranked[:3]}")
 
-        # Pre-filter: compute opportunity score for each symbol
-        passed, filtered = [], []
+        # Pre-filter: two-band score gate
+        #   score > 60 → bullish signal   → Claude evaluates for long
+        #   score < 30 → bearish signal   → Claude evaluates for short
+        #   30 ≤ score ≤ 60 → ambiguous   → skip (no API cost)
+        passed_long, passed_short, skipped = [], [], []
         for symbol in ranked:
             data = symbols_data[symbol]
             opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
             data["opportunity_score"] = opp_score
-            if opp_score >= OPPORTUNITY_THRESHOLD:
-                passed.append(symbol)
+            if opp_score > SCORE_LONG_MIN:
+                passed_long.append(symbol)
+            elif opp_score < SCORE_SHORT_MAX:
+                passed_short.append(symbol)
             else:
-                filtered.append(f"{symbol}({opp_score})")
+                skipped.append(f"{symbol}({opp_score})")
 
-        if filtered:
-            logger.info(f"⚡ Pre-filter: {len(filtered)} skipped (score<{OPPORTUNITY_THRESHOLD}) — {', '.join(filtered)}")
-        logger.info(f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols: {passed or 'none'}")
+        passed = passed_long + passed_short
+        if skipped:
+            logger.info(
+                f"⚡ Pre-filter: {len(skipped)} skipped (30≤score≤60) — {', '.join(skipped)}"
+            )
+        logger.info(
+            f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols — "
+            f"long candidates: {passed_long or 'none'} | "
+            f"short candidates: {passed_short or 'none'}"
+        )
 
         claude_confidences: dict = {}  # populated during Claude pass, consumed in short pass
 

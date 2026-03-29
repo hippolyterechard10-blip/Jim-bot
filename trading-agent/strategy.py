@@ -270,73 +270,86 @@ def detect_patterns(indicators: dict, session: str) -> dict:
 
 def compute_opportunity_score(indicators: dict, patterns: dict) -> int:
     """
-    Score 0-100 mesurant l'intérêt d'un actif pour une analyse Claude.
-    Basé uniquement sur les indicateurs techniques — aucun LLM impliqué.
+    Score DIRECTIONNEL 0-100 :
+      > 60  → signal haussier clair    → Claude appelé (candidat long)
+      < 30  → signal baissier clair    → Claude appelé (candidat short)
+      30-60 → ambigu / neutre          → Claude skippé (pas de coût API)
 
-    Composantes :
-      - Déviation RSI par rapport à 50 (0-25 pts)
-      - Surge de volume           (0-25 pts)
-      - Momentum |5-bar|          (0-20 pts)
-      - Extrême Bollinger %B      (0-15 pts)
-      - Pattern détecté           (0-10 pts)
-      - Près d'un support/résistance (0-5 pts)
-
-    Seuil recommandé : skip Claude si score < 60.
+    Part d'un score neutre de 50, puis ajoute/retire des points selon la
+    direction des indicateurs techniques. Le volume amplifie la direction.
     """
-    score = 0
+    rsi          = indicators.get("rsi", 50)
+    macd_bullish = indicators.get("macd_bullish", True)
+    above_sma20  = indicators.get("above_sma20", True)
+    momentum_5   = indicators.get("momentum_5", 0.0)
+    vol_ratio    = indicators.get("volume_ratio", 1.0)
+    bb_pct       = indicators.get("bb_pct", 50.0)
+    near_sup     = indicators.get("near_support", False)
+    near_res     = indicators.get("near_resistance", False)
+    pattern_act  = patterns.get("suggested_action", "hold")
+    pattern_sc   = patterns.get("score", 0)
 
-    rsi       = indicators.get("rsi", 50)
-    vol_ratio = indicators.get("volume_ratio", 1.0)
-    mom5      = abs(indicators.get("momentum_5", 0.0))
-    bb_pct    = indicators.get("bb_pct", 50.0)
-    near_sup  = indicators.get("near_support", False)
-    near_res  = indicators.get("near_resistance", False)
+    score = 50  # point de départ neutre
 
-    # ── Déviation RSI (0-25 pts) ───────────────────────────────
-    # RSI=50 → 0 pt | RSI=30 ou 70 → 10 pts | RSI=20 ou 80 → 15 pts | RSI<15 ou >85 → 25 pts
-    rsi_dev = abs(rsi - 50)          # 0 .. 50
-    score += int(rsi_dev * 0.5)      # max 25 pts
+    # ── RSI : oversold = haussier, overbought = baissier (±18 pts) ────────
+    if rsi < 25:
+        score += 18
+    elif rsi < 30:
+        score += 12
+    elif rsi < 40:
+        score += 6
+    elif rsi > 75:
+        score -= 18
+    elif rsi > 70:
+        score -= 12
+    elif rsi > 60:
+        score -= 6
 
-    # ── Surge de volume (0-25 pts) ────────────────────────────
-    if vol_ratio >= 4.0:
-        score += 25
-    elif vol_ratio >= 3.0:
-        score += 20
-    elif vol_ratio >= 2.0:
-        score += 15
+    # ── MACD : bullish = haussier, bearish = baissier (±8 pts) ───────────
+    score += 8 if macd_bullish else -8
+
+    # ── SMA20 : au-dessus = haussier, en-dessous = baissier (±6 pts) ─────
+    score += 6 if above_sma20 else -6
+
+    # ── Momentum 5 bars : positif = haussier (max ±10 pts) ───────────────
+    mom_pts = max(-10, min(10, int(momentum_5 * 3)))
+    score += mom_pts
+
+    # ── Volume : amplifie la direction courante (max ±8 pts) ─────────────
+    if vol_ratio >= 2.0:
+        vol_amp = 8
     elif vol_ratio >= 1.5:
+        vol_amp = 4
+    else:
+        vol_amp = 0
+    if score > 50:
+        score += vol_amp
+    elif score < 50:
+        score -= vol_amp
+
+    # ── Bollinger %B : extrêmes confirment la direction (±8 pts) ─────────
+    if bb_pct < 15:
         score += 8
-    elif vol_ratio >= 1.2:
-        score += 4
-
-    # ── Momentum 5 bars (0-20 pts) ────────────────────────────
-    if mom5 >= 4.0:
-        score += 20
-    elif mom5 >= 2.5:
-        score += 15
-    elif mom5 >= 1.5:
-        score += 10
-    elif mom5 >= 0.8:
+    elif bb_pct < 25:
         score += 5
+    elif bb_pct > 85:
+        score -= 8
+    elif bb_pct > 75:
+        score -= 5
 
-    # ── Extrême Bollinger %B (0-15 pts) ───────────────────────
-    bb_dev = abs(bb_pct - 50)        # 0 .. 50
-    if bb_dev >= 40:                 # %B < 10 ou > 90
-        score += 15
-    elif bb_dev >= 30:               # %B < 20 ou > 80
-        score += 10
-    elif bb_dev >= 20:               # %B < 30 ou > 70
-        score += 5
+    # ── Support / Résistance : contexte directionnel (±3 pts) ────────────
+    if near_sup:
+        score += 3
+    if near_res:
+        score -= 3
 
-    # ── Pattern détecté (0-10 pts) ────────────────────────────
-    pattern_score = patterns.get("score", 0)
-    score += min(10, pattern_score // 4)
+    # ── Pattern détecté (±8 pts) ─────────────────────────────────────────
+    if pattern_act == "buy" and pattern_sc > 0:
+        score += min(8, pattern_sc // 5)
+    elif pattern_act == "sell" and pattern_sc > 0:
+        score -= min(8, pattern_sc // 5)
 
-    # ── Près support ou résistance (0-5 pts) ──────────────────
-    if near_sup or near_res:
-        score += 5
-
-    return min(100, max(0, score))
+    return max(0, min(100, score))
 
 
 def _suggest_action(patterns: list, score: int) -> str:
