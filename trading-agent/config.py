@@ -15,9 +15,18 @@ GLOBAL_STOP_LOSS_PCT = 0.20
 TRADE_STOP_LOSS_PCT = 0.05
 MAX_POSITIONS = 5
 
-# Trailing stop distances (fraction below highest price reached)
-TRAILING_STOP_CRYPTO = 0.03   # 3% for crypto
-TRAILING_STOP_STOCK  = 0.05   # 5% for stocks/ETFs
+# Trailing stop distances — LONG positions (fraction below highest price)
+TRAILING_STOP_CRYPTO = 0.03   # 3% for crypto longs
+TRAILING_STOP_STOCK  = 0.05   # 5% for stocks/ETFs longs
+
+# Trailing stop distances — SHORT positions (fraction above lowest price)
+TRAILING_STOP_SHORT_CRYPTO = 0.03  # 3% for crypto shorts (paper only)
+TRAILING_STOP_SHORT_STOCK  = 0.06  # 6% for stocks/ETF shorts
+
+# Short selling rules
+MAX_SHORT_SIZE_PCT   = 0.15   # Max 15% of portfolio per short position
+SHORT_ENTRY_RSI_MIN  = 70     # RSI must be above this to short
+SHORT_ENTRY_CONF_MAX = 0.30   # Claude confidence must be below this
 
 # Universe
 CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD", "SHIB/USD", "MATIC/USD"]

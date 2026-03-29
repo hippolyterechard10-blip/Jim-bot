@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 import anthropic
 import config
 from strategy import (
@@ -23,9 +24,10 @@ class TradingAgent:
         self.risk = risk_manager
         self.memory = memory
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-        # Tracks highest price seen per open position (symbol → float)
-        # Initialised from current price on first sight; persists in-memory across cycles
+        # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
+        # Tracks lowest price seen per SHORT position (for trailing stop)
+        self._low_water: dict = {}
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
         """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
@@ -95,6 +97,80 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Trailing stop error for {symbol}: {e}")
 
+    def _manage_short_trailing_stops(self):
+        """Check every SHORT position against its trailing stop and cover if breached."""
+        try:
+            positions = self.broker.get_positions()
+        except Exception as e:
+            logger.error(f"_manage_short_trailing_stops: could not fetch positions: {e}")
+            return
+
+        for pos in positions:
+            # Only process short positions (qty < 0 or side == "short")
+            try:
+                side = getattr(pos, "side", "long")
+                qty_val = float(pos.qty)
+                if side != "short" and qty_val >= 0:
+                    continue
+            except Exception:
+                continue
+
+            symbol = pos.symbol
+            try:
+                current_price = float(pos.current_price)
+                is_crypto_pos = self._is_crypto(symbol)
+                trail_pct = (config.TRAILING_STOP_SHORT_CRYPTO
+                             if is_crypto_pos
+                             else config.TRAILING_STOP_SHORT_STOCK)
+
+                # Initialise low-water mark on first sight after (re)start
+                if symbol not in self._low_water:
+                    self._low_water[symbol] = current_price
+                    logger.info(f"📉 Short trailing stop init: {symbol} low={current_price:.6g} trail={trail_pct*100:.0f}%")
+                    continue
+
+                new_low = min(self._low_water[symbol], current_price)
+                self._low_water[symbol] = new_low
+                stop_level = new_low * (1 + trail_pct)
+
+                logger.debug(
+                    f"  SHORT {symbol}: price={current_price:.6g} "
+                    f"low={new_low:.6g} stop={stop_level:.6g}"
+                )
+
+                if current_price >= stop_level:
+                    logger.info(
+                        f"🟢 SHORT TRAILING STOP: {symbol} "
+                        f"price={current_price:.6g} >= stop={stop_level:.6g} "
+                        f"(low={new_low:.6g}, +{trail_pct*100:.0f}%) — covering short"
+                    )
+                    cover_qty = abs(qty_val)
+                    covered = self.broker.place_order(symbol, cover_qty, "buy")
+                    if covered:
+                        del self._low_water[symbol]
+                        if self.memory:
+                            try:
+                                open_trades = self.memory.get_recent_trades(limit=50)
+                                match = next(
+                                    (t for t in open_trades
+                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
+                                     and t.get("status") == "open"
+                                     and t.get("side") == "sell"),
+                                    None
+                                )
+                                if match:
+                                    pnl = (float(match["entry_price"]) - current_price) * cover_qty
+                                    self.memory.log_trade_close(
+                                        match["trade_id"],
+                                        exit_price=current_price,
+                                        close_reason="short_trailing_stop",
+                                        pnl=pnl,
+                                    )
+                            except Exception as me:
+                                logger.warning(f"Memory update after short trailing stop: {me}")
+            except Exception as e:
+                logger.error(f"Short trailing stop error for {symbol}: {e}")
+
     def analyze_market(self, symbol, bars):
         if bars is None or bars.empty:
             return None
@@ -146,8 +222,9 @@ class TradingAgent:
             return None
 
     def run_cycle(self):
-        # First: manage trailing stops on all open positions
+        # First: manage trailing stops on all open positions (long and short)
         self._manage_trailing_stops()
+        self._manage_short_trailing_stops()
 
         if not self.risk.can_trade():
             logger.warning("⚠️ Trading paused by risk manager")
@@ -204,6 +281,8 @@ class TradingAgent:
             logger.info(f"⚡ Pre-filter: {len(filtered)} skipped (score<{OPPORTUNITY_THRESHOLD}) — {', '.join(filtered)}")
         logger.info(f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols: {passed or 'none'}")
 
+        claude_confidences: dict = {}  # populated during Claude pass, consumed in short pass
+
         for symbol in passed:
             try:
                 data = symbols_data[symbol]
@@ -232,6 +311,9 @@ class TradingAgent:
                         confidence=confidence,
                     )
 
+                # Store for short selling pass
+                claude_confidences[symbol] = confidence
+
                 if session == "weekend":
                     min_confidence = 0.70
                 elif session in ("mid_day", "after_hours", "closed"):
@@ -249,3 +331,80 @@ class TradingAgent:
 
             except Exception as e:
                 logger.error(f"Error on {symbol}: {e}")
+
+        # ── SHORT SELLING PASS ─────────────────────────────────────────────────
+        # Separate pass over ALL scanned symbols (incl. pre-filtered ones).
+        # Short only stocks/ETFs — Alpaca spot does NOT support crypto shorts.
+        # Entry conditions: RSI > 70 AND MACD bearish AND price below SMA20
+        #   + if Claude was called for this symbol: confidence < SHORT_ENTRY_CONF_MAX
+        try:
+            open_positions = {
+                p.symbol.replace("/", ""): p
+                for p in self.broker.get_positions()
+            }
+        except Exception as e:
+            logger.error(f"Short entry: could not fetch positions: {e}")
+            open_positions = {}
+
+        short_candidates = 0
+        for symbol, data in symbols_data.items():
+            is_crypto = "/" in symbol
+            if is_crypto:
+                continue  # Alpaca spot = no crypto shorts
+
+            ind = data["indicators"]
+            rsi          = ind.get("rsi", 50)
+            macd_bullish = ind.get("macd_bullish", True)
+            above_sma20  = ind.get("above_sma20", True)
+            current_price = ind.get("current_price", 0)
+
+            # Technical gate
+            if not (rsi > config.SHORT_ENTRY_RSI_MIN
+                    and not macd_bullish
+                    and not above_sma20):
+                continue
+
+            # Confidence gate: if Claude was called, require conf < threshold
+            if symbol in passed:
+                conf = claude_confidences.get(symbol, 1.0)
+                if conf >= config.SHORT_ENTRY_CONF_MAX:
+                    logger.debug(f"SHORT skip {symbol}: Claude conf={conf:.0%} >= {config.SHORT_ENTRY_CONF_MAX:.0%}")
+                    continue
+
+            # No existing position in this symbol
+            sym_key = symbol.replace("/", "")
+            if sym_key in open_positions:
+                pos_side = getattr(open_positions[sym_key], "side", "long")
+                logger.debug(f"SHORT skip {symbol}: already in {pos_side} position")
+                continue
+
+            if current_price <= 0:
+                continue
+
+            short_candidates += 1
+            qty = self.risk.get_short_position_size(symbol, current_price)
+            sl  = self.risk.calculate_stop_loss(current_price, "sell")
+            logger.info(
+                f"🔴 SHORT ENTRY: {symbol} | RSI={rsi:.1f} | MACD=bearish | "
+                f"price={current_price:.4g} < SMA20={ind.get('sma20', 0):.4g} | "
+                f"qty={qty} | sl={sl:.4g}"
+            )
+            order = self.broker.place_order(symbol, qty, "sell", sl)
+            if order and self.memory:
+                try:
+                    trade_id = str(uuid.uuid4())
+                    alpaca_id = getattr(order, "id", None)
+                    self.memory.log_trade_open(
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        side="sell",
+                        qty=qty,
+                        entry_price=current_price,
+                        stop_loss=sl,
+                        alpaca_order_id=alpaca_id,
+                    )
+                except Exception as me:
+                    logger.warning(f"Memory log short entry: {me}")
+
+        if short_candidates == 0:
+            logger.debug("SHORT PASS: no candidates met entry conditions")
