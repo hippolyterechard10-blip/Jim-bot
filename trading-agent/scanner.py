@@ -21,10 +21,14 @@ ECONOMIC_EVENTS = [
 ]
 
 NEWS_FEEDS = [
-    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
-    "https://feeds.reuters.com/reuters/businessNews",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+    "https://news.google.com/rss/search?q=stock+market+economy+fed&hl=en-US&gl=US&ceid=US:en",
 ]
+
+RSS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; TradingAgent/1.0; +https://alpaca.markets)"
+}
 
 BULLISH_KEYWORDS = ["rate cut", "fed pivot", "strong jobs", "beat expectations",
     "record high", "bull market", "stimulus", "better than expected", "upgrade"]
@@ -108,14 +112,25 @@ class MarketScanner:
         headlines = []
         for feed_url in NEWS_FEEDS:
             try:
-                resp = requests.get(feed_url, timeout=5)
+                resp = requests.get(feed_url, timeout=8, headers=RSS_HEADERS)
+                if resp.status_code != 200:
+                    logger.warning(f"RSS {resp.status_code}: {feed_url[:60]}")
+                    continue
                 root = ET.fromstring(resp.content)
-                for item in root.findall(".//item")[:5]:
+                fetched = 0
+                for item in root.findall(".//item"):
                     title = item.find("title")
                     if title is not None and title.text:
-                        headlines.append(title.text.strip())
+                        text = title.text.strip()
+                        # Google News wraps titles in CDATA — clean angle-bracket artefacts
+                        if text and "<" not in text:
+                            headlines.append(text)
+                            fetched += 1
+                    if fetched >= 5:
+                        break
+                logger.debug(f"RSS OK ({fetched} headlines): {feed_url[:60]}")
             except Exception as e:
-                logger.warning(f"RSS error: {e}")
+                logger.warning(f"RSS error ({feed_url[:40]}): {e}")
         self._news_cache["headlines"] = headlines
         self._news_cache["cached_at"] = now
         return headlines
