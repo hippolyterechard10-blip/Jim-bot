@@ -13,8 +13,11 @@ MAX_LEVERAGE = 3
 MAX_POSITION_PCT = 0.30
 GLOBAL_STOP_LOSS_PCT = 0.20
 TRADE_STOP_LOSS_PCT = 0.05
-TRADE_TAKE_PROFIT_PCT = 0.10
 MAX_POSITIONS = 5
+
+# Trailing stop distances (fraction below highest price reached)
+TRAILING_STOP_CRYPTO = 0.03   # 3% for crypto
+TRAILING_STOP_STOCK  = 0.05   # 5% for stocks/ETFs
 
 # Universe
 CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD", "SHIB/USD", "MATIC/USD"]

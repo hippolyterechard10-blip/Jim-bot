@@ -20,6 +20,77 @@ class TradingAgent:
         self.risk = risk_manager
         self.memory = memory
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        # Tracks highest price seen per open position (symbol → float)
+        # Initialised from current price on first sight; persists in-memory across cycles
+        self._high_water: dict = {}
+
+    def _is_crypto(self, alpaca_symbol: str) -> bool:
+        """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
+        normalized = alpaca_symbol.replace("/", "")
+        return any(normalized == s.replace("/", "") for s in config.CRYPTO_SYMBOLS)
+
+    def _manage_trailing_stops(self):
+        """Check every open position against its trailing stop and close if breached."""
+        try:
+            positions = self.broker.get_positions()
+        except Exception as e:
+            logger.error(f"_manage_trailing_stops: could not fetch positions: {e}")
+            return
+
+        for pos in positions:
+            symbol = pos.symbol
+            try:
+                current_price = float(pos.current_price)
+                trail_pct = (config.TRAILING_STOP_CRYPTO
+                             if self._is_crypto(symbol)
+                             else config.TRAILING_STOP_STOCK)
+
+                # Initialise high-water mark on first sight after (re)start
+                if symbol not in self._high_water:
+                    self._high_water[symbol] = current_price
+                    logger.info(f"📈 Trailing stop init: {symbol} high={current_price:.6g} trail={trail_pct*100:.0f}%")
+                    continue
+
+                new_high = max(self._high_water[symbol], current_price)
+                self._high_water[symbol] = new_high
+                stop_level = new_high * (1 - trail_pct)
+
+                logger.debug(
+                    f"  {symbol}: price={current_price:.6g} "
+                    f"high={new_high:.6g} stop={stop_level:.6g}"
+                )
+
+                if current_price <= stop_level:
+                    logger.info(
+                        f"🔴 TRAILING STOP: {symbol} "
+                        f"price={current_price:.6g} < stop={stop_level:.6g} "
+                        f"(high={new_high:.6g}, -{trail_pct*100:.0f}%)"
+                    )
+                    closed = self.broker.close_position(symbol)
+                    if closed:
+                        del self._high_water[symbol]
+                        # Try to log the close in memory
+                        if self.memory:
+                            try:
+                                open_trades = self.memory.get_recent_trades(limit=50)
+                                match = next(
+                                    (t for t in open_trades
+                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
+                                     and t.get("status") == "open"),
+                                    None
+                                )
+                                if match:
+                                    pnl = (current_price - float(match["entry_price"])) * float(match["qty"])
+                                    self.memory.log_trade_close(
+                                        match["trade_id"],
+                                        exit_price=current_price,
+                                        close_reason="trailing_stop",
+                                        pnl=pnl,
+                                    )
+                            except Exception as me:
+                                logger.warning(f"Memory update after trailing stop: {me}")
+            except Exception as e:
+                logger.error(f"Trailing stop error for {symbol}: {e}")
 
     def analyze_market(self, symbol, bars):
         if bars is None or bars.empty:
@@ -72,6 +143,9 @@ class TradingAgent:
             return None
 
     def run_cycle(self):
+        # First: manage trailing stops on all open positions
+        self._manage_trailing_stops()
+
         if not self.risk.can_trade():
             logger.warning("⚠️ Trading paused by risk manager")
             return
@@ -150,8 +224,7 @@ class TradingAgent:
                 if action == "buy" and confidence >= min_confidence:
                     qty = self.risk.get_position_size(symbol, current_price)
                     sl = self.risk.calculate_stop_loss(current_price, "buy")
-                    tp = self.risk.calculate_take_profit(current_price, "buy")
-                    self.broker.place_order(symbol, qty, "buy", sl, tp)
+                    self.broker.place_order(symbol, qty, "buy", sl)
 
                 elif action == "sell" and confidence >= min_confidence:
                     self.broker.close_position(symbol)

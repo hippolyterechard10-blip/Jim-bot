@@ -34,12 +34,6 @@ class RiskManager:
         else:
             return round(entry_price * (1 + config.TRADE_STOP_LOSS_PCT), 4)
 
-    def calculate_take_profit(self, entry_price, side):
-        if side == "buy":
-            return round(entry_price * (1 + config.TRADE_TAKE_PROFIT_PCT), 4)
-        else:
-            return round(entry_price * (1 - config.TRADE_TAKE_PROFIT_PCT), 4)
-
     def can_trade(self):
         if self.check_global_stop_loss():
             return False
