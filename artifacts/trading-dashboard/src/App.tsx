@@ -3,6 +3,18 @@ import { useEffect, useState } from "react";
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 const CRYPTO_SYMBOLS = ["BTC/USD","ETH/USD","SOL/USD","AVAX/USD","DOGE/USD","XRP/USD","LINK/USD","SHIB/USD"];
+
+const ALERT_KEYWORDS: [string, string][] = [
+  ["trump", "TRUMP"],
+  ["federal reserve", "FED"],
+  ["emergency rate", "RATE"],
+  ["war", "WAR"],
+  ["sanctions", "SNCT"],
+  ["default", "DFLT"],
+  ["collapse", "CLPS"],
+  ["crisis", "CRSS"],
+];
+
 const STOCK_SYMBOLS  = ["AAPL","NVDA","TSLA","META","GOOGL","MSFT","AMD"];
 const ETF_SYMBOLS    = ["QQQ","SPY","ARKK"];
 const ALL_SYMBOLS    = [...CRYPTO_SYMBOLS, ...STOCK_SYMBOLS, ...ETF_SYMBOLS];
@@ -336,60 +348,58 @@ export default function App() {
           </div>
           <div className="p-4">
             {!sentiment ? (
-              <div className="text-xs text-slate-600 text-center py-4">Loading…</div>
+              <div className="text-[10px] text-slate-600 text-center py-4">Loading…</div>
             ) : (() => {
               const s = sentiment.sentiment;
               const scoreColor = s.includes("bullish") ? "text-emerald-400"
                                : s.includes("bearish") ? "text-red-400"
+                               : "text-slate-500";
+              const badgeColor = s.includes("bullish") ? "text-emerald-400"
+                               : s.includes("bearish") ? "text-red-400"
                                : "text-slate-400";
-              const badgeBg = s.includes("bullish") ? "bg-emerald-900/50 border-emerald-700 text-emerald-300"
-                            : s.includes("bearish") ? "bg-red-900/50 border-red-700 text-red-300"
-                            : "bg-slate-700/50 border-slate-600 text-slate-400";
               const emoji = s === "very_bullish" ? "🚀" : s === "bullish" ? "🟢"
                           : s === "very_bearish" ? "💀" : s === "bearish" ? "🔴" : "⚪";
-              const alerts = (sentiment.alerts ?? []);
               const headlines = (sentiment.headlines ?? []).slice(0, 3);
+
               return (
-                <div className="space-y-3">
-                  {/* Sentiment badge + score */}
-                  <div className="flex items-center justify-between">
-                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${badgeBg}`}>
-                      {emoji} {s.replace("_", " ").toUpperCase()}
+                <div className="space-y-2.5">
+                  {/* Badge + score — same line, compact */}
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] font-bold uppercase tracking-wide ${badgeColor}`}>
+                      {emoji} {s.replace(/_/g, " ")}
                     </span>
-                    <span className={`text-sm font-bold ${scoreColor}`}>
-                      {sentiment.score > 0 ? "+" : ""}{sentiment.score}
+                    <span className="text-slate-700 text-[10px]">·</span>
+                    <span className={`text-[10px] font-semibold ${scoreColor}`}>
+                      score {sentiment.score > 0 ? "+" : ""}{sentiment.score}
                     </span>
                   </div>
 
-                  {/* HIGH ALERT pills — compact, inline */}
-                  {alerts.length > 0 && (
-                    <div className="flex flex-wrap gap-1">
-                      {alerts.map((a, i) => {
-                        const keyword = a.replace("⚡ HIGH ALERT: '", "").replace("' detected in headlines", "");
-                        return (
-                          <span key={i} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-950/60 text-amber-500 border border-amber-800/50">
-                            ⚡ {keyword}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Headlines — one per line, truncated */}
-                  <div className="space-y-1 mt-0.5">
+                  {/* Headlines with per-headline alert tags */}
+                  <div className="space-y-1.5">
                     {headlines.length === 0 ? (
                       <div className="text-[10px] text-slate-600">No market headlines available</div>
-                    ) : headlines.map((h, i) => (
-                      <div key={i} className="flex items-start gap-1.5 text-[10px] text-slate-400">
-                        <span className="text-slate-600 flex-shrink-0 mt-px">›</span>
-                        <span className="truncate">{h}</span>
-                      </div>
-                    ))}
+                    ) : headlines.map((h, i) => {
+                      const hl = h.toLowerCase();
+                      const tags = ALERT_KEYWORDS
+                        .filter(([kw]) => hl.includes(kw))
+                        .map(([, label]) => label);
+                      return (
+                        <div key={i} className="flex items-baseline gap-1 min-w-0">
+                          <span className="text-slate-600 flex-shrink-0 text-[10px]">•</span>
+                          {tags.map((t) => (
+                            <span key={t} className="text-[8px] font-bold text-amber-400 flex-shrink-0 leading-none">
+                              [{t}]
+                            </span>
+                          ))}
+                          <span className="text-[10px] text-slate-400 truncate min-w-0 leading-snug">{h}</span>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {/* Timestamp */}
                   {sentiment.ts && (
-                    <div className="text-[9px] text-slate-600 pt-1 border-t border-slate-700/50">
+                    <div className="text-[9px] text-slate-600 pt-1.5 border-t border-slate-700/40">
                       Updated {sentiment.ts}
                     </div>
                   )}
