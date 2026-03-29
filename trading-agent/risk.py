@@ -3,28 +3,70 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Score tiers: (min_score_inclusive, position_pct, trailing_stop_pct)
+# Evaluated top-down; first match wins.
+SCORE_TIERS = [
+    (90, 0.40, 0.02),
+    (80, 0.30, 0.03),
+    (70, 0.20, 0.04),
+    (60, 0.15, 0.05),
+]
+
+MAX_POSITION_PCT    = 0.40   # absolute hard cap — no single long > 40%
+SHORT_POSITION_PCT  = 0.15   # all short entries fixed at 15%
+LOW_VOLUME_CAP_PCT  = 0.10   # daily volume < LOW_VOLUME_THRESHOLD → cap at 10%
+LOW_VOLUME_THRESHOLD = 100_000
+
+
 class RiskManager:
     def __init__(self, broker):
         self.broker = broker
 
-    LOW_VOLUME_THRESHOLD = 100_000   # daily volume below this → reduced cap
-    LOW_VOLUME_MAX_PCT   = 0.10      # 10% max position for low-volume stocks
+    def get_position_size_by_score(self, symbol, price, opp_score, volume=None):
+        """
+        Returns (qty, pct, trail_pct) based on opportunity score tier.
 
-    def get_position_size(self, symbol, price, volume=None):
+        Tier mapping:
+          score 90-100 → 40% position, 2% trailing stop
+          score 80-89  → 30% position, 3% trailing stop
+          score 70-79  → 20% position, 4% trailing stop
+          score 60-69  → 15% position, 5% trailing stop
+
+        Low-volume override: if daily volume < 100,000, cap at 10% regardless.
+        Hard cap: never exceed 40%.
+        """
         portfolio = self.broker.get_portfolio_value()
-        is_low_volume = volume is not None and volume < self.LOW_VOLUME_THRESHOLD
-        pct = self.LOW_VOLUME_MAX_PCT if is_low_volume else config.MAX_POSITION_PCT
+
+        # Default to lowest tier (60-69)
+        pct, trail_pct = 0.15, 0.05
+        for min_score, tier_pct, tier_trail in SCORE_TIERS:
+            if opp_score >= min_score:
+                pct, trail_pct = tier_pct, tier_trail
+                break
+
+        # Low-volume override
+        is_low_volume = volume is not None and volume < LOW_VOLUME_THRESHOLD
         if is_low_volume:
-            logger.info(f"⚠️ {symbol} low volume ({volume:,}) — position capped at {pct*100:.0f}%")
-        max_amount = portfolio * pct
-        qty = max_amount / price
-        return round(qty, 4)
+            original_pct = pct
+            pct = min(pct, LOW_VOLUME_CAP_PCT)
+            logger.info(
+                f"⚠️ {symbol} low volume ({volume:,}) — position capped at "
+                f"{pct*100:.0f}% (was {original_pct*100:.0f}% for score {opp_score})"
+            )
+
+        # Hard cap
+        pct = min(pct, MAX_POSITION_PCT)
+
+        amount = portfolio * pct
+        qty = amount / price
+        return round(qty, 4), pct, trail_pct
 
     def get_short_position_size(self, symbol, price):
+        """All short positions are fixed at 15% of portfolio."""
         portfolio = self.broker.get_portfolio_value()
-        max_amount = portfolio * config.MAX_SHORT_SIZE_PCT
-        qty = max_amount / price
-        return round(qty, 4)
+        amount = portfolio * SHORT_POSITION_PCT
+        qty = amount / price
+        return round(qty, 4), SHORT_POSITION_PCT
 
     def check_global_stop_loss(self):
         portfolio = self.broker.get_portfolio_value()

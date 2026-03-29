@@ -19,6 +19,8 @@ SCORE_LONG_MIN  = 60   # Score above this → bullish signal → call Claude (lo
 SCORE_SHORT_MAX = 30   # Score below this → bearish signal → call Claude (short candidate)
 # Scores between 30–60 = ambiguous, no clear signal → skip Claude entirely
 
+SHORT_TRAIL_PCT = 0.03   # Short positions: trailing stop 3% above lowest price reached
+
 logger = logging.getLogger(__name__)
 
 class TradingAgent:
@@ -34,6 +36,8 @@ class TradingAgent:
         self._low_water: dict = {}
         # Symbols for which partial profit has already been taken this session
         self._partial_taken: set = set()
+        # Score-based trailing stop % per symbol (set at entry, read during management)
+        self._trail_pcts: dict = {}
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
         """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
@@ -41,7 +45,7 @@ class TradingAgent:
         return any(normalized == s.replace("/", "") for s in config.CRYPTO_SYMBOLS)
 
     def _manage_trailing_stops(self):
-        """Check every open position against its trailing stop and close if breached."""
+        """Check every open LONG position against its score-based trailing stop."""
         try:
             positions = self.broker.get_positions()
         except Exception as e:
@@ -49,7 +53,6 @@ class TradingAgent:
             return
 
         for pos in positions:
-            # Only process LONG positions here
             try:
                 if getattr(pos, "side", "long") == "short" or float(pos.qty) < 0:
                     continue
@@ -60,29 +63,32 @@ class TradingAgent:
             try:
                 current_price = float(pos.current_price)
                 current_qty   = abs(float(pos.qty))
-                trail_pct = (config.TRAILING_STOP_CRYPTO
-                             if self._is_crypto(symbol)
-                             else config.TRAILING_STOP_STOCK)
+                # Use score-based trailing %; fall back to 5% if position pre-dates session
+                trail_pct = self._trail_pcts.get(symbol, 0.05)
 
-                # ── Partial profit taking ──────────────────────────────────
+                # ── Partial profit taking (+5% → sell 50%) ─────────────────
                 unrealised_pct = float(getattr(pos, "unrealized_plpc", 0))
                 if (unrealised_pct >= config.PARTIAL_PROFIT_PCT
                         and symbol not in self._partial_taken
                         and current_qty > 0):
                     sell_qty = round(current_qty * config.PARTIAL_PROFIT_RATIO, 4)
                     if sell_qty > 0:
+                        remaining_qty  = current_qty - sell_qty
+                        remaining_val  = remaining_qty * current_price
                         logger.info(
-                            f"💰 PARTIAL PROFIT LONG: {symbol} "
-                            f"+{unrealised_pct*100:.1f}% — selling {sell_qty} "
-                            f"({config.PARTIAL_PROFIT_RATIO*100:.0f}% of {current_qty})"
+                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at +{unrealised_pct*100:.1f}% "
+                            f"| remaining ${remaining_val:,.2f} with {trail_pct*100:.0f}% trailing stop"
                         )
                         self.broker.place_order(symbol, sell_qty, "sell")
                         self._partial_taken.add(symbol)
 
-                # Initialise high-water mark on first sight after (re)start
+                # Initialise high-water mark on first sight (or after restart)
                 if symbol not in self._high_water:
                     self._high_water[symbol] = current_price
-                    logger.info(f"📈 Trailing stop init: {symbol} high={current_price:.6g} trail={trail_pct*100:.0f}%")
+                    logger.info(
+                        f"📈 Trailing stop init: {symbol} "
+                        f"high={current_price:.6g} trail={trail_pct*100:.0f}%"
+                    )
                     continue
 
                 new_high = max(self._high_water[symbol], current_price)
@@ -91,20 +97,20 @@ class TradingAgent:
 
                 logger.debug(
                     f"  {symbol}: price={current_price:.6g} "
-                    f"high={new_high:.6g} stop={stop_level:.6g}"
+                    f"high={new_high:.6g} stop={stop_level:.6g} trail={trail_pct*100:.0f}%"
                 )
 
                 if current_price <= stop_level:
                     logger.info(
-                        f"🔴 TRAILING STOP: {symbol} "
+                        f"🔴 TRAILING STOP HIT: {symbol} "
                         f"price={current_price:.6g} < stop={stop_level:.6g} "
-                        f"(high={new_high:.6g}, -{trail_pct*100:.0f}%)"
+                        f"(peak={new_high:.6g}, -{trail_pct*100:.0f}%)"
                     )
                     closed = self.broker.close_position(symbol)
                     if closed:
-                        del self._high_water[symbol]
+                        self._high_water.pop(symbol, None)
+                        self._trail_pcts.pop(symbol, None)
                         self._partial_taken.discard(symbol)
-                        # Try to log the close in memory
                         if self.memory:
                             try:
                                 open_trades = self.memory.get_recent_trades(limit=50)
@@ -115,7 +121,14 @@ class TradingAgent:
                                     None
                                 )
                                 if match:
-                                    pnl = (current_price - float(match["entry_price"])) * float(match["qty"])
+                                    entry  = float(match["entry_price"])
+                                    qty_m  = float(match["qty"])
+                                    pnl    = (current_price - entry) * qty_m
+                                    pnl_pct = (current_price - entry) / entry * 100
+                                    logger.info(
+                                        f"TRADE EXIT: {symbol} | reason=trailing_stop "
+                                        f"| pnl=${pnl:+.2f} ({pnl_pct:+.2f}%)"
+                                    )
                                     self.memory.log_trade_close(
                                         match["trade_id"],
                                         exit_price=current_price,
@@ -128,7 +141,7 @@ class TradingAgent:
                 logger.error(f"Trailing stop error for {symbol}: {e}")
 
     def _manage_short_trailing_stops(self):
-        """Check every SHORT position against its trailing stop and cover if breached."""
+        """Check every SHORT position — trailing stop 3% above the lowest price reached."""
         try:
             positions = self.broker.get_positions()
         except Exception as e:
@@ -136,9 +149,8 @@ class TradingAgent:
             return
 
         for pos in positions:
-            # Only process short positions (qty < 0 or side == "short")
             try:
-                side = getattr(pos, "side", "long")
+                side    = getattr(pos, "side", "long")
                 qty_val = float(pos.qty)
                 if side != "short" and qty_val >= 0:
                     continue
@@ -149,53 +161,53 @@ class TradingAgent:
             try:
                 current_price = float(pos.current_price)
                 current_qty   = abs(qty_val)
-                is_crypto_pos = self._is_crypto(symbol)
-                trail_pct = (config.TRAILING_STOP_SHORT_CRYPTO
-                             if is_crypto_pos
-                             else config.TRAILING_STOP_SHORT_STOCK)
+                trail_pct     = SHORT_TRAIL_PCT   # always 3% for shorts
 
-                # ── Partial profit taking ──────────────────────────────────
-                # unrealized_plpc is positive when a short is profitable
-                short_key = f"short:{symbol}"
+                # ── Partial profit taking (+5% → cover 50%) ────────────────
+                short_key      = f"short:{symbol}"
                 unrealised_pct = float(getattr(pos, "unrealized_plpc", 0))
                 if (unrealised_pct >= config.PARTIAL_PROFIT_PCT
                         and short_key not in self._partial_taken
                         and current_qty > 0):
-                    cover_qty = round(current_qty * config.PARTIAL_PROFIT_RATIO, 4)
+                    cover_qty     = round(current_qty * config.PARTIAL_PROFIT_RATIO, 4)
                     if cover_qty > 0:
+                        remaining_qty = current_qty - cover_qty
+                        remaining_val = remaining_qty * current_price
                         logger.info(
-                            f"💰 PARTIAL PROFIT SHORT: {symbol} "
-                            f"+{unrealised_pct*100:.1f}% — covering {cover_qty} "
-                            f"({config.PARTIAL_PROFIT_RATIO*100:.0f}% of {current_qty})"
+                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at +{unrealised_pct*100:.1f}% "
+                            f"| remaining ${remaining_val:,.2f} with {trail_pct*100:.0f}% trailing stop"
                         )
                         self.broker.place_order(symbol, cover_qty, "buy")
                         self._partial_taken.add(short_key)
 
-                # Initialise low-water mark on first sight after (re)start
+                # Initialise low-water mark on first sight (or after restart)
                 if symbol not in self._low_water:
                     self._low_water[symbol] = current_price
-                    logger.info(f"📉 Short trailing stop init: {symbol} low={current_price:.6g} trail={trail_pct*100:.0f}%")
+                    logger.info(
+                        f"📉 Short trailing stop init: {symbol} "
+                        f"low={current_price:.6g} trail={trail_pct*100:.0f}%"
+                    )
                     continue
 
-                new_low = min(self._low_water[symbol], current_price)
+                new_low    = min(self._low_water[symbol], current_price)
                 self._low_water[symbol] = new_low
                 stop_level = new_low * (1 + trail_pct)
 
                 logger.debug(
                     f"  SHORT {symbol}: price={current_price:.6g} "
-                    f"low={new_low:.6g} stop={stop_level:.6g}"
+                    f"low={new_low:.6g} stop={stop_level:.6g} trail={trail_pct*100:.0f}%"
                 )
 
                 if current_price >= stop_level:
                     logger.info(
-                        f"🟢 SHORT TRAILING STOP: {symbol} "
+                        f"🟢 SHORT TRAILING STOP HIT: {symbol} "
                         f"price={current_price:.6g} >= stop={stop_level:.6g} "
-                        f"(low={new_low:.6g}, +{trail_pct*100:.0f}%) — covering short"
+                        f"(trough={new_low:.6g}, +{trail_pct*100:.0f}%) — covering short"
                     )
                     cover_qty = abs(qty_val)
-                    covered = self.broker.place_order(symbol, cover_qty, "buy")
+                    covered   = self.broker.place_order(symbol, cover_qty, "buy")
                     if covered:
-                        del self._low_water[symbol]
+                        self._low_water.pop(symbol, None)
                         self._partial_taken.discard(f"short:{symbol}")
                         if self.memory:
                             try:
@@ -208,7 +220,13 @@ class TradingAgent:
                                     None
                                 )
                                 if match:
-                                    pnl = (float(match["entry_price"]) - current_price) * cover_qty
+                                    entry   = float(match["entry_price"])
+                                    pnl     = (entry - current_price) * cover_qty
+                                    pnl_pct = (entry - current_price) / entry * 100
+                                    logger.info(
+                                        f"TRADE EXIT: {symbol} | reason=short_trailing_stop "
+                                        f"| pnl=${pnl:+.2f} ({pnl_pct:+.2f}%)"
+                                    )
                                     self.memory.log_trade_close(
                                         match["trade_id"],
                                         exit_price=current_price,
@@ -334,21 +352,22 @@ class TradingAgent:
                 passed_long.append(symbol)
             elif opp_score < SCORE_SHORT_MAX:
                 if is_crypto:
-                    # Alpaca spot does not support crypto shorts — log and skip
-                    no_short_crypto.append(f"{symbol}({opp_score})")
+                    no_short_crypto.append(symbol)
+                    logger.info(f"BEARISH CRYPTO {symbol}: no short on Alpaca")
                 else:
                     passed_short.append(symbol)
             else:
-                skipped.append(f"{symbol}({opp_score})")
+                skipped.append(symbol)
+                logger.info(f"SKIPPED {symbol}: neutral signal score {opp_score}")
 
         passed = passed_long + passed_short
         if no_short_crypto:
             logger.info(
-                f"📉 Bearish crypto (no short on Alpaca spot): {', '.join(no_short_crypto)}"
+                f"📉 Bearish crypto skipped ({len(no_short_crypto)}): {', '.join(no_short_crypto)}"
             )
         if skipped:
             logger.info(
-                f"⚡ Pre-filter: {len(skipped)} skipped (30≤score≤60) — {', '.join(skipped)}"
+                f"⚡ Pre-filter: {len(skipped)} neutral score (30≤score≤60) skipped"
             )
         logger.info(
             f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols — "
@@ -399,10 +418,25 @@ class TradingAgent:
                 if action == "buy" and confidence >= min_confidence:
                     # Look up daily volume from scanner cache (movers only; None for crypto)
                     cached_movers = self.scanner._movers_cache.get("symbols", [])
-                    mover_info = next((m for m in cached_movers if m["symbol"] == symbol), None)
-                    daily_volume = mover_info["volume"] if mover_info else None
-                    qty = self.risk.get_position_size(symbol, current_price, volume=daily_volume)
-                    sl = self.risk.calculate_stop_loss(current_price, "buy")
+                    mover_info    = next((m for m in cached_movers if m["symbol"] == symbol), None)
+                    daily_volume  = mover_info["volume"] if mover_info else None
+
+                    opp_score = data["opportunity_score"]
+                    qty, pct, trail_pct = self.risk.get_position_size_by_score(
+                        symbol, current_price, opp_score, volume=daily_volume
+                    )
+                    amount = qty * current_price
+                    sl     = self.risk.calculate_stop_loss(current_price, "buy")
+
+                    logger.info(
+                        f"TRADE ENTRY: {symbol} buy | score={opp_score} "
+                        f"| position={pct*100:.0f}% = ${amount:,.2f} "
+                        f"| stop={trail_pct*100:.0f}%"
+                    )
+
+                    # Store trail_pct so _manage_trailing_stops uses the correct %
+                    self._trail_pcts[symbol] = trail_pct
+
                     self.broker.place_order(symbol, qty, "buy", sl)
 
                 elif action == "sell" and confidence >= min_confidence:
@@ -461,12 +495,15 @@ class TradingAgent:
                 continue
 
             short_candidates += 1
-            qty = self.risk.get_short_position_size(symbol, current_price)
-            sl  = self.risk.calculate_stop_loss(current_price, "sell")
+            qty, short_pct = self.risk.get_short_position_size(symbol, current_price)
+            amount = qty * current_price
+            sl     = self.risk.calculate_stop_loss(current_price, "sell")
+            opp_score_short = symbols_data[symbol]["opportunity_score"]
+
             logger.info(
-                f"🔴 SHORT ENTRY: {symbol} | RSI={rsi:.1f} | MACD=bearish | "
-                f"price={current_price:.4g} < SMA20={ind.get('sma20', 0):.4g} | "
-                f"qty={qty} | sl={sl:.4g}"
+                f"TRADE ENTRY: {symbol} sell | score={opp_score_short} "
+                f"| position={short_pct*100:.0f}% = ${amount:,.2f} "
+                f"| stop={SHORT_TRAIL_PCT*100:.0f}%"
             )
             order = self.broker.place_order(symbol, qty, "sell", sl)
             if order and self.memory:
