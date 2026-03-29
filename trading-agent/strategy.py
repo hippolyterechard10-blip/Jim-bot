@@ -268,6 +268,77 @@ def detect_patterns(indicators: dict, session: str) -> dict:
     }
 
 
+def compute_opportunity_score(indicators: dict, patterns: dict) -> int:
+    """
+    Score 0-100 mesurant l'intérêt d'un actif pour une analyse Claude.
+    Basé uniquement sur les indicateurs techniques — aucun LLM impliqué.
+
+    Composantes :
+      - Déviation RSI par rapport à 50 (0-25 pts)
+      - Surge de volume           (0-25 pts)
+      - Momentum |5-bar|          (0-20 pts)
+      - Extrême Bollinger %B      (0-15 pts)
+      - Pattern détecté           (0-10 pts)
+      - Près d'un support/résistance (0-5 pts)
+
+    Seuil recommandé : skip Claude si score < 60.
+    """
+    score = 0
+
+    rsi       = indicators.get("rsi", 50)
+    vol_ratio = indicators.get("volume_ratio", 1.0)
+    mom5      = abs(indicators.get("momentum_5", 0.0))
+    bb_pct    = indicators.get("bb_pct", 50.0)
+    near_sup  = indicators.get("near_support", False)
+    near_res  = indicators.get("near_resistance", False)
+
+    # ── Déviation RSI (0-25 pts) ───────────────────────────────
+    # RSI=50 → 0 pt | RSI=30 ou 70 → 10 pts | RSI=20 ou 80 → 15 pts | RSI<15 ou >85 → 25 pts
+    rsi_dev = abs(rsi - 50)          # 0 .. 50
+    score += int(rsi_dev * 0.5)      # max 25 pts
+
+    # ── Surge de volume (0-25 pts) ────────────────────────────
+    if vol_ratio >= 4.0:
+        score += 25
+    elif vol_ratio >= 3.0:
+        score += 20
+    elif vol_ratio >= 2.0:
+        score += 15
+    elif vol_ratio >= 1.5:
+        score += 8
+    elif vol_ratio >= 1.2:
+        score += 4
+
+    # ── Momentum 5 bars (0-20 pts) ────────────────────────────
+    if mom5 >= 4.0:
+        score += 20
+    elif mom5 >= 2.5:
+        score += 15
+    elif mom5 >= 1.5:
+        score += 10
+    elif mom5 >= 0.8:
+        score += 5
+
+    # ── Extrême Bollinger %B (0-15 pts) ───────────────────────
+    bb_dev = abs(bb_pct - 50)        # 0 .. 50
+    if bb_dev >= 40:                 # %B < 10 ou > 90
+        score += 15
+    elif bb_dev >= 30:               # %B < 20 ou > 80
+        score += 10
+    elif bb_dev >= 20:               # %B < 30 ou > 70
+        score += 5
+
+    # ── Pattern détecté (0-10 pts) ────────────────────────────
+    pattern_score = patterns.get("score", 0)
+    score += min(10, pattern_score // 4)
+
+    # ── Près support ou résistance (0-5 pts) ──────────────────
+    if near_sup or near_res:
+        score += 5
+
+    return min(100, max(0, score))
+
+
 def _suggest_action(patterns: list, score: int) -> str:
     """Suggère une action basée sur les patterns détectés."""
     if not patterns or score < 25:

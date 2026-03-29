@@ -4,6 +4,7 @@ import anthropic
 import config
 from strategy import (
     compute_indicators,
+    compute_opportunity_score,
     detect_patterns,
     get_session_context,
     build_strategy_prompt,
@@ -11,6 +12,8 @@ from strategy import (
     is_good_stock_window,
     is_crypto_good_hours,
 )
+
+OPPORTUNITY_THRESHOLD = 60  # Skip Claude API call if score below this
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +189,22 @@ class TradingAgent:
         ranked = rank_symbols({s: d for s, d in symbols_data.items()})
         logger.info(f"🔍 Scanning {len(ranked)} symbols — top: {ranked[:3]}")
 
+        # Pre-filter: compute opportunity score for each symbol
+        passed, filtered = [], []
         for symbol in ranked:
+            data = symbols_data[symbol]
+            opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
+            data["opportunity_score"] = opp_score
+            if opp_score >= OPPORTUNITY_THRESHOLD:
+                passed.append(symbol)
+            else:
+                filtered.append(f"{symbol}({opp_score})")
+
+        if filtered:
+            logger.info(f"⚡ Pre-filter: {len(filtered)} skipped (score<{OPPORTUNITY_THRESHOLD}) — {', '.join(filtered)}")
+        logger.info(f"🤖 Calling Claude for {len(passed)}/{len(ranked)} symbols: {passed or 'none'}")
+
+        for symbol in passed:
             try:
                 data = symbols_data[symbol]
                 bars = data["bars"]
