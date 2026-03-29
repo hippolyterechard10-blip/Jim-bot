@@ -93,7 +93,7 @@ class MarketScanner:
                         continue
                     change_pct = ((curr - prev) / prev) * 100
                     volume = snap.daily_bar.volume
-                    if abs(change_pct) >= 3 and volume > 100000:
+                    if abs(change_pct) >= 3 and volume > 50000:
                         movers.append({
                             "symbol": symbol,
                             "price": round(curr, 4),

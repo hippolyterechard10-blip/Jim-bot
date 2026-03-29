@@ -397,7 +397,11 @@ class TradingAgent:
                     min_confidence = 0.70
 
                 if action == "buy" and confidence >= min_confidence:
-                    qty = self.risk.get_position_size(symbol, current_price)
+                    # Look up daily volume from scanner cache (movers only; None for crypto)
+                    cached_movers = self.scanner._movers_cache.get("symbols", [])
+                    mover_info = next((m for m in cached_movers if m["symbol"] == symbol), None)
+                    daily_volume = mover_info["volume"] if mover_info else None
+                    qty = self.risk.get_position_size(symbol, current_price, volume=daily_volume)
                     sl = self.risk.calculate_stop_loss(current_price, "buy")
                     self.broker.place_order(symbol, qty, "buy", sl)
 

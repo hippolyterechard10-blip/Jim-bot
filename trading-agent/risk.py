@@ -7,9 +7,16 @@ class RiskManager:
     def __init__(self, broker):
         self.broker = broker
 
-    def get_position_size(self, symbol, price):
+    LOW_VOLUME_THRESHOLD = 100_000   # daily volume below this → reduced cap
+    LOW_VOLUME_MAX_PCT   = 0.10      # 10% max position for low-volume stocks
+
+    def get_position_size(self, symbol, price, volume=None):
         portfolio = self.broker.get_portfolio_value()
-        max_amount = portfolio * config.MAX_POSITION_PCT
+        is_low_volume = volume is not None and volume < self.LOW_VOLUME_THRESHOLD
+        pct = self.LOW_VOLUME_MAX_PCT if is_low_volume else config.MAX_POSITION_PCT
+        if is_low_volume:
+            logger.info(f"⚠️ {symbol} low volume ({volume:,}) — position capped at {pct*100:.0f}%")
+        max_amount = portfolio * pct
         qty = max_amount / price
         return round(qty, 4)
 
