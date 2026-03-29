@@ -80,4 +80,36 @@ router.get("/decisions", (_req, res) => {
   res.json({ db_connected: connected, decisions });
 });
 
+const FLASK_BASE = "http://localhost:5000";
+
+router.get("/movers", async (_req, res) => {
+  try {
+    const r = await fetch(`${FLASK_BASE}/api/movers`);
+    const data = await r.json();
+    res.json(data);
+  } catch {
+    res.json({ movers: [], error: "scanner unavailable" });
+  }
+});
+
+router.get("/sentiment", async (_req, res) => {
+  try {
+    const r = await fetch(`${FLASK_BASE}/api/sentiment`);
+    const data = await r.json();
+    res.json(data);
+  } catch {
+    res.json({ sentiment: "neutral", score: 0, headlines: [], alerts: [] });
+  }
+});
+
+router.get("/calendar", async (_req, res) => {
+  try {
+    const r = await fetch(`${FLASK_BASE}/api/calendar`);
+    const data = await r.json();
+    res.json(data);
+  } catch {
+    res.json({ event: null, note: "" });
+  }
+});
+
 export default router;

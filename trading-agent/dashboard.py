@@ -14,11 +14,13 @@ app = Flask(__name__)
 CORS(app)
 _memory: Optional[TradingMemory] = None
 _analyzer: Optional[TradeAnalyzer] = None
+_scanner = None
 
-def init_dashboard(memory, analyzer):
-    global _memory, _analyzer
+def init_dashboard(memory, analyzer, scanner=None):
+    global _memory, _analyzer, _scanner
     _memory = memory
     _analyzer = analyzer
+    _scanner = scanner
 
 @app.route("/api/stats")
 def api_stats():
@@ -56,6 +58,36 @@ def api_anomalies():
     if not _analyzer: return jsonify([])
     return jsonify(_analyzer.detect_performance_anomalies())
 
+@app.route("/api/movers")
+def api_movers():
+    if not _scanner:
+        return jsonify({"movers": [], "error": "scanner not initialized"})
+    try:
+        movers = _scanner.get_top_movers(top_n=6)
+        return jsonify({"movers": movers, "ts": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        return jsonify({"movers": [], "error": str(e)})
+
+@app.route("/api/sentiment")
+def api_sentiment():
+    if not _scanner:
+        return jsonify({"sentiment": "neutral", "score": 0, "headlines": [], "alerts": []})
+    try:
+        result = _scanner.analyze_sentiment()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"sentiment": "neutral", "score": 0, "headlines": [], "alerts": [], "error": str(e)})
+
+@app.route("/api/calendar")
+def api_calendar():
+    if not _scanner:
+        return jsonify({"event": None, "note": ""})
+    try:
+        result = _scanner.check_economic_calendar()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"event": None, "note": "", "error": str(e)})
+
 @app.route("/api/health")
 def api_health():
     return jsonify({"status":"ok","timestamp":datetime.now(timezone.utc).isoformat()})
@@ -64,8 +96,8 @@ def api_health():
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
-def start_dashboard(memory, analyzer, port=8080):
-    init_dashboard(memory, analyzer)
+def start_dashboard(memory, analyzer, scanner=None, port=8080):
+    init_dashboard(memory, analyzer, scanner=scanner)
     def run():
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     thread = threading.Thread(target=run, daemon=True)

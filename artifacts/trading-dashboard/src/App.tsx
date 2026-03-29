@@ -39,6 +39,35 @@ interface DecisionsResponse {
   decisions: Decision[];
 }
 
+interface Mover {
+  symbol: string;
+  price: number;
+  change_pct: number;
+  volume: number;
+  direction: "up" | "down";
+}
+
+interface MoversResponse {
+  movers: Mover[];
+  ts?: string;
+  error?: string;
+}
+
+interface SentimentResponse {
+  sentiment: string;
+  score: number;
+  headlines?: string[];
+  alerts?: string[];
+  error?: string;
+}
+
+interface CalendarResponse {
+  event: string | null;
+  note: string;
+  timing?: string;
+  error?: string;
+}
+
 function DecisionBadge({ decision }: { decision: string }) {
   const d = decision.toUpperCase();
   const colors: Record<string, string> = {
@@ -133,6 +162,9 @@ export default function App() {
   const [error, setError] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [movers, setMovers] = useState<Mover[]>([]);
+  const [sentiment, setSentiment] = useState<SentimentResponse | null>(null);
+  const [calendar, setCalendar] = useState<CalendarResponse | null>(null);
 
   async function fetchAll() {
     try {
@@ -152,10 +184,30 @@ export default function App() {
     setLastRefresh(new Date());
   }
 
+  async function fetchMarket() {
+    try {
+      const [mRes, sRes, cRes] = await Promise.all([
+        fetch(`${BASE}/api/movers`),
+        fetch(`${BASE}/api/sentiment`),
+        fetch(`${BASE}/api/calendar`),
+      ]);
+      if (mRes.ok) {
+        const data: MoversResponse = await mRes.json();
+        setMovers(data.movers ?? []);
+      }
+      if (sRes.ok) setSentiment(await sRes.json() as SentimentResponse);
+      if (cRes.ok) setCalendar(await cRes.json() as CalendarResponse);
+    } catch {
+      // silent — market data is non-critical
+    }
+  }
+
   useEffect(() => {
     fetchAll();
-    const id = setInterval(fetchAll, 30_000);
-    return () => clearInterval(id);
+    fetchMarket();
+    const id1 = setInterval(fetchAll, 30_000);
+    const id2 = setInterval(fetchMarket, 60_000);
+    return () => { clearInterval(id1); clearInterval(id2); };
   }, []);
 
   const totalPnl = status?.recent_trades
@@ -242,6 +294,121 @@ export default function App() {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Market Intelligence row */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+
+        {/* TOP MOVERS TODAY */}
+        <div className="bg-slate-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">🔥 Top Movers Today</h2>
+            <span className="text-[10px] text-slate-600">60s refresh</span>
+          </div>
+          <div className="p-3 space-y-1.5">
+            {movers.length === 0 && (
+              <div className="text-xs text-slate-600 text-center py-4">
+                {status ? "Market closed or no movers" : "Loading…"}
+              </div>
+            )}
+            {movers.map((m) => (
+              <div key={m.symbol} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-slate-700/40">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`text-sm font-bold ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>
+                    {m.direction === "up" ? "↑" : "↓"}
+                  </span>
+                  <span className="text-xs font-semibold text-white truncate">{m.symbol}</span>
+                </div>
+                <span className={`text-xs font-bold flex-shrink-0 ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>
+                  {m.change_pct > 0 ? "+" : ""}{m.change_pct.toFixed(1)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* MARKET SENTIMENT */}
+        <div className="bg-slate-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">📰 Market Sentiment</h2>
+            <span className="text-[10px] text-slate-600">60s refresh</span>
+          </div>
+          <div className="p-4">
+            {!sentiment ? (
+              <div className="text-xs text-slate-600 text-center py-4">Loading…</div>
+            ) : (() => {
+              const s = sentiment.sentiment;
+              const scoreColor = s.includes("bullish") ? "text-emerald-400"
+                               : s.includes("bearish") ? "text-red-400"
+                               : "text-slate-400";
+              const badgeBg = s.includes("bullish") ? "bg-emerald-900/50 border-emerald-700 text-emerald-300"
+                            : s.includes("bearish") ? "bg-red-900/50 border-red-700 text-red-300"
+                            : "bg-slate-700/50 border-slate-600 text-slate-400";
+              const emoji = s === "very_bullish" ? "🚀" : s === "bullish" ? "🟢"
+                          : s === "very_bearish" ? "💀" : s === "bearish" ? "🔴" : "⚪";
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${badgeBg}`}>
+                      {emoji} {s.replace("_", " ").toUpperCase()}
+                    </span>
+                    <span className={`text-sm font-bold ${scoreColor}`}>
+                      score: {sentiment.score > 0 ? "+" : ""}{sentiment.score}
+                    </span>
+                  </div>
+                  {(sentiment.alerts ?? []).map((a, i) => (
+                    <div key={i} className="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-700/40 rounded px-2 py-1">{a}</div>
+                  ))}
+                  <div className="space-y-1.5 mt-1">
+                    {(sentiment.headlines ?? []).slice(0, 3).map((h, i) => (
+                      <div key={i} className="text-[10px] text-slate-500 leading-relaxed border-l-2 border-slate-700 pl-2">{h}</div>
+                    ))}
+                    {(sentiment.headlines ?? []).length === 0 && (
+                      <div className="text-[10px] text-slate-600">No headlines available</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+
+        {/* ECONOMIC CALENDAR */}
+        <div className="bg-slate-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+            <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">📅 Economic Calendar</h2>
+            <span className="text-[10px] text-slate-600">60s refresh</span>
+          </div>
+          <div className="p-4">
+            {!calendar ? (
+              <div className="text-xs text-slate-600 text-center py-4">Loading…</div>
+            ) : calendar.event ? (
+              <div className="space-y-3">
+                <div className="bg-amber-900/20 border border-amber-600/50 rounded-lg px-4 py-3">
+                  <div className="flex items-start gap-2">
+                    <span className="text-amber-400 text-lg leading-none">⚡</span>
+                    <div>
+                      <div className="text-sm font-bold text-amber-300">{calendar.event}</div>
+                      <div className="text-[10px] text-amber-500 mt-0.5 uppercase tracking-wide">
+                        {calendar.timing === "today" ? "TODAY" : "UPCOMING"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-relaxed">{calendar.note}</p>
+              </div>
+            ) : (
+              <div className="space-y-2 py-2">
+                <div className="flex items-center gap-2 text-emerald-400">
+                  <span className="text-lg">✅</span>
+                  <span className="text-xs font-semibold">No high-impact events</span>
+                </div>
+                <p className="text-[10px] text-slate-600">Next events: Fed Meeting Apr 2 · NFP Apr 3 · CPI Apr 14</p>
+              </div>
+            )}
+          </div>
+        </div>
+
       </div>
 
       {/* Two-column layout */}

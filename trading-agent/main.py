@@ -28,7 +28,7 @@ def main():
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
-    start_dashboard(memory, analyzer, port=5000)
+    start_dashboard(memory, analyzer, scanner=agent.scanner, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
 
     logger.info("✅ All systems running. Starting trading loop...")
