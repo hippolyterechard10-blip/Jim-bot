@@ -14,15 +14,15 @@ const ALERT_KEYWORDS: [string, string][] = [
   ["collapse", "CLPS"], ["crisis", "CRSS"],
 ];
 
-// Q1 / Q2 2026 earnings dates (approximate — update as confirmed)
-const EARNINGS_CALENDAR: { symbol: string; date: string; label: string }[] = [
-  { symbol: "TSLA",  date: "2026-04-22", label: "Q1 2026" },
-  { symbol: "MSFT",  date: "2026-04-28", label: "Q3 FY26" },
-  { symbol: "AMD",   date: "2026-04-28", label: "Q1 2026" },
-  { symbol: "GOOGL", date: "2026-04-29", label: "Q1 2026" },
-  { symbol: "META",  date: "2026-04-29", label: "Q1 2026" },
-  { symbol: "AAPL",  date: "2026-05-01", label: "Q2 FY26" },
-  { symbol: "NVDA",  date: "2026-05-28", label: "Q1 FY27" },
+// Confirmed Q1/Q2 2026 earnings dates
+const EARNINGS_CALENDAR: { symbol: string; date: string }[] = [
+  { symbol: "TSLA",  date: "2026-04-22" },
+  { symbol: "GOOGL", date: "2026-04-29" },
+  { symbol: "MSFT",  date: "2026-04-30" },
+  { symbol: "META",  date: "2026-04-30" },
+  { symbol: "AAPL",  date: "2026-05-01" },
+  { symbol: "AMD",   date: "2026-05-06" },
+  { symbol: "NVDA",  date: "2026-05-28" },
 ];
 
 const STOCK_SYMBOLS = ["AAPL","NVDA","TSLA","META","GOOGL","MSFT","AMD"];
@@ -97,7 +97,11 @@ function SymbolCard({ symbol, decision }: { symbol: string; decision?: Decision 
             <span className="text-[9px] text-slate-500">{conf}%</span>
           </div>
         </>
-      ) : <span className="text-[10px] text-slate-600">en attente…</span>}
+      ) : isCrypto ? (
+        <span className="text-[10px] text-sky-800">⏺ scanning…</span>
+      ) : (
+        <span className="text-[10px] text-slate-600">🔒 mkt closed</span>
+      )}
     </div>
   );
 }
@@ -260,6 +264,76 @@ function PnlModal({ trades, decisions, onClose }: { trades: Trade[]; decisions: 
         </div>
 
         <div className="p-5 space-y-5">
+
+          {/* Monthly & YTD stats */}
+          {(() => {
+            const ytdStart   = new Date(now.getFullYear(), 0, 1);
+            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+            const ytdPnl     = closed.filter(t => {
+              const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
+              return d >= ytdStart;
+            }).reduce((s, t) => s + (t.pnl ?? 0), 0);
+            const monthlyPnl = closed.filter(t => {
+              const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
+              return d >= monthStart;
+            }).reduce((s, t) => s + (t.pnl ?? 0), 0);
+            const maxAbs  = Math.max(Math.abs(ytdPnl), Math.abs(monthlyPnl), 0.01);
+            const mPct    = Math.min(Math.abs(monthlyPnl) / maxAbs * 100, 100);
+            const yPct    = Math.min(Math.abs(ytdPnl)    / maxAbs * 100, 100);
+            const monthName = now.toLocaleString("default", { month: "short" });
+            return (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/30">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">{monthName} P&amp;L</div>
+                  <div className={`text-xl font-bold ${monthlyPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {monthlyPnl >= 0 ? "+" : ""}{monthlyPnl.toFixed(2)}$
+                  </div>
+                  <div className={`text-[10px] mt-0.5 ${monthlyPnl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                    {((monthlyPnl / INITIAL_CAPITAL) * 100) >= 0 ? "+" : ""}{((monthlyPnl / INITIAL_CAPITAL) * 100).toFixed(2)}%
+                  </div>
+                  <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${monthlyPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${mPct}%` }} />
+                  </div>
+                </div>
+                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/30">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">YTD P&amp;L</div>
+                  <div className={`text-xl font-bold ${ytdPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {ytdPnl >= 0 ? "+" : ""}{ytdPnl.toFixed(2)}$
+                  </div>
+                  <div className={`text-[10px] mt-0.5 ${ytdPnl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                    {((ytdPnl / INITIAL_CAPITAL) * 100) >= 0 ? "+" : ""}{((ytdPnl / INITIAL_CAPITAL) * 100).toFixed(2)}%
+                  </div>
+                  <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${ytdPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${yPct}%` }} />
+                  </div>
+                </div>
+                {/* Comparison bar */}
+                <div className="col-span-2 bg-slate-900/30 rounded-lg px-3 py-2 border border-slate-700/20">
+                  <div className="text-[9px] text-slate-600 uppercase tracking-wide mb-1.5">{monthName} vs YTD comparison</div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] text-slate-500 w-8">{monthName}</span>
+                      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${monthlyPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${mPct}%` }} />
+                      </div>
+                      <span className={`text-[9px] font-semibold w-10 text-right ${monthlyPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {monthlyPnl >= 0 ? "+" : ""}{monthlyPnl.toFixed(1)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] text-slate-500 w-8">YTD</span>
+                      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${ytdPnl >= 0 ? "bg-sky-500" : "bg-red-400"}`} style={{ width: `${yPct}%` }} />
+                      </div>
+                      <span className={`text-[9px] font-semibold w-10 text-right ${ytdPnl >= 0 ? "text-sky-400" : "text-red-400"}`}>
+                        {ytdPnl >= 0 ? "+" : ""}{ytdPnl.toFixed(1)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Daily P&L bar chart */}
           <div>
@@ -679,14 +753,15 @@ export default function App() {
                   <div className="text-[9px] text-slate-600 uppercase tracking-wider mb-1.5">💰 Upcoming Earnings</div>
                   <div className="space-y-1">
                     {upcomingEarnings.map(e => {
-                      const daysAway = earningsDaysAway(e.date);
-                      const isToday  = daysAway === "today";
-                      const isSoon   = daysAway === "tomorrow" || daysAway.startsWith("in 2") || daysAway.startsWith("in 3");
+                      const daysAway  = earningsDaysAway(e.date);
+                      const isToday   = daysAway === "today";
+                      const isSoon    = daysAway === "tomorrow" || daysAway.startsWith("in 2") || daysAway.startsWith("in 3");
+                      const dateLabel = new Date(e.date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
                       return (
                         <div key={e.symbol} className={`flex items-center justify-between px-2 py-1 rounded ${isToday ? "bg-violet-900/30 border border-violet-700/40" : isSoon ? "bg-slate-700/30" : ""}`}>
                           <div className="flex items-center gap-1.5">
                             <span className="text-xs font-bold text-white">{e.symbol}</span>
-                            <span className="text-[9px] text-slate-600">{e.label}</span>
+                            <span className="text-[9px] text-slate-600">{dateLabel}</span>
                           </div>
                           <span className={`text-[10px] font-semibold ${isToday ? "text-violet-400" : isSoon ? "text-amber-400" : "text-slate-500"}`}>
                             {daysAway}

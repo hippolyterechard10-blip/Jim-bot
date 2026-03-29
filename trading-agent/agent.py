@@ -316,8 +316,11 @@ class TradingAgent:
             logger.info("😴 No symbols to scan in current session — crypto off-hours and market closed")
             return
 
-        # Build market context once per cycle (news sentiment + top movers + calendar)
+        # Build market context once per cycle (news sentiment + top movers + calendar + earnings)
         market_context = self.scanner.build_market_context()
+
+        # Build earnings alert map: symbol → {type, days_away}
+        earnings_alerts_map = {ea["symbol"]: ea for ea in self.scanner.get_earnings_alerts()}
 
         symbols_data = {}
         for symbol in symbols_to_scan:
@@ -343,22 +346,67 @@ class TradingAgent:
         #   score < 30 → bearish signal   → Claude evaluates for short
         #   30 ≤ score ≤ 60 → ambiguous   → skip (no API cost)
         passed_long, passed_short, skipped, no_short_crypto = [], [], [], []
+        cached_movers_list = self.scanner._movers_cache.get("symbols", [])
+
         for symbol in ranked:
-            data = symbols_data[symbol]
+            data      = symbols_data[symbol]
             is_crypto = "/" in symbol
             opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
             data["opportunity_score"] = opp_score
+
+            # ── Earnings day: hard skip (stocks only) ──────────────────────
+            sym_base = symbol  # stocks use bare ticker; crypto keeps "BTC/USD"
+            ea = earnings_alerts_map.get(sym_base)
+            if ea and ea["type"] == "earnings_day" and not is_crypto:
+                logger.info(f"EARNINGS DAY: skipping {symbol} — too risky to enter")
+                if self.memory:
+                    self.memory.log_decision(
+                        decision="hold",
+                        reasoning=f"EARNINGS DAY: {symbol} reports today — no entry, volatility risk too high.",
+                        symbol=symbol,
+                        confidence=0.0,
+                    )
+                continue
+
+            # ── Post-earnings gapper: boost score if gap >5% ───────────────
+            if ea and ea["type"] == "post_earnings" and not is_crypto:
+                mover_info = next((m for m in cached_movers_list if m["symbol"] == sym_base), None)
+                if mover_info and mover_info.get("change_pct", 0) >= 5:
+                    logger.info(
+                        f"📈 POST-EARNINGS GAPPER: {symbol} +{mover_info['change_pct']:.1f}% "
+                        f"— boosting score to 90 (was {opp_score})"
+                    )
+                    opp_score = 90
+                    data["opportunity_score"] = 90
+
             if opp_score > SCORE_LONG_MIN:
                 passed_long.append(symbol)
             elif opp_score < SCORE_SHORT_MAX:
                 if is_crypto:
                     no_short_crypto.append(symbol)
                     logger.info(f"BEARISH CRYPTO {symbol}: no short on Alpaca")
+                    # Log bearish hold so dashboard shows current state
+                    if self.memory:
+                        self.memory.log_decision(
+                            decision="hold",
+                            reasoning=f"Bearish signal (score={opp_score}/100) but crypto shorts not supported on Alpaca. Monitoring for reversal.",
+                            symbol=symbol,
+                            confidence=round(max(0.1, (30 - opp_score) / 30), 2),
+                        )
                 else:
                     passed_short.append(symbol)
             else:
                 skipped.append(symbol)
                 logger.info(f"SKIPPED {symbol}: neutral signal score {opp_score}")
+                # For crypto: always log HOLD so the dashboard shows current status
+                if is_crypto and self.memory:
+                    neutral_conf = round(abs(opp_score - 45) / 45 * 0.4, 2)  # max 0.4 for neutral
+                    self.memory.log_decision(
+                        decision="hold",
+                        reasoning=f"Neutral signal (score={opp_score}/100) — no clear directional bias. Monitoring.",
+                        symbol=symbol,
+                        confidence=neutral_conf,
+                    )
 
         passed = passed_long + passed_short
         if no_short_crypto:
@@ -425,6 +473,24 @@ class TradingAgent:
                     qty, pct, trail_pct = self.risk.get_position_size_by_score(
                         symbol, current_price, opp_score, volume=daily_volume
                     )
+
+                    # ── Pre-earnings cap: limit to 10% of portfolio ─────────────
+                    ea_buy = earnings_alerts_map.get(symbol)
+                    if ea_buy and ea_buy["type"] == "pre_earnings":
+                        try:
+                            account = self.broker.api.get_account()
+                            portfolio_value = float(account.portfolio_value)
+                            max_qty = int((0.10 * portfolio_value) / current_price)
+                            if qty > max_qty:
+                                logger.info(
+                                    f"⚠️ PRE-EARNINGS cap: {symbol} qty {qty}→{max_qty} "
+                                    f"(10% limit, reports in {ea_buy['days_away']}d)"
+                                )
+                                qty = max_qty
+                                pct = 0.10
+                        except Exception as cap_err:
+                            logger.warning(f"Pre-earnings cap error: {cap_err}")
+
                     amount = qty * current_price
                     sl     = self.risk.calculate_stop_loss(current_price, "buy")
 

@@ -20,6 +20,17 @@ ECONOMIC_EVENTS = [
     {"date": "2026-06-17", "event": "Fed Meeting"},
 ]
 
+# Confirmed Q1/Q2 2026 earnings dates — update as IRs announce
+EARNINGS_DATES = {
+    "TSLA":  "2026-04-22",
+    "GOOGL": "2026-04-29",
+    "MSFT":  "2026-04-30",
+    "META":  "2026-04-30",
+    "AAPL":  "2026-05-01",
+    "AMD":   "2026-05-06",
+    "NVDA":  "2026-05-28",
+}
+
 NEWS_FEEDS = [
     "https://feeds.marketwatch.com/marketwatch/topstories/",
     "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
@@ -190,10 +201,35 @@ class MarketScanner:
                     "note": f"⚡ {event['event']} TODAY — high volatility expected"}
         return {"event": None, "note": ""}
 
+    def get_earnings_alerts(self, symbols=None):
+        """
+        Return earnings alerts for stocks within ±1 day of their earnings date.
+          type='earnings_day'  → reports TODAY (skip the stock)
+          type='pre_earnings'  → reports in 1–2 days (cut position to 10%)
+          type='post_earnings' → reported yesterday (watch for gap play)
+        """
+        from datetime import date as date_cls
+        today = datetime.now(timezone.utc).date()
+        alerts = []
+        for symbol, date_str in EARNINGS_DATES.items():
+            if symbols and symbol not in symbols:
+                continue
+            edate     = datetime.strptime(date_str, "%Y-%m-%d").date()
+            days_away = (edate - today).days
+            if days_away == 0:
+                alerts.append({"symbol": symbol, "days_away": 0,  "type": "earnings_day"})
+            elif 1 <= days_away <= 2:
+                alerts.append({"symbol": symbol, "days_away": days_away, "type": "pre_earnings"})
+            elif days_away == -1:
+                alerts.append({"symbol": symbol, "days_away": -1, "type": "post_earnings"})
+        return alerts
+
     def build_market_context(self, symbol=None):
         sentiment = self.analyze_sentiment()
-        calendar = self.check_economic_calendar()
-        movers = self.get_top_movers(top_n=6)
+        calendar  = self.check_economic_calendar()
+        movers    = self.get_top_movers(top_n=6)
+        earnings  = self.get_earnings_alerts()
+
         lines = ["=== MARKET INTELLIGENCE ==="]
         emoji = {"very_bullish":"🚀","bullish":"🟢","neutral":"⚪","bearish":"🔴","very_bearish":"💀"}
         lines.append(f"📰 NEWS: {emoji.get(sentiment['sentiment'],'⚪')} {sentiment['sentiment'].upper()} (score: {sentiment['score']})")
@@ -201,6 +237,25 @@ class MarketScanner:
             lines.append(f"  {alert}")
         if calendar["event"]:
             lines.append(f"📅 CALENDAR: {calendar['note']}")
+
+        # Earnings proximity warnings — passed to Claude so it can factor in volatility
+        for ea in earnings:
+            if ea["type"] == "earnings_day":
+                lines.append(
+                    f"🚨 EARNINGS DAY: {ea['symbol']} reports TODAY — "
+                    f"DO NOT ENTER any position, risk is too high"
+                )
+            elif ea["type"] == "pre_earnings":
+                lines.append(
+                    f"⚠️ EARNINGS ALERT: {ea['symbol']} reports in {ea['days_away']} day(s) — "
+                    f"expect high volatility, reduce position size to 10% max"
+                )
+            elif ea["type"] == "post_earnings":
+                lines.append(
+                    f"📈 POST-EARNINGS: {ea['symbol']} reported yesterday — "
+                    f"if gapping up >5% on high volume, treat as priority gapper (score 90+, up to 40% position)"
+                )
+
         if movers:
             lines.append("🔥 TOP MOVERS:")
             for m in movers[:4]:
