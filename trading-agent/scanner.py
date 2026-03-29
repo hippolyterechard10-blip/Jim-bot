@@ -40,6 +40,26 @@ BEARISH_KEYWORDS = ["tariff", "trade war", "recession", "rate hike", "layoffs",
 HIGH_ALERT_KEYWORDS = ["trump", "federal reserve", "emergency rate",
     "war", "sanctions", "default", "collapse", "crisis"]
 
+# Only keep headlines relevant to financial markets — excludes personal finance,
+# tax advice, lifestyle articles, etc.
+FINANCE_FILTER_KEYWORDS = [
+    "stock", "market", "share", "equity", "index", "dow", "nasdaq", "s&p", "spy",
+    "fed", "federal reserve", "interest rate", "rate cut", "rate hike", "powell",
+    "earnings", "revenue", "profit", "quarter", "ipo", "merger", "acquisition",
+    "crypto", "bitcoin", "ethereum", "blockchain", "coin",
+    "tariff", "trade war", "sanction", "import duty", "export",
+    "inflation", "cpi", "pce", "gdp", "recession", "jobs report", "unemployment",
+    "oil", "gold", "commodity", "bond", "treasury", "yield", "debt",
+    "dollar", "currency", "forex", "yuan", "yen", "euro",
+    "wall street", "hedge fund", "bank", "jpmorgan", "goldman", "morgan stanley",
+    "apple", "nvidia", "tesla", "meta", "google", "amazon", "microsoft", "intel",
+    "tech stock", "semiconductor", "chip", "ai stock",
+    "economy", "economic", "fiscal", "monetary", "deficit",
+    "opec", "china trade", "supply chain", "manufacturing",
+    "rally", "selloff", "correction", "bull market", "bear market",
+    "war", "sanctions", "geopolit", "trump", "biden", "white house policy",
+]
+
 class MarketScanner:
     def __init__(self):
         self.api = tradeapi.REST(
@@ -123,7 +143,9 @@ class MarketScanner:
                     if title is not None and title.text:
                         text = title.text.strip()
                         # Google News wraps titles in CDATA — clean angle-bracket artefacts
-                        if text and "<" not in text:
+                        text_lower = text.lower()
+                        is_finance = any(kw in text_lower for kw in FINANCE_FILTER_KEYWORDS)
+                        if text and "<" not in text and is_finance:
                             headlines.append(text)
                             fetched += 1
                     if fetched >= 5:
@@ -157,7 +179,8 @@ class MarketScanner:
         elif score <= -1: sentiment = "bearish"
         else: sentiment = "neutral"
         logger.info(f"📰 Sentiment: {sentiment} (score: {score})")
-        return {"sentiment": sentiment, "score": score, "alerts": alerts, "headlines": headlines[:3]}
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        return {"sentiment": sentiment, "score": score, "alerts": alerts, "headlines": headlines[:3], "ts": ts}
 
     def check_economic_calendar(self):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

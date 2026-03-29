@@ -58,6 +58,7 @@ interface SentimentResponse {
   score: number;
   headlines?: string[];
   alerts?: string[];
+  ts?: string;
   error?: string;
 }
 
@@ -346,27 +347,52 @@ export default function App() {
                             : "bg-slate-700/50 border-slate-600 text-slate-400";
               const emoji = s === "very_bullish" ? "🚀" : s === "bullish" ? "🟢"
                           : s === "very_bearish" ? "💀" : s === "bearish" ? "🔴" : "⚪";
+              const alerts = (sentiment.alerts ?? []);
+              const headlines = (sentiment.headlines ?? []).slice(0, 3);
               return (
                 <div className="space-y-3">
+                  {/* Sentiment badge + score */}
                   <div className="flex items-center justify-between">
                     <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${badgeBg}`}>
                       {emoji} {s.replace("_", " ").toUpperCase()}
                     </span>
                     <span className={`text-sm font-bold ${scoreColor}`}>
-                      score: {sentiment.score > 0 ? "+" : ""}{sentiment.score}
+                      {sentiment.score > 0 ? "+" : ""}{sentiment.score}
                     </span>
                   </div>
-                  {(sentiment.alerts ?? []).map((a, i) => (
-                    <div key={i} className="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-700/40 rounded px-2 py-1">{a}</div>
-                  ))}
-                  <div className="space-y-1.5 mt-1">
-                    {(sentiment.headlines ?? []).slice(0, 3).map((h, i) => (
-                      <div key={i} className="text-[10px] text-slate-500 leading-relaxed border-l-2 border-slate-700 pl-2">{h}</div>
+
+                  {/* HIGH ALERT pills — compact, inline */}
+                  {alerts.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {alerts.map((a, i) => {
+                        const keyword = a.replace("⚡ HIGH ALERT: '", "").replace("' detected in headlines", "");
+                        return (
+                          <span key={i} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-950/60 text-amber-500 border border-amber-800/50">
+                            ⚡ {keyword}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Headlines — one per line, truncated */}
+                  <div className="space-y-1 mt-0.5">
+                    {headlines.length === 0 ? (
+                      <div className="text-[10px] text-slate-600">No market headlines available</div>
+                    ) : headlines.map((h, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-[10px] text-slate-400">
+                        <span className="text-slate-600 flex-shrink-0 mt-px">›</span>
+                        <span className="truncate">{h}</span>
+                      </div>
                     ))}
-                    {(sentiment.headlines ?? []).length === 0 && (
-                      <div className="text-[10px] text-slate-600">No headlines available</div>
-                    )}
                   </div>
+
+                  {/* Timestamp */}
+                  {sentiment.ts && (
+                    <div className="text-[9px] text-slate-600 pt-1 border-t border-slate-700/50">
+                      Updated {sentiment.ts}
+                    </div>
+                  )}
                 </div>
               );
             })()}
