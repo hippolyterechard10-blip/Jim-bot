@@ -280,8 +280,46 @@ class TradingAgent:
                             f"${secured_val:,.2f} secured — "
                             f"remaining 50% running with {trail_pct*100:.0f}% trailing stop"
                         )
-                        self.broker.place_order(symbol, sell_qty, "sell")
+                        order = self.broker.place_order(symbol, sell_qty, "sell")
                         self._partial_taken.add(symbol)
+
+                        # ── Update SQLite: close old record, reopen with remaining qty ──
+                        if self.memory:
+                            try:
+                                open_trades = self.memory.get_open_trades()
+                                match = next(
+                                    (t for t in open_trades
+                                     if t.get("symbol", "").replace("/", "").upper()
+                                        == symbol.replace("/", "").upper()
+                                     and t.get("status") == "open"),
+                                    None,
+                                )
+                                if match:
+                                    entry_p = float(match["entry_price"])
+                                    pnl     = (current_price - entry_p) * sell_qty
+                                    pnl_pct = (current_price - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                                    # Close the original record (for the sold portion)
+                                    self.memory.log_trade_close(
+                                        match["trade_id"],
+                                        exit_price=current_price,
+                                        close_reason="partial_profit",
+                                        pnl=round(pnl, 4),
+                                        pnl_pct=round(pnl_pct, 4),
+                                    )
+                                    # Reopen a new record for the remaining 50%
+                                    if remaining_qty > 0:
+                                        self.memory.log_trade_open(
+                                            trade_id=str(uuid.uuid4()),
+                                            symbol=match["symbol"],
+                                            side="buy",
+                                            qty=remaining_qty,
+                                            entry_price=entry_p,
+                                            stop_loss=match.get("stop_loss"),
+                                            alpaca_order_id=match.get("alpaca_order_id"),
+                                            market_context={"source": "partial_profit_remainder"},
+                                        )
+                            except Exception as me:
+                                logger.warning(f"Memory update after partial profit ({symbol}): {me}")
 
                 # Initialise high-water mark on first sight (or after restart)
                 if symbol not in self._high_water:
@@ -383,6 +421,43 @@ class TradingAgent:
                         )
                         self.broker.place_order(symbol, cover_qty, "buy")
                         self._partial_taken.add(short_key)
+
+                        # ── Update SQLite: close old record, reopen with remaining qty ──
+                        if self.memory:
+                            try:
+                                open_trades = self.memory.get_open_trades()
+                                match = next(
+                                    (t for t in open_trades
+                                     if t.get("symbol", "").replace("/", "").upper()
+                                        == symbol.replace("/", "").upper()
+                                     and t.get("status") == "open"
+                                     and t.get("side") == "sell"),
+                                    None,
+                                )
+                                if match:
+                                    entry_p = float(match["entry_price"])
+                                    pnl     = (entry_p - current_price) * cover_qty
+                                    pnl_pct = (entry_p - current_price) / entry_p * 100 if entry_p > 0 else 0
+                                    self.memory.log_trade_close(
+                                        match["trade_id"],
+                                        exit_price=current_price,
+                                        close_reason="partial_profit",
+                                        pnl=round(pnl, 4),
+                                        pnl_pct=round(pnl_pct, 4),
+                                    )
+                                    if remaining_qty > 0:
+                                        self.memory.log_trade_open(
+                                            trade_id=str(uuid.uuid4()),
+                                            symbol=match["symbol"],
+                                            side="sell",
+                                            qty=remaining_qty,
+                                            entry_price=entry_p,
+                                            stop_loss=match.get("stop_loss"),
+                                            alpaca_order_id=match.get("alpaca_order_id"),
+                                            market_context={"source": "partial_profit_remainder"},
+                                        )
+                            except Exception as me:
+                                logger.warning(f"Memory update after short partial profit ({symbol}): {me}")
 
                 # Initialise low-water mark on first sight (or after restart)
                 if symbol not in self._low_water:
