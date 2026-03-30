@@ -273,9 +273,12 @@ class TradingAgent:
                     if sell_qty > 0:
                         remaining_qty  = current_qty - sell_qty
                         remaining_val  = remaining_qty * current_price
+                        secured_val    = sell_qty * current_price
                         logger.info(
-                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at +{unrealised_pct*100:.1f}% "
-                            f"| remaining ${remaining_val:,.2f} with {trail_pct*100:.0f}% trailing stop"
+                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at "
+                            f"+{unrealised_pct*100:.1f}% — "
+                            f"${secured_val:,.2f} secured — "
+                            f"remaining 50% running with {trail_pct*100:.0f}% trailing stop"
                         )
                         self.broker.place_order(symbol, sell_qty, "sell")
                         self._partial_taken.add(symbol)
@@ -371,9 +374,12 @@ class TradingAgent:
                     if cover_qty > 0:
                         remaining_qty = current_qty - cover_qty
                         remaining_val = remaining_qty * current_price
+                        secured_val   = cover_qty * current_price
                         logger.info(
-                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at +{unrealised_pct*100:.1f}% "
-                            f"| remaining ${remaining_val:,.2f} with {trail_pct*100:.0f}% trailing stop"
+                            f"💰 PARTIAL PROFIT: {symbol} sold 50% at "
+                            f"+{unrealised_pct*100:.1f}% — "
+                            f"${secured_val:,.2f} secured — "
+                            f"remaining 50% running with {trail_pct*100:.0f}% trailing stop"
                         )
                         self.broker.place_order(symbol, cover_qty, "buy")
                         self._partial_taken.add(short_key)
