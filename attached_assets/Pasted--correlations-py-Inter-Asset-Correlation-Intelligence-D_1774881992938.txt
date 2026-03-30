@@ -55,14 +55,14 @@ BETA = {
 
 # Sector groupings — never hold more than 2 from same sector
 SECTORS = {
-    "crypto_large":    ["BTC/USD", "ETH/USD"],
-    "crypto_mid":      ["SOL/USD", "AVAX/USD", "LINK/USD", "XRP/USD"],
-    "crypto_meme":     ["DOGE/USD", "SHIB/USD"],
-    "semis":           ["NVDA", "AMD"],
-    "big_tech":        ["AAPL", "MSFT", "GOOGL", "META"],
-    "etf_broad":       ["QQQ", "SPY"],
+    "crypto_large":  ["BTC/USD", "ETH/USD"],
+    "crypto_mid":    ["SOL/USD", "AVAX/USD", "LINK/USD", "XRP/USD"],
+    "crypto_meme":   ["DOGE/USD", "SHIB/USD"],
+    "semis":         ["NVDA", "AMD"],
+    "big_tech":      ["AAPL", "MSFT", "GOOGL", "META"],
+    "etf_broad":     ["QQQ", "SPY"],
     "etf_speculative": ["ARKK"],
-    "ev_disruptive":   ["TSLA"],
+    "ev_disruptive": ["TSLA"],
 }
 
 
@@ -72,11 +72,8 @@ class CorrelationIntelligence:
     Detects breakdowns (relative strength signals) and enforces diversification.
     """
 
-    # Expose module-level dict for use via self.CORRELATION_MATRIX
-    CORRELATION_MATRIX = CORRELATION_MATRIX
-
     def __init__(self):
-        self._price_cache: dict = {}
+        self._price_cache: dict[str, dict] = {}
         self._cache_time: Optional[datetime] = None
         logger.info("✅ CorrelationIntelligence initialized")
 
@@ -99,7 +96,7 @@ class CorrelationIntelligence:
         except Exception:
             return None
 
-    def refresh_prices(self, symbols: list) -> dict:
+    def refresh_prices(self, symbols: list[str]) -> dict[str, float]:
         """
         Fetch % change for a list of symbols.
         Caches for 5 minutes.
@@ -123,7 +120,11 @@ class CorrelationIntelligence:
 
     # ── Relative strength detection ───────────────────────────────────────────
 
-    def detect_relative_strength(self, symbol: str, changes: dict) -> dict:
+    def detect_relative_strength(
+        self,
+        symbol: str,
+        changes: dict[str, float]
+    ) -> dict:
         """
         Detect if a symbol is showing relative strength or weakness vs correlated peers.
 
@@ -205,7 +206,11 @@ class CorrelationIntelligence:
 
     # ── Correlation filter for open positions ─────────────────────────────────
 
-    def check_correlation_conflict(self, new_symbol: str, open_positions: list) -> dict:
+    def check_correlation_conflict(
+        self,
+        new_symbol: str,
+        open_positions: list[str]
+    ) -> dict:
         """
         Check if opening a new position would create dangerous correlation overlap
         with existing open positions.
@@ -235,10 +240,7 @@ class CorrelationIntelligence:
             return {
                 "conflict": True,
                 "score_adjustment": -20,
-                "reason": (
-                    f"High correlation conflict: {new_symbol} vs {worst[0]} "
-                    f"({worst[1]:.0%} corr). Diversify."
-                ),
+                "reason": f"High correlation conflict: {new_symbol} vs {worst[0]} ({worst[1]:.0%} corr). Diversify.",
                 "conflicts": conflicts,
             }
 
@@ -259,7 +261,12 @@ class CorrelationIntelligence:
 
     # ── Beta-adjusted position sizing ─────────────────────────────────────────
 
-    def get_beta_adjusted_size(self, symbol: str, base_size_pct: float, regime: str) -> float:
+    def get_beta_adjusted_size(
+        self,
+        symbol: str,
+        base_size_pct: float,
+        regime: str
+    ) -> float:
         """
         Adjust position size based on asset beta and current regime.
         High beta assets get smaller positions in bear/choppy regimes.
@@ -293,16 +300,16 @@ class CorrelationIntelligence:
     def build_correlation_context(
         self,
         symbol: str,
-        open_positions: list,
-        changes: dict,
+        open_positions: list[str],
+        changes: dict[str, float],
         dxy_trend: str = "neutral"
     ) -> str:
         """
         Build a correlation intelligence summary for Claude's prompt.
         """
-        rel_strength   = self.detect_relative_strength(symbol, changes)
-        corr_conflict  = self.check_correlation_conflict(symbol, open_positions)
-        dxy_impact     = self.get_dxy_crypto_adjustment(dxy_trend)
+        rel_strength = self.detect_relative_strength(symbol, changes)
+        corr_conflict = self.check_correlation_conflict(symbol, open_positions)
+        dxy_impact = self.get_dxy_crypto_adjustment(dxy_trend)
 
         is_crypto = "/" in symbol
 
@@ -325,7 +332,7 @@ class CorrelationIntelligence:
         if corr_conflict["conflict"]:
             lines.append(f"⚠️ CORRELATION CONFLICT: {corr_conflict['reason']}")
         else:
-            lines.append("✅ No correlation conflicts with open positions")
+            lines.append(f"✅ No correlation conflicts with open positions")
 
         # Score summary
         total_adj = (
@@ -336,3 +343,6 @@ class CorrelationIntelligence:
         lines.append(f"Total correlation score adjustment: {total_adj:+d}")
 
         return "\n".join(lines)
+
+    # Expose for external use
+    CORRELATION_MATRIX = CORRELATION_MATRIX
