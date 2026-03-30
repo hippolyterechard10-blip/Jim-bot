@@ -108,43 +108,188 @@ def api_regime():
     except Exception as e:
         return jsonify({"regime": "UNKNOWN", "error": str(e)})
 
+def _period_start(period: str) -> str | None:
+    now = datetime.now(timezone.utc)
+    if period == "today":
+        return now.date().isoformat()
+    if period == "week":
+        monday = now.date() - __import__('datetime').timedelta(days=now.weekday())
+        return monday.isoformat()
+    if period == "month":
+        return now.date().replace(day=1).isoformat()
+    if period == "ytd":
+        return now.date().replace(month=1, day=1).isoformat()
+    return None  # all
+
 @app.route("/api/closed-today")
 def api_closed_today():
+    from flask import request as flask_req
     if not _memory:
         return jsonify({"closed": [], "date": ""})
     try:
-        today = datetime.now(timezone.utc).date().isoformat()
-        conn  = sqlite3.connect(_memory.db_path, timeout=10)
-        c     = conn.cursor()
-        c.execute("""
-            SELECT symbol,
-                   SUM(pnl)         AS total_pnl,
-                   COUNT(*)         AS trade_count,
-                   SUM(qty)         AS total_qty_sold,
-                   MAX(exit_at)     AS last_exit_at,
-                   GROUP_CONCAT(DISTINCT close_reason) AS reasons
-            FROM trades
-            WHERE status = 'closed' AND exit_at >= ?
-            GROUP BY symbol
-            ORDER BY total_pnl DESC
-        """, (today,))
+        period    = flask_req.args.get("period", "today")
+        since     = _period_start(period)
+        today     = datetime.now(timezone.utc).date().isoformat()
+        conn      = sqlite3.connect(_memory.db_path, timeout=10)
+        c         = conn.cursor()
+        if since:
+            c.execute("""
+                SELECT symbol,
+                       SUM(pnl)         AS total_pnl,
+                       COUNT(*)         AS trade_count,
+                       SUM(qty)         AS total_qty_sold,
+                       MAX(exit_at)     AS last_exit_at,
+                       GROUP_CONCAT(DISTINCT close_reason) AS reasons
+                FROM trades
+                WHERE status = 'closed' AND exit_at >= ?
+                GROUP BY symbol
+                ORDER BY total_pnl DESC
+            """, (since,))
+        else:
+            c.execute("""
+                SELECT symbol,
+                       SUM(pnl)         AS total_pnl,
+                       COUNT(*)         AS trade_count,
+                       SUM(qty)         AS total_qty_sold,
+                       MAX(exit_at)     AS last_exit_at,
+                       GROUP_CONCAT(DISTINCT close_reason) AS reasons
+                FROM trades
+                WHERE status = 'closed'
+                GROUP BY symbol
+                ORDER BY total_pnl DESC
+            """)
         rows = c.fetchall()
         conn.close()
         closed = [
             {
-                "symbol":     r[0],
-                "pnl":        round(r[1], 6) if r[1] is not None else 0,
+                "symbol":      r[0],
+                "pnl":         round(r[1], 6) if r[1] is not None else 0,
                 "trade_count": r[2],
-                "qty_sold":   round(r[3], 8) if r[3] is not None else 0,
-                "last_exit":  r[4] or "",
-                "reasons":    r[5] or "",
+                "qty_sold":    round(r[3], 8) if r[3] is not None else 0,
+                "last_exit":   r[4] or "",
+                "reasons":     r[5] or "",
             }
             for r in rows
         ]
-        return jsonify({"closed": closed, "date": today})
+        return jsonify({"closed": closed, "date": today, "period": period})
     except Exception as e:
         logger.error(f"api_closed_today error: {e}")
         return jsonify({"closed": [], "error": str(e)})
+
+@app.route("/api/analysis")
+def api_analysis():
+    if not _memory:
+        return jsonify({})
+    try:
+        conn = sqlite3.connect(_memory.db_path, timeout=10)
+        c    = conn.cursor()
+
+        # ── All closed trades ──────────────────────────────────────────
+        c.execute("""
+            SELECT symbol, pnl, pnl_pct, hold_duration_min, close_reason, exit_at
+            FROM trades WHERE status='closed'
+            ORDER BY exit_at
+        """)
+        trades = c.fetchall()
+
+        # ── Daily P&L (last 30 days) ───────────────────────────────────
+        c.execute("""
+            SELECT DATE(exit_at) AS day, SUM(pnl) AS day_pnl, COUNT(*) AS cnt
+            FROM trades WHERE status='closed'
+            GROUP BY day ORDER BY day DESC LIMIT 30
+        """)
+        daily_rows = c.fetchall()
+
+        # ── P&L by asset ───────────────────────────────────────────────
+        c.execute("""
+            SELECT symbol, SUM(pnl) AS total, COUNT(*) AS cnt,
+                   AVG(pnl) AS avg_pnl, AVG(hold_duration_min) AS avg_hold
+            FROM trades WHERE status='closed'
+            GROUP BY symbol ORDER BY total DESC
+        """)
+        asset_rows = c.fetchall()
+
+        # ── Close reason breakdown ─────────────────────────────────────
+        c.execute("""
+            SELECT close_reason, COUNT(*) AS cnt, SUM(pnl) AS total_pnl
+            FROM trades WHERE status='closed'
+            GROUP BY close_reason ORDER BY cnt DESC
+        """)
+        reason_rows = c.fetchall()
+
+        conn.close()
+
+        # ── Compute core metrics ───────────────────────────────────────
+        total  = len(trades)
+        wins   = [t for t in trades if (t[1] or 0) > 0]
+        losses = [t for t in trades if (t[1] or 0) < 0]
+        pnls   = [t[1] or 0 for t in trades]
+        holds  = [t[3] or 0 for t in trades if t[3]]
+
+        gross_win  = sum(t[1] for t in wins)  if wins   else 0
+        gross_loss = sum(t[1] for t in losses) if losses else 0
+        win_rate   = (len(wins) / total * 100) if total else 0
+        loss_rate  = 100 - win_rate
+        avg_win    = (gross_win / len(wins))   if wins   else 0
+        avg_loss   = (gross_loss / len(losses)) if losses else 0
+        pf         = (gross_win / abs(gross_loss)) if gross_loss else 999
+        expectancy = (win_rate/100 * avg_win) + (loss_rate/100 * avg_loss)
+
+        best_trade  = max(trades, key=lambda t: t[1] or 0) if trades else None
+        worst_trade = min(trades, key=lambda t: t[1] or 0) if trades else None
+        avg_hold    = (sum(holds) / len(holds)) if holds else 0
+
+        # ── Streak calculation ─────────────────────────────────────────
+        streak, max_win_streak, max_loss_streak = 0, 0, 0
+        cur_streak_type = None
+        for t in trades:
+            is_win = (t[1] or 0) >= 0
+            if cur_streak_type is None or is_win == cur_streak_type:
+                streak += 1
+                cur_streak_type = is_win
+            else:
+                if cur_streak_type:
+                    max_win_streak  = max(max_win_streak, streak)
+                else:
+                    max_loss_streak = max(max_loss_streak, streak)
+                streak = 1
+                cur_streak_type = is_win
+        if cur_streak_type is True:
+            max_win_streak  = max(max_win_streak, streak)
+        elif cur_streak_type is False:
+            max_loss_streak = max(max_loss_streak, streak)
+        current_streak      = {"type": "win" if cur_streak_type else "loss", "count": streak} if trades else None
+
+        # ── Avg trades per active day ──────────────────────────────────
+        active_days = len(set(t[5][:10] for t in trades if t[5])) if trades else 1
+        avg_trades_per_day = total / active_days if active_days else 0
+
+        return jsonify({
+            "total_trades":      total,
+            "winning_trades":    len(wins),
+            "losing_trades":     len(losses),
+            "win_rate":          round(win_rate, 1),
+            "profit_factor":     round(pf, 2) if pf != 999 else 999,
+            "expectancy":        round(expectancy, 4),
+            "gross_win":         round(gross_win, 4),
+            "gross_loss":        round(gross_loss, 4),
+            "total_pnl":         round(sum(pnls), 4),
+            "avg_win":           round(avg_win, 4),
+            "avg_loss":          round(avg_loss, 4),
+            "avg_hold_min":      round(avg_hold, 1),
+            "avg_trades_per_day": round(avg_trades_per_day, 1),
+            "best_trade":  {"symbol": best_trade[0],  "pnl": round(best_trade[1],4),  "reason": best_trade[4]} if best_trade  else None,
+            "worst_trade": {"symbol": worst_trade[0], "pnl": round(worst_trade[1],4), "reason": worst_trade[4]} if worst_trade else None,
+            "current_streak":    current_streak,
+            "max_win_streak":    max_win_streak,
+            "max_loss_streak":   max_loss_streak,
+            "daily_pnl":  [{"date": r[0], "pnl": round(r[1],4), "trades": r[2]} for r in daily_rows],
+            "by_asset":   [{"symbol": r[0], "pnl": round(r[1],4), "trades": r[2], "avg_pnl": round(r[3],4), "avg_hold_min": round(r[4] or 0,1)} for r in asset_rows],
+            "by_reason":  [{"reason": r[0], "trades": r[1], "pnl": round(r[2],4)} for r in reason_rows],
+        })
+    except Exception as e:
+        logger.error(f"api_analysis error: {e}")
+        return jsonify({"error": str(e)})
 
 @app.route("/api/account")
 def api_account():

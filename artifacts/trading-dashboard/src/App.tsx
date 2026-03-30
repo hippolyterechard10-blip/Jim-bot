@@ -58,7 +58,23 @@ interface ClosedTodayItem {
   qty_sold: number; last_exit: string; reasons: string;
 }
 
-type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES";
+type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
+type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
+
+interface AnalysisData {
+  total_trades: number; winning_trades: number; losing_trades: number;
+  win_rate: number; profit_factor: number; expectancy: number;
+  gross_win: number; gross_loss: number; total_pnl: number;
+  avg_win: number; avg_loss: number; avg_hold_min: number;
+  avg_trades_per_day: number;
+  best_trade:  { symbol: string; pnl: number; reason: string } | null;
+  worst_trade: { symbol: string; pnl: number; reason: string } | null;
+  current_streak: { type: string; count: number } | null;
+  max_win_streak: number; max_loss_streak: number;
+  daily_pnl: { date: string; pnl: number; trades: number }[];
+  by_asset:  { symbol: string; pnl: number; trades: number; avg_pnl: number; avg_hold_min: number }[];
+  by_reason: { reason: string; trades: number; pnl: number }[];
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(s: string) {
@@ -158,7 +174,7 @@ function TopNav({ activePage, setActivePage, regime, portfolioValue, portfolioDe
   positionsCount: number; lastRefresh: Date; error: boolean;
 }) {
   const rb   = regimeBadgeStyle(regime);
-  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "TRADES"];
+  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "TRADES", "ANALYSIS"];
   const pPos = portfolioDelta >= 0;
 
   return (
@@ -339,12 +355,170 @@ function ReasonBadge({ reasons }: { reasons: string }) {
   return <span className="text-[9px] bg-slate-700/40 text-slate-500 border border-slate-600/40 rounded px-1.5 py-0.5">{reasons.split(",")[0]}</span>;
 }
 
-function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday }: {
+// ── ANALYSIS PAGE ────────────────────────────────────────────────────────────
+function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  return (
+    <div className="bg-slate-800 rounded-xl p-4 border border-slate-700/50">
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">{label}</div>
+      <div className={`text-xl font-bold font-mono ${color ?? "text-white"}`}>{value}</div>
+      {sub && <div className="text-[10px] text-slate-600 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function AnalysisPage({ data }: { data: AnalysisData | null }) {
+  if (!data || data.total_trades === 0) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-[300px]">
+        <div className="text-slate-600 text-sm">No closed trades yet — analysis will appear once the first trade closes.</div>
+      </div>
+    );
+  }
+
+  const pfLabel   = data.profit_factor === 999 ? "∞" : data.profit_factor.toFixed(2);
+  const exSign    = data.expectancy >= 0 ? "+" : "";
+  const holdLabel = data.avg_hold_min >= 60
+    ? `${(data.avg_hold_min / 60).toFixed(1)}h`
+    : `${data.avg_hold_min.toFixed(0)}m`;
+  const streakCol = data.current_streak?.type === "win" ? "text-emerald-400" : "text-red-400";
+  const streakLbl = data.current_streak
+    ? `${data.current_streak.count} ${data.current_streak.type} streak`
+    : "—";
+
+  const maxAssetPnl = Math.max(...data.by_asset.map(a => Math.abs(a.pnl)), 0.01);
+
+  return (
+    <div className="p-4 sm:p-6 space-y-6">
+      <h2 className="text-base font-bold text-white">Performance Analysis</h2>
+
+      {/* ── KPI Row 1 ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard label="Win Rate"      value={`${data.win_rate.toFixed(1)}%`}
+          sub={`${data.winning_trades}W / ${data.losing_trades}L`}
+          color={data.win_rate >= 50 ? "text-emerald-400" : "text-red-400"} />
+        <StatCard label="Profit Factor" value={pfLabel}
+          sub={`Gross win $${data.gross_win.toFixed(2)}`}
+          color={data.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"} />
+        <StatCard label="Expectancy"    value={`${exSign}$${data.expectancy.toFixed(4)}`}
+          sub="avg $ per trade"
+          color={data.expectancy >= 0 ? "text-sky-400" : "text-red-400"} />
+        <StatCard label="Avg Hold"      value={holdLabel}
+          sub={`${data.avg_trades_per_day.toFixed(1)} trades/day`} />
+      </div>
+
+      {/* ── KPI Row 2 ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard label="Total Trades"  value={`${data.total_trades}`}
+          sub={`${data.avg_trades_per_day.toFixed(1)} per active day`} />
+        <StatCard label="Best Trade"
+          value={data.best_trade ? `+$${data.best_trade.pnl.toFixed(4)}` : "—"}
+          sub={data.best_trade?.symbol}  color="text-emerald-400" />
+        <StatCard label="Worst Trade"
+          value={data.worst_trade ? `$${data.worst_trade.pnl.toFixed(4)}` : "—"}
+          sub={data.worst_trade?.symbol} color={data.worst_trade && data.worst_trade.pnl < 0 ? "text-red-400" : "text-emerald-400"} />
+        <StatCard label="Win Streak"    value={streakLbl}
+          sub={`Max: ${data.max_win_streak}W / ${data.max_loss_streak}L`}
+          color={streakCol} />
+      </div>
+
+      {/* ── P&L by Asset ──────────────────────────────────────────── */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50">
+          <span className="text-sm font-bold text-white">P&L by Asset</span>
+        </div>
+        <div className="p-4 space-y-3">
+          {data.by_asset.map(a => {
+            const isPos  = a.pnl >= 0;
+            const barPct = (Math.abs(a.pnl) / maxAssetPnl) * 100;
+            return (
+              <div key={a.symbol}>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-white">{a.symbol.replace("/USD", "")}</span>
+                    <span className="text-[10px] text-slate-500">{a.trades} trades · avg {a.avg_hold_min >= 60 ? `${(a.avg_hold_min/60).toFixed(1)}h` : `${a.avg_hold_min.toFixed(0)}m`}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                      {isPos ? "+" : ""}${a.pnl.toFixed(4)}
+                    </span>
+                    <span className="text-[10px] text-slate-500 ml-2">avg {isPos ? "+" : ""}${a.avg_pnl.toFixed(4)}</span>
+                  </div>
+                </div>
+                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${isPos ? "bg-emerald-500/70" : "bg-red-500/70"}`}
+                    style={{ width: `${barPct}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Close Reason + Daily P&L side-by-side ─────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Close Reasons */}
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700/50">
+            <span className="text-sm font-bold text-white">Exit Reasons</span>
+          </div>
+          <div className="p-3 space-y-2">
+            {data.by_reason.map(r => (
+              <div key={r.reason} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ReasonBadge reasons={r.reason} />
+                  <span className="text-xs text-slate-400">{r.trades} trades</span>
+                </div>
+                <span className={`text-xs font-mono font-bold ${r.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {r.pnl >= 0 ? "+" : ""}${r.pnl.toFixed(4)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Daily P&L */}
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700/50">
+            <span className="text-sm font-bold text-white">Daily P&L</span>
+          </div>
+          <div className="divide-y divide-slate-700/30">
+            {data.daily_pnl.length === 0 ? (
+              <div className="p-4 text-xs text-slate-600">No data</div>
+            ) : data.daily_pnl.map(d => (
+              <div key={d.date} className="flex items-center justify-between px-4 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">{d.date}</span>
+                  <span className="text-[10px] text-slate-600">{d.trades} trades</span>
+                </div>
+                <span className={`text-xs font-mono font-bold ${d.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(4)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── TRADES PAGE ───────────────────────────────────────────────────────────────
+function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday, closedPeriod, setClosedPeriod }: {
   positions: Position[]; decisions: Decision[];
   partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
   closedToday: ClosedTodayItem[];
+  closedPeriod: ClosedPeriod; setClosedPeriod: (p: ClosedPeriod) => void;
 }) {
-  const closedTotalPnl = closedToday.reduce((s, c) => s + c.pnl, 0);
+  const closedTotalPnl = (closedToday ?? []).reduce((s, c) => s + c.pnl, 0);
+  const PERIODS: { key: ClosedPeriod; label: string }[] = [
+    { key: "today", label: "Today" },
+    { key: "week",  label: "Week"  },
+    { key: "month", label: "Month" },
+    { key: "ytd",   label: "YTD"   },
+    { key: "all",   label: "All"   },
+  ];
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -378,19 +552,30 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
         </div>
       )}
 
-      {/* ── Closed Today ──────────────────────────────────────────── */}
+      {/* ── Closed Trades (with period selector) ─────────────────── */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-bold text-white">Closed Today</h2>
-          {closedToday.length > 0 && (
+          <div className="flex items-center gap-3">
+            <h2 className="text-base font-bold text-white">Closed</h2>
+            {/* Period pill selector */}
+            <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
+              {PERIODS.map(p => (
+                <button key={p.key} onClick={() => setClosedPeriod(p.key)}
+                  className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${closedPeriod === p.key ? "bg-sky-600/30 text-sky-400" : "text-slate-500 hover:text-slate-300"}`}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {(closedToday ?? []).length > 0 && (
             <span className={`text-sm font-bold font-mono ${closedTotalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
               {closedTotalPnl >= 0 ? "+" : "-"}${Math.abs(closedTotalPnl).toFixed(4)}
             </span>
           )}
         </div>
-        {closedToday.length === 0 ? (
+        {(closedToday ?? []).length === 0 ? (
           <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
-            No closed trades today
+            No closed trades for this period
           </div>
         ) : (
           <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
@@ -997,14 +1182,16 @@ export default function App() {
   const [stats,      setStats]      = useState<StatsResponse | null>(null);
   const [partialProfits, setPartialProfits] = useState<PartialProfits>({});
   const [stops,      setStops]      = useState<Stops>({});
-  const [account,    setAccount]    = useState<AccountResponse | null>(null);
-  const [closedToday, setClosedToday] = useState<ClosedTodayItem[]>([]);
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  const [error,      setError]      = useState(false);
+  const [account,      setAccount]      = useState<AccountResponse | null>(null);
+  const [closedToday,  setClosedToday]  = useState<ClosedTodayItem[]>([]);
+  const [closedPeriod, setClosedPeriod] = useState<ClosedPeriod>("today");
+  const [analysis,     setAnalysis]     = useState<AnalysisData | null>(null);
+  const [lastRefresh,  setLastRefresh]  = useState<Date>(new Date());
+  const [error,        setError]        = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes, ctRes] = await Promise.all([
+      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes, anlRes] = await Promise.all([
         fetch(`${BASE}/api/status`),
         fetch(`${BASE}/api/decisions`),
         fetch(`${BASE}/api/positions`),
@@ -1015,7 +1202,7 @@ export default function App() {
         fetch(`${BASE}/api/partial-profits`),
         fetch(`${BASE}/api/stops`),
         fetch(`${BASE}/api/account`),
-        fetch(`${BASE}/api/closed-today`),
+        fetch(`${BASE}/api/analysis`),
       ]);
       if (sRes.ok)     { const d = await sRes.json() as Status;   setStatus(d); }
       if (dRes.ok)     { const d = await dRes.json();             setDecisions(d.decisions ?? []); }
@@ -1027,10 +1214,18 @@ export default function App() {
       if (ppRes.ok)    { const d = await ppRes.json(); setPartialProfits(d.partial_profits ?? {}); }
       if (stopsRes.ok) { const d = await stopsRes.json(); setStops(d.stops ?? {}); }
       if (accRes.ok)   { const d = await accRes.json() as AccountResponse; if (d.portfolio_value > 0) setAccount(d); }
-      if (ctRes.ok)    { const d = await ctRes.json(); setClosedToday(d.closed ?? []); }
+      if (anlRes.ok)   { const d = await anlRes.json(); if (d.total_trades !== undefined) setAnalysis(d as AnalysisData); }
       setError(false);
     } catch { setError(true); }
     setLastRefresh(new Date());
+  }, []);
+
+  // ── Period-aware closed fetch — re-runs when period changes ────────────────
+  const fetchClosed = useCallback(async (period: ClosedPeriod) => {
+    try {
+      const res = await fetch(`${BASE}/api/closed-today?period=${period}`);
+      if (res.ok) { const d = await res.json(); setClosedToday(d.closed ?? []); }
+    } catch { /* silent */ }
   }, []);
 
   useEffect(() => {
@@ -1038,6 +1233,11 @@ export default function App() {
     const id = setInterval(fetchAll, 15_000);
     return () => clearInterval(id);
   }, [fetchAll]);
+
+  // Initial + period-change fetch for closed trades
+  useEffect(() => { fetchClosed(closedPeriod); }, [closedPeriod, fetchClosed]);
+  // Also re-fetch closed on every main refresh cycle
+  useEffect(() => { fetchClosed(closedPeriod); }, [lastRefresh]); // eslint-disable-line
 
   // Derived state — use real Alpaca equity when available, fall back to computed
   const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
@@ -1062,10 +1262,11 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"    && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} />}
-        {activePage === "MARKET"  && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
-        {activePage === "SIGNALS" && <SignalsPage decisions={decisions} />}
-        {activePage === "TRADES"  && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} />}
+        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} />}
+        {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
+        {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
+        {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} />}
+        {activePage === "ANALYSIS" && <AnalysisPage data={analysis} />}
       </div>
     </div>
   );

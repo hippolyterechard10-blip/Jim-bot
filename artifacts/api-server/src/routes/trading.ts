@@ -185,8 +185,13 @@ router.get("/account", async (_req, res) => {
   }));
 });
 
-router.get("/closed-today", async (_req, res) => {
-  res.json(await proxyFlask(`${FLASK_BASE}/api/closed-today`, { closed: [], date: "" }));
+router.get("/closed-today", async (req, res) => {
+  const period = (req.query.period as string) || "today";
+  res.json(await proxyFlask(`${FLASK_BASE}/api/closed-today?period=${period}`, { closed: [], date: "" }));
+});
+
+router.get("/analysis", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/analysis`, {}));
 });
 
 export default router;
