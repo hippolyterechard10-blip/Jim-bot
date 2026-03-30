@@ -40,6 +40,7 @@ ETF_SYMBOLS      = ["QQQ", "SPY", "ARKK"]
 BLUECHIP_SYMBOLS = ["AAPL", "NVDA", "TSLA", "META", "GOOGL", "MSFT", "AMD", "QQQ", "SPY"]
 ALL_SYMBOLS      = CRYPTO_SYMBOLS + STOCK_SYMBOLS + ETF_SYMBOLS
 
-# Loop
-LOOP_INTERVAL_SECONDS = 300
+# Loop speeds
+LOOP_INTERVAL_SECONDS      = 300   # Slow loop: full synthesis + movers refresh
+FAST_LOOP_INTERVAL_SECONDS = 30    # Fast loop: position stops + score triggers
 INITIAL_CAPITAL = 1000.0

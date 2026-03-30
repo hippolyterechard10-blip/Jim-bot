@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone, time as dtime
 import anthropic
@@ -52,6 +53,10 @@ class TradingAgent:
         self._trail_pcts: dict = {}
         # Daily dedup: date string (YYYY-MM-DD ET) when cash liberation last fired
         self._cash_lib_last_date: str = ""
+        # Two-speed loop: dedup + cross-loop coordination
+        self._last_analyzed: dict  = {}  # symbol → UTC datetime of last Claude call
+        self._fast_triggered: set  = set()  # symbols triggered by fast loop this cycle
+        self._lock = threading.Lock()      # guards _last_analyzed, _fast_triggered
 
     def _sync_orphan_positions(self):
         """Detect Alpaca positions with no matching open SQLite record and create them."""
@@ -252,7 +257,226 @@ class TradingAgent:
         normalized = alpaca_symbol.replace("/", "")
         return any(normalized == s.replace("/", "") for s in config.CRYPTO_SYMBOLS)
 
-    def _manage_trailing_stops(self):
+    # ── Two-speed loop helpers ─────────────────────────────────────────────────
+
+    def _was_recently_analyzed(self, symbol: str, window_seconds: int = 180) -> bool:
+        """Return True if Claude was called for this symbol within the last N seconds."""
+        with self._lock:
+            last = self._last_analyzed.get(symbol)
+        if last is None:
+            return False
+        return (datetime.now(timezone.utc) - last).total_seconds() < window_seconds
+
+    def _mark_analyzed(self, symbol: str):
+        """Record the UTC time of the most recent Claude call for this symbol."""
+        with self._lock:
+            self._last_analyzed[symbol] = datetime.now(timezone.utc)
+
+    def consume_fast_triggered(self) -> set:
+        """Return (and clear) the set of symbols triggered by the fast loop since last slow cycle."""
+        with self._lock:
+            triggered = set(self._fast_triggered)
+            self._fast_triggered.clear()
+        return triggered
+
+    def _check_hard_stops(self, positions):
+        """[FAST] Close any LONG position whose loss exceeds TRADE_STOP_LOSS_PCT."""
+        for pos in (positions or []):
+            try:
+                if getattr(pos, "side", "long") == "short":
+                    continue
+                current_price = float(pos.current_price)
+                avg_entry     = float(pos.avg_entry_price)
+                if avg_entry <= 0:
+                    continue
+                loss_pct = (avg_entry - current_price) / avg_entry
+                if loss_pct >= config.TRADE_STOP_LOSS_PCT:
+                    symbol = pos.symbol
+                    logger.info(
+                        f"[FAST] 🛑 FAST STOP: {symbol} hard stop hit at {current_price:.6g} "
+                        f"— loss capped at {loss_pct*100:.1f}%"
+                    )
+                    closed = self.broker.close_position(symbol)
+                    if closed:
+                        self._high_water.pop(symbol, None)
+                        self._trail_pcts.pop(symbol, None)
+                        self._partial_taken.discard(symbol)
+                        if self.memory:
+                            try:
+                                open_trades = self.memory.get_recent_trades(limit=50)
+                                match = next(
+                                    (t for t in open_trades
+                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
+                                     and t.get("status") == "open"),
+                                    None,
+                                )
+                                if match:
+                                    qty_m   = float(match["qty"])
+                                    pnl     = (current_price - float(match["entry_price"])) * qty_m
+                                    pnl_pct = -round(loss_pct * 100, 4)
+                                    self.memory.log_trade_close(
+                                        match["trade_id"],
+                                        exit_price=current_price,
+                                        close_reason="hard_stop_loss",
+                                        pnl=round(pnl, 4),
+                                        pnl_pct=pnl_pct,
+                                    )
+                            except Exception as me:
+                                logger.warning(f"[FAST] Memory update after hard stop ({symbol}): {me}")
+            except Exception as e:
+                logger.error(f"[FAST] Hard stop check error: {e}")
+
+    def fast_loop_tick(self):
+        """
+        FAST LOOP — called every 30 seconds from a background thread.
+        1. Trailing stop check  → FAST EXIT log
+        2. Hard stop check      → FAST STOP log
+        3. RSI/MACD/volume scan → compute raw opportunity score
+        4. Score > 60 or < 30  → FAST TRIGGER → call Claude immediately
+        5. Volume > 5× average → VOLUME SPIKE log
+        Never calls Claude directly; triggers analyze_market() when threshold crossed.
+        """
+        # ── 1 & 2: Position management ────────────────────────────────────────
+        try:
+            positions = self.broker.get_positions() or []
+        except Exception as e:
+            logger.error(f"[FAST] Cannot fetch positions: {e}")
+            positions = []
+
+        self._manage_trailing_stops(loop_tag="FAST")
+        self._manage_short_trailing_stops(loop_tag="FAST")
+        self._check_hard_stops(positions)
+
+        # ── 3-5: Technical scan (no movers refresh — uses cached data) ────────
+        session_ctx = get_session_context()
+        session     = session_ctx["session"]
+
+        # Build fast watchlist from session rules + cached movers
+        fast_watchlist: list[str] = []
+        if is_good_stock_window():
+            fast_watchlist.extend(config.BLUECHIP_SYMBOLS)
+        if is_crypto_good_hours():
+            fast_watchlist.extend(config.CRYPTO_SYMBOLS)
+        cached_movers = self.scanner._movers_cache.get("symbols", [])
+        for m in cached_movers[:5]:
+            sym = m.get("symbol")
+            if sym and sym not in fast_watchlist:
+                fast_watchlist.append(sym)
+
+        for symbol in fast_watchlist:
+            # Skip symbols recently analyzed (3-min window)
+            if self._was_recently_analyzed(symbol, window_seconds=180):
+                continue
+
+            try:
+                bars = self.broker.get_bars(symbol)
+                if bars is None or bars.empty:
+                    continue
+                bars50  = bars.tail(50)
+                prices  = bars50["close"].tolist()
+                volumes = bars50["volume"].tolist()
+                if len(prices) < 20:
+                    continue
+
+                indicators = compute_indicators(prices, volumes)
+                if "error" in indicators:
+                    continue
+                patterns = detect_patterns(indicators, session)
+                score    = compute_opportunity_score(indicators, patterns)
+
+                # ── 5: Volume spike ───────────────────────────────────────────
+                sample     = volumes[-20:] if len(volumes) >= 20 else volumes
+                avg_vol    = sum(sample) / len(sample) if sample else 1
+                last_vol   = volumes[-1] if volumes else 0
+                ratio      = last_vol / avg_vol if avg_vol > 0 else 1.0
+                if ratio >= 5.0:
+                    logger.info(
+                        f"[FAST] ⚡ VOLUME SPIKE: {symbol} {ratio:.1f}x average — monitoring"
+                    )
+
+                # ── 4: Score threshold → trigger Claude ───────────────────────
+                if score > 60 or score < 30:
+                    logger.info(
+                        f"[FAST] 🎯 FAST TRIGGER: {symbol} score={score:.0f} → calling Claude now"
+                    )
+                    self._mark_analyzed(symbol)
+                    with self._lock:
+                        self._fast_triggered.add(symbol)
+
+                    market_context = self.scanner.build_market_context()
+                    try:
+                        decision = self.analyze_market(
+                            symbol, bars, market_context=market_context
+                        )
+                    except Exception as e:
+                        logger.error(f"[FAST] analyze_market error {symbol}: {e}")
+                        continue
+
+                    if not decision:
+                        continue
+
+                    action     = decision.get("decision", "hold")
+                    confidence = decision.get("confidence", 0)
+                    logger.info(
+                        f"[FAST] {symbol}: {action.upper()} conf={confidence:.0%} — "
+                        f"{decision.get('reasoning', '')[:120]}"
+                    )
+
+                    if self.memory:
+                        self.memory.log_decision(
+                            decision=action,
+                            reasoning=f"[FAST TRIGGER] {decision.get('reasoning', '')}",
+                            symbol=symbol,
+                            confidence=confidence,
+                        )
+
+                    regime_params = self.regime.get_params()
+                    min_conf      = regime_params["confidence_threshold"] / 100
+                    current_price = float(bars["close"].iloc[-1])
+
+                    if action == "buy" and confidence >= min_conf:
+                        if self.risk.can_trade():
+                            qty, pct, trail_pct = self.risk.get_position_size_by_score(
+                                symbol, current_price, score
+                            )
+                            sl     = self.risk.calculate_stop_loss(current_price, "buy")
+                            amount = qty * current_price
+                            logger.info(
+                                f"[FAST] TRADE ENTRY: {symbol} buy | score={score:.0f} "
+                                f"| position={pct*100:.0f}% = ${amount:,.2f} "
+                                f"| stop=${sl:.4f}"
+                            )
+                            order = self.broker.place_order(symbol, qty, "buy", sl)
+                            self._trail_pcts[symbol] = trail_pct
+                            if order and self.memory:
+                                try:
+                                    self.memory.log_trade_open(
+                                        trade_id=str(uuid.uuid4()),
+                                        symbol=symbol,
+                                        side="buy",
+                                        qty=qty,
+                                        entry_price=current_price,
+                                        stop_loss=sl,
+                                        market_context={
+                                            "source": "fast_loop_trigger",
+                                            "score": score,
+                                        },
+                                    )
+                                except Exception as me:
+                                    logger.warning(f"[FAST] Memory log entry ({symbol}): {me}")
+
+                    elif action == "sell" and confidence >= min_conf:
+                        logger.info(
+                            f"[FAST] TRADE EXIT: {symbol} sell signal | conf={confidence:.0%}"
+                        )
+                        self.broker.close_position(symbol)
+
+            except Exception as e:
+                logger.error(f"[FAST] Scan error {symbol}: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _manage_trailing_stops(self, loop_tag: str = ""):
         """Check every open LONG position against its score-based trailing stop."""
         try:
             positions = self.broker.get_positions()
@@ -350,11 +574,17 @@ class TradingAgent:
                 )
 
                 if current_price <= stop_level:
-                    logger.info(
-                        f"🔴 TRAILING STOP HIT: {symbol} "
-                        f"price={current_price:.6g} < stop={stop_level:.6g} "
-                        f"(peak={new_high:.6g}, -{trail_pct*100:.0f}%)"
-                    )
+                    if loop_tag:
+                        logger.info(
+                            f"[{loop_tag}] FAST EXIT: {symbol} trailing stop hit at "
+                            f"{current_price:.6g} (peak={new_high:.6g}, -{trail_pct*100:.0f}%)"
+                        )
+                    else:
+                        logger.info(
+                            f"[SLOW] 🔴 TRAILING STOP HIT: {symbol} "
+                            f"price={current_price:.6g} < stop={stop_level:.6g} "
+                            f"(peak={new_high:.6g}, -{trail_pct*100:.0f}%)"
+                        )
                     closed = self.broker.close_position(symbol)
                     if closed:
                         self._high_water.pop(symbol, None)
@@ -389,7 +619,7 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Trailing stop error for {symbol}: {e}")
 
-    def _manage_short_trailing_stops(self):
+    def _manage_short_trailing_stops(self, loop_tag: str = ""):
         """Check every SHORT position — trailing stop 3% above the lowest price reached."""
         try:
             positions = self.broker.get_positions()
@@ -488,11 +718,17 @@ class TradingAgent:
                 )
 
                 if current_price >= stop_level:
-                    logger.info(
-                        f"🟢 SHORT TRAILING STOP HIT: {symbol} "
-                        f"price={current_price:.6g} >= stop={stop_level:.6g} "
-                        f"(trough={new_low:.6g}, +{trail_pct*100:.0f}%) — covering short"
-                    )
+                    if loop_tag:
+                        logger.info(
+                            f"[{loop_tag}] FAST EXIT: {symbol} short trailing stop hit at "
+                            f"{current_price:.6g} (trough={new_low:.6g}, +{trail_pct*100:.0f}%)"
+                        )
+                    else:
+                        logger.info(
+                            f"[SLOW] 🟢 SHORT TRAILING STOP HIT: {symbol} "
+                            f"price={current_price:.6g} >= stop={stop_level:.6g} "
+                            f"(trough={new_low:.6g}, +{trail_pct*100:.0f}%) — covering short"
+                        )
                     cover_qty = abs(qty_val)
                     covered   = self.broker.place_order(symbol, cover_qty, "buy")
                     if covered:
@@ -581,24 +817,30 @@ class TradingAgent:
             logger.error(f"analyze_market error: {e}")
             return None
 
-    def run_cycle(self):
+    def run_cycle(self, skip_symbols: set = None):
+        """
+        SLOW LOOP — called every 5 minutes from the main thread.
+        skip_symbols: set of symbols already triggered+analyzed by the fast loop this cycle.
+        """
         # 9:25 ET weekdays: free crypto cash ahead of stock market open
         self._pre_market_cash_liberation()
 
         # Sync any Alpaca positions that have no SQLite record (e.g. manual trades)
         self._sync_orphan_positions()
 
-        # Manage trailing stops on all open positions (long and short)
-        self._manage_trailing_stops()
-        self._manage_short_trailing_stops()
+        # NOTE: Trailing stop management is handled exclusively by the fast loop (every 30s).
+        # No trailing stop call here to avoid double-firing on simultaneous startup.
 
         if not self.risk.can_trade():
-            logger.warning("⚠️ Trading paused by risk manager")
+            logger.warning("[SLOW] ⚠️ Trading paused by risk manager")
             return
 
         session_ctx = get_session_context()
         session = session_ctx["session"]
-        logger.info(f"📅 Session: {session} ({session_ctx['time_et']}) — stocks: {session_ctx['good_for_stocks']} | crypto: {session_ctx['good_for_crypto']}")
+        logger.info(
+            f"[SLOW] 📅 Session: {session} ({session_ctx['time_et']}) — "
+            f"stocks: {session_ctx['good_for_stocks']} | crypto: {session_ctx['good_for_crypto']}"
+        )
 
         # ── Regime-driven dynamic parameters ─────────────────────────────────
         regime_params   = self.regime.get_params()
@@ -608,11 +850,12 @@ class TradingAgent:
         size_mult       = regime_params["position_size_multiplier"]
         regime_conf_min = regime_params["confidence_threshold"] / 100
         logger.info(
-            f"🎯 Regime: {_regime.upper()} | "
+            f"[SLOW] 🎯 Regime: {_regime.upper()} | "
             f"long_min={score_long_min} | short_max={score_short_max} | "
             f"size={size_mult}x | conf_min={regime_conf_min:.0%}"
         )
 
+        _skip = skip_symbols or set()
         dynamic_watchlist = self.scanner.get_dynamic_watchlist()
         symbols_to_scan = []
         for symbol in dynamic_watchlist:
@@ -621,10 +864,14 @@ class TradingAgent:
                 continue
             if not is_crypto and not is_good_stock_window():
                 continue
+            # Skip symbols the fast loop already analyzed this cycle
+            if symbol in _skip:
+                logger.info(f"[SLOW] ⏭ Skipping {symbol} — already triggered by fast loop")
+                continue
             symbols_to_scan.append(symbol)
 
         if not symbols_to_scan:
-            logger.info("😴 No symbols to scan in current session — crypto off-hours and market closed")
+            logger.info("[SLOW] 😴 No symbols to scan in current session — crypto off-hours and market closed")
             return
 
         # Build market context once per cycle (news sentiment + top movers + calendar + earnings)
@@ -667,7 +914,7 @@ class TradingAgent:
                 logger.error(f"Pre-scan error on {symbol}: {e}")
 
         ranked = rank_symbols({s: d for s, d in symbols_data.items()})
-        logger.info(f"🔍 Scanning {len(ranked)} symbols — top: {ranked[:3]}")
+        logger.info(f"[SLOW] 🔍 Scanning {len(ranked)} symbols — top: {ranked[:3]}")
 
         # Pre-filter: two-band score gate
         #   score > 60 → bullish signal   → Claude evaluates for long
