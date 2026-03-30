@@ -98,8 +98,14 @@ def api_regime():
     if not _regime:
         return jsonify({"regime": "UNKNOWN", "vix": None, "dxy": None, "score_long_threshold": 60, "score_short_threshold": 30})
     try:
+        import re as _re
         params  = _regime.get_params()
         context = _regime.build_regime_context()
+        # Inject VIX into params if present in context string
+        vix_m = _re.search(r"VIX:\s*([\d.]+)", context)
+        if vix_m:
+            params = dict(params)
+            params["vix"] = float(vix_m.group(1))
         return jsonify({
             "regime":   params.get("regime", "UNKNOWN"),
             "params":   params,

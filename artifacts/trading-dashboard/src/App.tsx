@@ -355,6 +355,37 @@ function ReasonBadge({ reasons }: { reasons: string }) {
   return <span className="text-[9px] bg-slate-700/40 text-slate-500 border border-slate-600/40 rounded px-1.5 py-0.5">{reasons.split(",")[0]}</span>;
 }
 
+function EquityCurve({ data }: { data: { date: string; pnl: number }[] }) {
+  if (data.length < 2) return null;
+  let cum = 0;
+  const points = data.map(d => { cum += d.pnl; return cum; });
+  const maxV = Math.max(...points.map(Math.abs), 0.01);
+  const W = 400; const H = 64;
+  const xs = points.map((_, i) => (i / Math.max(points.length - 1, 1)) * W);
+  const ys = points.map(p => H / 2 - (p / maxV) * (H / 2 - 5));
+  const pathD = xs.map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L ${W} ${H / 2} L 0 ${H / 2} Z`;
+  const lastVal = points[points.length - 1];
+  const col = lastVal >= 0 ? "#10b981" : "#ef4444";
+  const gradId = `eq-${data.length}`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={col} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={col} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <line x1={0} y1={H / 2} x2={W} y2={H / 2} stroke="#334155" strokeWidth="1" />
+      <path d={areaD} fill={`url(#${gradId})`} />
+      <path d={pathD} stroke={col} strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {xs.map((x, i) => (
+        <circle key={i} cx={x} cy={ys[i]} r="2" fill={col} opacity="0.7" />
+      ))}
+    </svg>
+  );
+}
+
 // ── ANALYSIS PAGE ────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
@@ -456,6 +487,64 @@ function AnalysisPage({ data }: { data: AnalysisData | null }) {
         </div>
       </div>
 
+      {/* ── Win / Loss Profile ────────────────────────────────────── */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50">
+          <span className="text-sm font-bold text-white">Win / Loss Profile</span>
+        </div>
+        <div className="p-4 space-y-3">
+          <div>
+            <div className="flex justify-between text-xs mb-1">
+              <span className="text-emerald-400 font-semibold">Avg Win</span>
+              <span className="text-emerald-400 font-mono font-bold">+${data.avg_win.toFixed(4)}</span>
+            </div>
+            <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+              <div className="h-full bg-emerald-500/70 rounded-full"
+                style={{ width: `${Math.min((data.avg_win / Math.max(data.avg_win, Math.abs(data.avg_loss || 0.0001))) * 100, 100)}%` }} />
+            </div>
+          </div>
+          {data.avg_loss !== 0 && (
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-red-400 font-semibold">Avg Loss</span>
+                <span className="text-red-400 font-mono font-bold">${data.avg_loss.toFixed(4)}</span>
+              </div>
+              <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                <div className="h-full bg-red-500/70 rounded-full"
+                  style={{ width: `${Math.min((Math.abs(data.avg_loss) / Math.max(data.avg_win, Math.abs(data.avg_loss))) * 100, 100)}%` }} />
+              </div>
+            </div>
+          )}
+          <div className="flex justify-between text-xs text-slate-500 pt-1 border-t border-slate-700/40">
+            <span>
+              Reward/Risk <span className="text-white font-semibold">
+                {data.avg_loss !== 0 ? (data.avg_win / Math.abs(data.avg_loss)).toFixed(2) : "∞"}x
+              </span>
+            </span>
+            <span>
+              Expectancy <span className={`font-semibold ${data.expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {data.expectancy >= 0 ? "+" : ""}${data.expectancy.toFixed(4)}
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Equity Curve ──────────────────────────────────────────── */}
+      {data.daily_pnl.length >= 2 && (
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+            <span className="text-sm font-bold text-white">Equity Curve</span>
+            <span className={`text-sm font-bold font-mono ${data.total_pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {data.total_pnl >= 0 ? "+" : ""}${data.total_pnl.toFixed(4)} cumulative
+            </span>
+          </div>
+          <div className="p-4">
+            <EquityCurve data={data.daily_pnl} />
+          </div>
+        </div>
+      )}
+
       {/* ── Close Reason + Daily P&L side-by-side ─────────────────── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {/* Close Reasons */}
@@ -511,7 +600,10 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
   closedToday: ClosedTodayItem[];
   closedPeriod: ClosedPeriod; setClosedPeriod: (p: ClosedPeriod) => void;
 }) {
-  const closedTotalPnl = (closedToday ?? []).reduce((s, c) => s + c.pnl, 0);
+  const closedTotalPnl      = (closedToday ?? []).reduce((s, c) => s + c.pnl, 0);
+  const unrealizedTotalPos  = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const securedTotalPos     = Object.values(partialProfits).reduce((s, p) => s + p.secured_pnl, 0);
+  const allocatedTotalPct   = positions.reduce((s, p) => s + p.cost_basis, 0) / Math.max(totalPortfolio, INITIAL_CAPITAL) * 100;
   const PERIODS: { key: ClosedPeriod; label: string }[] = [
     { key: "today", label: "Today" },
     { key: "week",  label: "Week"  },
@@ -547,6 +639,21 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                     partialProfits={partialProfits} stops={stops} totalPortfolio={totalPortfolio} />
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-600 bg-slate-900/50">
+                  <td className="px-3 py-2 text-[10px] text-slate-500 uppercase font-semibold tracking-wider" colSpan={2}>Total</td>
+                  <td />
+                  <td className="px-3 py-2">
+                    <div className={`text-xs font-bold ${unrealizedTotalPos >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtPnl(unrealizedTotalPos)}</div>
+                  </td>
+                  <td className="px-3 py-2">
+                    {securedTotalPos > 0 && <span className="text-[10px] font-semibold text-emerald-400">✅ +${securedTotalPos.toFixed(2)}</span>}
+                  </td>
+                  <td />
+                  <td className="px-3 py-2 text-xs font-semibold text-slate-400">{allocatedTotalPct.toFixed(1)}%</td>
+                  <td />
+                </tr>
+              </tfoot>
             </table>
           </div>
         </div>
@@ -602,7 +709,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                       </td>
                       <td className="px-3 py-2.5 text-xs text-slate-400">{c.trade_count}</td>
                       <td className="px-3 py-2.5 text-xs text-slate-400 font-mono">{c.qty_sold.toFixed(6)}</td>
-                      <td className="px-3 py-2.5 text-xs text-slate-500">{c.last_exit ? fmtTime(c.last_exit) : "—"}</td>
+                      <td className="px-3 py-2.5 text-xs text-slate-500">{c.last_exit ? (closedPeriod === "today" ? fmtTime(c.last_exit) : fmtDateTime(c.last_exit)) : "—"}</td>
                       <td className="px-3 py-2.5"><ReasonBadge reasons={c.reasons} /></td>
                     </tr>
                   );
@@ -782,6 +889,32 @@ function SentimentColumn({ sentiment, regime, headlines, trumpSignal, rb, regime
           )}
         </div>
 
+        {/* VIX Fear Gauge */}
+        {params?.["vix"] !== undefined && params?.["vix"] !== null && (() => {
+          const vix = params["vix"] as number;
+          const vixColor = vix < 15 ? "text-emerald-400" : vix < 25 ? "text-yellow-400" : vix < 35 ? "text-orange-400" : "text-red-400";
+          const barColor = vix < 15 ? "bg-emerald-500" : vix < 25 ? "bg-yellow-500" : vix < 35 ? "bg-orange-500" : "bg-red-500";
+          const zone = vix < 15 ? "Calm" : vix < 25 ? "Normal" : vix < 35 ? "Fear" : "Panic";
+          return (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">VIX Fear Gauge</div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-semibold ${vixColor}`}>{zone}</span>
+                  <span className={`text-xs font-bold font-mono ${vixColor}`}>{vix.toFixed(1)}</span>
+                </div>
+              </div>
+              <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all ${barColor}`}
+                  style={{ width: `${Math.min(vix / 50 * 100, 100)}%` }} />
+              </div>
+              <div className="flex justify-between text-[8px] text-slate-600 mt-0.5">
+                <span>15</span><span>25</span><span>35</span><span>50+</span>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Sentiment */}
         <div className="flex items-center justify-between">
           <div>
@@ -914,17 +1047,19 @@ function SignalRow({ dec }: { dec: Decision }) {
 }
 
 function SignalsPage({ decisions }: { decisions: Decision[] }) {
-  const [filter, setFilter] = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
+  const [filter,  setFilter]  = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
+  const [showAll, setShowAll] = useState(false);
 
   const latestBySymbol: Record<string, Decision> = {};
   decisions.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
-  const deduped = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
-  const filtered = filter === "ALL" ? deduped : deduped.filter(d => d.decision.toUpperCase() === filter);
+  const deduped  = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
+  const baseList = showAll ? [...decisions].sort((a, b) => b.decided_at.localeCompare(a.decided_at)) : deduped;
+  const filtered = filter === "ALL" ? baseList : baseList.filter(d => d.decision.toUpperCase() === filter);
 
   return (
     <div className="p-4 sm:p-6">
       {/* Filter bar */}
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
         {(["ALL", "BUY", "SELL", "HOLD"] as const).map(f => (
           <button key={f} onClick={() => setFilter(f)}
             className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${filter === f
@@ -936,7 +1071,13 @@ function SignalsPage({ decisions }: { decisions: Decision[] }) {
             {f}
           </button>
         ))}
-        <span className="ml-auto text-xs text-slate-600">{filtered.length} signals (latest per asset)</span>
+        <button onClick={() => setShowAll(v => !v)}
+          className={`px-2.5 py-1.5 text-[10px] rounded border font-semibold transition-colors ml-1 ${showAll ? "bg-violet-900/30 text-violet-400 border-violet-700" : "text-slate-500 border-slate-700 hover:text-slate-400"}`}>
+          {showAll ? "History" : "Latest"}
+        </button>
+        <span className="ml-auto text-xs text-slate-600">
+          {filtered.length} signal{filtered.length !== 1 ? "s" : ""}{showAll ? " (full history)" : " (latest per asset)"}
+        </span>
       </div>
 
       {filtered.length === 0 ? (
@@ -1077,26 +1218,51 @@ function MonthlyBarChart({ trades }: { trades: Trade[] }) {
   );
 }
 
-function HomePage({ trades, decisions, stats, positions, portfolioValue }: {
+function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis }: {
   trades: Trade[]; decisions: Decision[];
   stats: StatsResponse | null; positions: Position[]; portfolioValue: number;
+  account: AccountResponse | null; analysis: AnalysisData | null;
 }) {
-  const totalReturn = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
-  const now             = new Date();
-  const mDecisions      = decisions.filter(d => {
+  const totalReturn    = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
+  const grossPnl       = portfolioValue - INITIAL_CAPITAL;
+  const now            = new Date();
+  const mDecisions     = decisions.filter(d => {
     const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
     return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
   });
-  const grossPnl   = portfolioValue - INITIAL_CAPITAL;
-  const claudeCost = mDecisions.length * CLAUDE_COST_PER_CALL;
-  const totalCost  = REPLIT_MONTHLY_COST + claudeCost;
-  const netPnl     = grossPnl - totalCost;
+  const claudeCost     = mDecisions.length * CLAUDE_COST_PER_CALL;
+  const totalCost      = REPLIT_MONTHLY_COST + claudeCost;
+  const netPnl         = grossPnl - totalCost;
+  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const allocatedPct    = positions.reduce((s, p) => s + p.cost_basis, 0) / Math.max(portfolioValue, INITIAL_CAPITAL) * 100;
 
   const kpis = [
-    { label: "Total Return", value: (totalReturn >= 0 ? "+" : "") + totalReturn.toFixed(2) + "%", color: totalReturn >= 0 ? "text-emerald-400" : "text-red-400" },
-    { label: "Win Rate",     value: stats ? stats.win_rate.toFixed(1) + "%" : "—",               color: "text-sky-400" },
-    { label: "Profit Factor",value: stats ? (stats.profit_factor >= 999 ? "∞" : stats.profit_factor.toFixed(2)) : "—", color: "text-violet-400" },
-    { label: "Best Asset",   value: stats?.best_asset ?? "—",                                    color: "text-amber-400" },
+    {
+      label: "Total Return",
+      value: (totalReturn >= 0 ? "+" : "") + totalReturn.toFixed(2) + "%",
+      sub: (grossPnl >= 0 ? "+" : "−") + "$" + Math.abs(grossPnl).toFixed(2),
+      color: totalReturn >= 0 ? "text-emerald-400" : "text-red-400",
+    },
+    {
+      label: "Win Rate",
+      value: stats ? stats.win_rate.toFixed(1) + "%" : "—",
+      sub: analysis ? `${analysis.winning_trades}W / ${analysis.losing_trades}L` : undefined,
+      color: "text-sky-400",
+    },
+    {
+      label: "Profit Factor",
+      value: stats ? (stats.profit_factor >= 999 ? "∞" : stats.profit_factor.toFixed(2)) : "—",
+      sub: analysis ? `$${analysis.gross_win.toFixed(2)} gross` : undefined,
+      color: "text-violet-400",
+    },
+    {
+      label: "Best Asset",
+      value: stats?.best_asset ?? "—",
+      sub: stats?.best_asset && stats.asset_pnl[stats.best_asset] !== undefined
+        ? `+$${(stats.asset_pnl[stats.best_asset] ?? 0).toFixed(2)}`
+        : undefined,
+      color: "text-amber-400",
+    },
   ];
 
   return (
@@ -1107,9 +1273,40 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue }: {
           <div key={k.label} className="bg-slate-800 rounded-xl p-4 border border-slate-700/50">
             <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{k.label}</div>
             <div className={`text-2xl font-bold ${k.color}`}>{k.value}</div>
+            {k.sub && <div className="text-[10px] text-slate-600 mt-0.5">{k.sub}</div>}
           </div>
         ))}
       </div>
+
+      {/* Portfolio Snapshot strip */}
+      {(positions.length > 0 || account) && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+            <div className="text-[10px] uppercase text-slate-600 mb-1">Unrealized</div>
+            <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {fmtPnl(unrealizedTotal)}
+            </div>
+          </div>
+          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+            <div className="text-[10px] uppercase text-slate-600 mb-1">Cash</div>
+            <div className="text-base font-bold font-mono text-slate-300">
+              ${account ? account.cash.toFixed(0) : "—"}
+            </div>
+          </div>
+          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+            <div className="text-[10px] uppercase text-slate-600 mb-1">Allocated</div>
+            <div className="text-base font-bold font-mono text-slate-300">
+              {allocatedPct.toFixed(1)}%
+            </div>
+          </div>
+          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+            <div className="text-[10px] uppercase text-slate-600 mb-1">Positions</div>
+            <div className="text-base font-bold font-mono text-slate-300">
+              {positions.length} open
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Daily P&L chart */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
@@ -1262,7 +1459,7 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} />}
+        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} />}
         {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
         {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} />}
