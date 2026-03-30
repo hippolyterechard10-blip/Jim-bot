@@ -15,12 +15,16 @@ CORS(app)
 _memory: Optional[TradingMemory] = None
 _analyzer: Optional[TradeAnalyzer] = None
 _scanner = None
+_regime  = None
+_agent   = None
 
-def init_dashboard(memory, analyzer, scanner=None):
-    global _memory, _analyzer, _scanner
-    _memory = memory
+def init_dashboard(memory, analyzer, scanner=None, regime=None, agent=None):
+    global _memory, _analyzer, _scanner, _regime, _agent
+    _memory  = memory
     _analyzer = analyzer
     _scanner = scanner
+    _regime  = regime
+    _agent   = agent
 
 @app.route("/api/stats")
 def api_stats():
@@ -88,6 +92,42 @@ def api_calendar():
     except Exception as e:
         return jsonify({"event": None, "note": "", "error": str(e)})
 
+@app.route("/api/regime")
+def api_regime():
+    if not _regime:
+        return jsonify({"regime": "UNKNOWN", "vix": None, "dxy": None, "score_long_threshold": 60, "score_short_threshold": 30})
+    try:
+        params  = _regime.get_params()
+        context = _regime.build_regime_context()
+        return jsonify({
+            "regime":   params.get("regime", "UNKNOWN"),
+            "params":   params,
+            "context":  context,
+        })
+    except Exception as e:
+        return jsonify({"regime": "UNKNOWN", "error": str(e)})
+
+@app.route("/api/stops")
+def api_stops():
+    """Return trailing stop prices per symbol from agent's in-memory state."""
+    if not _agent:
+        return jsonify({"stops": {}})
+    try:
+        stops = {}
+        high   = getattr(_agent, "_trailing_high", {})
+        trail  = getattr(_agent, "_score_trail_pct", {})
+        low    = getattr(_agent, "_trailing_low",  {})
+        s_trail = getattr(_agent, "_short_score_trail_pct", {})
+        for sym, h in high.items():
+            pct = trail.get(sym, 0.05)
+            stops[sym] = round(h * (1 - pct), 4)
+        for sym, l in low.items():
+            pct = s_trail.get(sym, 0.03)
+            stops[sym] = round(l * (1 + pct), 4)
+        return jsonify({"stops": stops})
+    except Exception as e:
+        return jsonify({"stops": {}, "error": str(e)})
+
 @app.route("/api/health")
 def api_health():
     return jsonify({"status":"ok","timestamp":datetime.now(timezone.utc).isoformat()})
@@ -96,8 +136,8 @@ def api_health():
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
-def start_dashboard(memory, analyzer, scanner=None, port=8080):
-    init_dashboard(memory, analyzer, scanner=scanner)
+def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
+    init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
     def run():
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     thread = threading.Thread(target=run, daemon=True)

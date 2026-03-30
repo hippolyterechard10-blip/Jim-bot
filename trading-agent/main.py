@@ -65,7 +65,7 @@ def main():
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
-    start_dashboard(memory, analyzer, scanner=agent.scanner, port=5000)
+    start_dashboard(memory, analyzer, scanner=agent.scanner, regime=agent.regime, agent=agent, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
 
     # ── Start the fast loop ───────────────────────────────────────────────────

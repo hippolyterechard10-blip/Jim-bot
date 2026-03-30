@@ -32,7 +32,7 @@ router.get("/status", (_req, res) => {
         .prepare(
           `SELECT symbol, side as action, entry_price as price, qty,
            entry_at as timestamp, pnl, status, close_reason
-           FROM trades ORDER BY entry_at DESC LIMIT 20`,
+           FROM trades ORDER BY entry_at DESC LIMIT 50`,
         )
         .all();
       const row = db
@@ -64,9 +64,9 @@ router.get("/decisions", (_req, res) => {
     try {
       decisions = db
         .prepare(
-          `SELECT symbol, decision, confidence, reasoning, decided_at
+          `SELECT symbol, decision, confidence, reasoning, market_data, decided_at
            FROM agent_decisions
-           ORDER BY decided_at DESC LIMIT 40`,
+           ORDER BY decided_at DESC LIMIT 60`,
         )
         .all();
       connected = true;
@@ -78,6 +78,32 @@ router.get("/decisions", (_req, res) => {
   }
 
   res.json({ db_connected: connected, decisions });
+});
+
+router.get("/partial-profits", (_req, res) => {
+  const db = getDb();
+  if (!db) {
+    res.json({ partial_profits: {} });
+    return;
+  }
+  try {
+    const rows = db
+      .prepare(
+        `SELECT symbol, SUM(ABS(pnl)) as secured_pnl, COUNT(*) as count
+         FROM trades
+         WHERE close_reason = 'partial_profit' AND pnl IS NOT NULL
+         GROUP BY symbol`,
+      )
+      .all() as { symbol: string; secured_pnl: number; count: number }[];
+    const result: Record<string, { secured_pnl: number; count: number }> = {};
+    rows.forEach(r => { result[r.symbol] = { secured_pnl: r.secured_pnl, count: r.count }; });
+    db.close();
+    res.json({ partial_profits: result });
+  } catch (e) {
+    console.error("[trading] partial-profits query error:", e);
+    try { db.close(); } catch { /* ignore */ }
+    res.json({ partial_profits: {} });
+  }
 });
 
 const ALPACA_BASE = "https://paper-api.alpaca.markets";
@@ -116,34 +142,41 @@ router.get("/positions", async (_req, res) => {
 
 const FLASK_BASE = "http://localhost:5000";
 
-router.get("/movers", async (_req, res) => {
+async function proxyFlask(url: string, fallback: unknown) {
   try {
-    const r = await fetch(`${FLASK_BASE}/api/movers`);
-    const data = await r.json();
-    res.json(data);
+    const r = await fetch(url);
+    if (!r.ok) return fallback;
+    return await r.json();
   } catch {
-    res.json({ movers: [], error: "scanner unavailable" });
+    return fallback;
   }
+}
+
+router.get("/movers", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/movers`, { movers: [], error: "scanner unavailable" }));
 });
 
 router.get("/sentiment", async (_req, res) => {
-  try {
-    const r = await fetch(`${FLASK_BASE}/api/sentiment`);
-    const data = await r.json();
-    res.json(data);
-  } catch {
-    res.json({ sentiment: "neutral", score: 0, headlines: [], alerts: [] });
-  }
+  res.json(await proxyFlask(`${FLASK_BASE}/api/sentiment`, { sentiment: "neutral", score: 0, headlines: [], alerts: [] }));
 });
 
 router.get("/calendar", async (_req, res) => {
-  try {
-    const r = await fetch(`${FLASK_BASE}/api/calendar`);
-    const data = await r.json();
-    res.json(data);
-  } catch {
-    res.json({ event: null, note: "" });
-  }
+  res.json(await proxyFlask(`${FLASK_BASE}/api/calendar`, { event: null, note: "" }));
+});
+
+router.get("/stats", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/stats`, {
+    total_trades: 0, win_rate: 0, profit_factor: 0,
+    total_pnl: 0, max_drawdown: 0, best_asset: null, asset_pnl: {}
+  }));
+});
+
+router.get("/regime", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/regime`, { regime: "UNKNOWN" }));
+});
+
+router.get("/stops", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/stops`, { stops: {} }));
 });
 
 export default router;

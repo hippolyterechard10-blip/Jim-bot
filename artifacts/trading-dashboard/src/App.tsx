@@ -1,510 +1,58 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+const INITIAL_CAPITAL      = 1_000;
+const CLAUDE_COST_PER_CALL = 0.003;
+const REPLIT_MONTHLY_COST  = 20;
 
-const INITIAL_CAPITAL = 1_000; // $ — used for return % calculation
-const CLAUDE_COST_PER_CALL = 0.003; // $ per API call (estimated)
-const REPLIT_MONTHLY_COST  = 20;    // $ fixed
-
-const CRYPTO_SYMBOLS = ["BTC/USD","ETH/USD","SOL/USD","AVAX/USD","DOGE/USD","XRP/USD","LINK/USD","SHIB/USD"];
-
-const ALERT_KEYWORDS: [string, string][] = [
-  ["trump", "TRUMP"], ["federal reserve", "FED"], ["emergency rate", "RATE"],
-  ["war", "WAR"], ["sanctions", "SNCT"], ["default", "DFLT"],
-  ["collapse", "CLPS"], ["crisis", "CRSS"],
+const EARNINGS_CALENDAR: { symbol: string; date: string; whisper: string }[] = [
+  { symbol: "TSLA",  date: "2026-04-22", whisper: "Delivery miss risk — analyst estimates range wide" },
+  { symbol: "GOOGL", date: "2026-04-29", whisper: "Search market share vs AI threat — key narrative" },
+  { symbol: "MSFT",  date: "2026-04-30", whisper: "Azure growth rate — any deceleration = selloff" },
+  { symbol: "META",  date: "2026-04-30", whisper: "Ad revenue + AI spend balance — guidance critical" },
+  { symbol: "AAPL",  date: "2026-05-01", whisper: "Services revenue key — hardware expected flat" },
+  { symbol: "AMD",   date: "2026-05-06", whisper: "MI300 AI chip demand vs NVDA — market share story" },
+  { symbol: "NVDA",  date: "2026-05-28", whisper: "Bar is extremely high — any China export concern = miss" },
 ];
 
-// Confirmed Q1/Q2 2026 earnings dates
-const EARNINGS_CALENDAR: { symbol: string; date: string }[] = [
-  { symbol: "TSLA",  date: "2026-04-22" },
-  { symbol: "GOOGL", date: "2026-04-29" },
-  { symbol: "MSFT",  date: "2026-04-30" },
-  { symbol: "META",  date: "2026-04-30" },
-  { symbol: "AAPL",  date: "2026-05-01" },
-  { symbol: "AMD",   date: "2026-05-06" },
-  { symbol: "NVDA",  date: "2026-05-28" },
+const MACRO_EVENTS = [
+  { event: "FOMC Meeting", date: "2026-04-29", note: "Rate decision + press conference" },
+  { event: "CPI Release",  date: "2026-04-10", note: "Core CPI YoY — key inflation gauge" },
+  { event: "NFP Report",   date: "2026-04-03", note: "Non-Farm Payrolls — labor market" },
 ];
 
-const STOCK_SYMBOLS = ["AAPL","NVDA","TSLA","META","GOOGL","MSFT","AMD"];
-const ETF_SYMBOLS   = ["QQQ","SPY","ARKK"];
-const ALL_SYMBOLS   = [...CRYPTO_SYMBOLS, ...STOCK_SYMBOLS, ...ETF_SYMBOLS];
-
-// ── Interfaces ───────────────────────────────────────────────────
-
+// ── Interfaces ────────────────────────────────────────────────────────────────
 interface Trade {
   symbol: string; action: string; price: number; qty: number;
   timestamp: string; pnl: number | null; status: string; close_reason: string | null;
 }
 interface Decision {
   symbol: string; decision: string; confidence: number;
-  reasoning: string; decided_at: string;
+  reasoning: string; market_data?: string; decided_at: string;
 }
 interface Status {
   agent: string; timestamp: string; db_connected: boolean;
   total_trades: number; recent_trades: Trade[];
 }
-interface DecisionsResponse { db_connected: boolean; decisions: Decision[]; }
 interface Position {
   symbol: string; side: string; qty: number;
   entry_price: number; current_price: number;
   market_value: number; unrealized_pl: number; unrealized_plpc: number;
   cost_basis: number;
 }
-interface PositionsResponse { positions: Position[]; error?: string; }
-interface Mover { symbol: string; price: number; change_pct: number; volume: number; direction: "up" | "down"; }
-interface MoversResponse  { movers: Mover[]; ts?: string; error?: string; }
-interface SentimentResponse { sentiment: string; score: number; headlines?: string[]; alerts?: string[]; ts?: string; error?: string; }
-interface CalendarResponse  { event: string | null; note: string; timing?: string; error?: string; }
-
-// ── Reusable components ──────────────────────────────────────────
-
-function DecisionBadge({ decision }: { decision: string }) {
-  const d = decision.toUpperCase();
-  const colors: Record<string, string> = {
-    BUY:  "bg-emerald-900/60 text-emerald-400 border border-emerald-700",
-    SELL: "bg-red-900/60 text-red-400 border border-red-700",
-    HOLD: "bg-slate-700/60 text-slate-400 border border-slate-600",
-  };
-  return <span className={`inline-block px-2 py-0.5 rounded text-xs font-bold ${colors[d] ?? colors.HOLD}`}>{d}</span>;
+interface Mover { symbol: string; price: number; change_pct: number; direction: "up" | "down"; }
+interface SentimentResponse { sentiment: string; score: number; headlines?: string[]; alerts?: string[]; ts?: string; }
+interface RegimeResponse { regime: string; params?: Record<string, unknown>; context?: string; }
+interface StatsResponse {
+  total_trades: number; win_rate: number; profit_factor: number;
+  total_pnl: number; max_drawdown: number; best_asset: string | null; asset_pnl: Record<string, number>;
 }
+interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
+interface Stops { [symbol: string]: number }
 
-function ConfBar({ value }: { value: number }) {
-  const pct   = Math.round(value * 100);
-  const color = pct >= 85 ? "bg-emerald-500" : pct >= 60 ? "bg-sky-500" : "bg-slate-600";
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex-1 bg-slate-700 rounded-full h-1.5 overflow-hidden">
-        <div className={`${color} h-full rounded-full transition-all`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs text-slate-400 w-8 text-right">{pct}%</span>
-    </div>
-  );
-}
+type Page = "HOME" | "MARKET" | "SIGNALS" | "PERFORMANCE";
 
-function SymbolCard({ symbol, decision }: { symbol: string; decision?: Decision }) {
-  const isCrypto  = symbol.includes("/");
-  const ticker    = symbol.replace("/USD", "").replace("/", "");
-  const d         = decision?.decision?.toUpperCase() ?? null;
-  const conf      = decision ? Math.round(decision.confidence * 100) : null;
-  const sigColor  = d === "BUY" ? "border-emerald-600/60 bg-emerald-900/20" : d === "SELL" ? "border-red-600/60 bg-red-900/20" : decision ? "border-slate-700 bg-slate-800/60" : "border-slate-800 bg-slate-800/30 opacity-50";
-  const textColor = d === "BUY" ? "text-emerald-400" : d === "SELL" ? "text-red-400" : "text-slate-400";
-  return (
-    <div className={`rounded-lg border px-3 py-2.5 flex flex-col gap-1 transition-colors ${sigColor}`}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-bold text-white">{ticker}</span>
-        <span className="text-[9px] text-slate-600 uppercase">{isCrypto ? "crypto" : "stock"}</span>
-      </div>
-      {d ? (
-        <>
-          <span className={`text-[11px] font-semibold ${textColor}`}>{d}</span>
-          <div className="flex items-center gap-1">
-            <div className="flex-1 bg-slate-700 rounded-full h-1 overflow-hidden">
-              <div className={`h-full rounded-full ${d === "BUY" ? "bg-emerald-500" : d === "SELL" ? "bg-red-500" : "bg-slate-500"}`} style={{ width: `${conf}%` }} />
-            </div>
-            <span className="text-[9px] text-slate-500">{conf}%</span>
-          </div>
-        </>
-      ) : isCrypto ? (
-        <span className="text-[10px] text-sky-800">⏺ scanning…</span>
-      ) : (
-        <span className="text-[10px] text-slate-600">🔒 mkt closed</span>
-      )}
-    </div>
-  );
-}
-
-// P&L stat card — clickable variant
-function PnlStatCard({ totalPnl, onClick }: { totalPnl: number; onClick: () => void }) {
-  const returnPct = ((totalPnl / INITIAL_CAPITAL) * 100);
-  const pos = totalPnl >= 0;
-  return (
-    <button
-      onClick={onClick}
-      className="bg-slate-800 hover:bg-slate-700/80 active:bg-slate-700 transition-colors rounded-xl p-4 sm:p-5 flex-1 min-w-[130px] text-left group"
-    >
-      <div className="text-[10px] sm:text-xs uppercase tracking-widest text-slate-500 mb-1 flex items-center gap-1">
-        Closed P&amp;L
-        <span className="text-[9px] text-slate-600 group-hover:text-sky-500 transition-colors">↗</span>
-      </div>
-      <div className={`text-2xl font-bold ${pos ? "text-emerald-400" : "text-red-400"}`}>
-        {pos ? "+" : ""}{totalPnl.toFixed(2)} $
-      </div>
-      <div className={`text-xs font-semibold mt-0.5 ${pos ? "text-emerald-500" : "text-red-500"}`}>
-        {pos ? "+" : ""}{returnPct.toFixed(2)}% return
-      </div>
-    </button>
-  );
-}
-
-function StatCard({ label, value, sub, color = "text-white" }: { label: string; value: string; sub?: string; color?: string }) {
-  return (
-    <div className="bg-slate-800 rounded-xl p-4 sm:p-5 flex-1 min-w-[130px]">
-      <div className="text-[10px] sm:text-xs uppercase tracking-widest text-slate-500 mb-1">{label}</div>
-      <div className={`text-2xl font-bold ${color}`}>{value}</div>
-      {sub && <div className="text-xs text-slate-600 mt-0.5">{sub}</div>}
-    </div>
-  );
-}
-
-// ── Monthly P&L bar chart ────────────────────────────────────────
-
-function MonthlyPnlChart({ trades }: { trades: Trade[] }) {
-  const closed = trades.filter(t => t.pnl != null);
-  if (closed.length === 0) return <div className="text-xs text-slate-600 text-center py-6">No closed trades yet.</div>;
-
-  const byMonth: Record<string, number> = {};
-  closed.forEach(t => {
-    const d   = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    byMonth[key] = (byMonth[key] ?? 0) + (t.pnl ?? 0);
-  });
-  const now = new Date();
-  const ck  = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  if (!(ck in byMonth)) byMonth[ck] = 0;
-
-  const months = Object.keys(byMonth).sort();
-  const values = months.map(k => byMonth[k]);
-  const maxAbs = Math.max(...values.map(Math.abs), 0.01);
-  const BAR_W = 36; const GAP = 10; const CH = 72; const LH = 18;
-  const TW = months.length * (BAR_W + GAP) - GAP;
-  const MY = CH / 2;
-  const ML = (k: string) => ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(k.split("-")[1],10)-1];
-
-  return (
-    <div className="overflow-x-auto">
-      <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${Math.max(TW, 200)}px` }}>
-        <line x1={-4} y1={MY} x2={TW + 4} y2={MY} stroke="#334155" strokeWidth="1" />
-        {months.map((m, i) => {
-          const val  = values[i];
-          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 6), val !== 0 ? 3 : 1);
-          const x    = i * (BAR_W + GAP);
-          const y    = val >= 0 ? MY - barH : MY;
-          const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
-          const cur  = m === ck;
-          return (
-            <g key={m}>
-              <rect x={x} y={y} width={BAR_W} height={barH} fill={fill} rx="2" opacity={cur ? 0.6 : 1} />
-              {cur && <rect x={x} y={y} width={BAR_W} height={barH} fill="none" stroke={fill} strokeWidth="1" rx="2" strokeDasharray="3 2" />}
-              <text x={x + BAR_W/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="9">{ML(m)}{cur ? "*" : ""}</text>
-              {val !== 0 && <text x={x + BAR_W/2} y={val >= 0 ? y - 3 : y + barH + 9} textAnchor="middle" fill={fill} fontSize="8" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
-            </g>
-          );
-        })}
-      </svg>
-      <div className="text-[9px] text-slate-600 text-right pr-1 mt-0.5">* current month (partial)</div>
-    </div>
-  );
-}
-
-// ── P&L Detail Modal ─────────────────────────────────────────────
-
-function PnlModal({ trades, decisions, onClose }: { trades: Trade[]; decisions: Decision[]; onClose: () => void }) {
-  const closed   = trades.filter(t => t.pnl != null);
-  const totalPnl = closed.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const returnPct = (totalPnl / INITIAL_CAPITAL) * 100;
-  const pos      = totalPnl >= 0;
-
-  // Daily P&L
-  const byDay: Record<string, number> = {};
-  closed.forEach(t => {
-    const d   = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
-    const key = d.toISOString().slice(0, 10);
-    byDay[key] = (byDay[key] ?? 0) + (t.pnl ?? 0);
-  });
-  const days   = Object.keys(byDay).sort();
-  const dailyV = days.map(k => byDay[k]);
-
-  // Running balance
-  let bal = INITIAL_CAPITAL;
-  const balances = days.map(k => { bal += byDay[k]; return bal; });
-
-  // Chart constants
-  const BAR_W = 28; const GAP = 6;
-  const TW  = Math.max(days.length * (BAR_W + GAP) - GAP, 200);
-  const CH  = 60; const LH = 14; const MY = CH / 2;
-  const maxAbsDay = Math.max(...dailyV.map(Math.abs), 0.01);
-
-  // Line chart for balance
-  const LCH = 80;
-  const minBal = Math.min(...balances, INITIAL_CAPITAL);
-  const maxBal = Math.max(...balances, INITIAL_CAPITAL);
-  const bRange = Math.max(maxBal - minBal, 0.01);
-  const pts = balances.map((b, i) => {
-    const x = i * (BAR_W + GAP) + BAR_W / 2;
-    const y = LCH - ((b - minBal) / bRange) * (LCH - 8);
-    return `${x},${y}`;
-  }).join(" ");
-
-  const dayLabel = (k: string) => {
-    const d = new Date(k + "T00:00:00Z");
-    return `${d.getDate()}/${d.getMonth()+1}`;
-  };
-
-  // Current month cost
-  const now  = new Date();
-  const mDecisions = decisions.filter(d => {
-    const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
-    return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
-  });
-  const claudeCost = mDecisions.length * CLAUDE_COST_PER_CALL;
-  const totalCost  = REPLIT_MONTHLY_COST + claudeCost;
-  const netPnl     = totalPnl - totalCost;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-2 sm:p-6 bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-xl shadow-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-
-        {/* Header */}
-        <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between sticky top-0 bg-slate-800 z-10">
-          <div>
-            <div className="text-xs text-slate-500 uppercase tracking-wider mb-0.5">Performance</div>
-            <div className="flex items-baseline gap-3">
-              <span className={`text-3xl font-bold ${pos ? "text-emerald-400" : "text-red-400"}`}>
-                {pos ? "+" : ""}{returnPct.toFixed(2)}%
-              </span>
-              <span className={`text-sm font-semibold ${pos ? "text-emerald-500" : "text-red-500"}`}>
-                {pos ? "+" : ""}{totalPnl.toFixed(2)} $ on {INITIAL_CAPITAL}$ capital
-              </span>
-            </div>
-          </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white text-xl leading-none">✕</button>
-        </div>
-
-        <div className="p-5 space-y-5">
-
-          {/* Monthly & YTD stats */}
-          {(() => {
-            const ytdStart   = new Date(now.getFullYear(), 0, 1);
-            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-            const ytdPnl     = closed.filter(t => {
-              const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
-              return d >= ytdStart;
-            }).reduce((s, t) => s + (t.pnl ?? 0), 0);
-            const monthlyPnl = closed.filter(t => {
-              const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
-              return d >= monthStart;
-            }).reduce((s, t) => s + (t.pnl ?? 0), 0);
-            const maxAbs  = Math.max(Math.abs(ytdPnl), Math.abs(monthlyPnl), 0.01);
-            const mPct    = Math.min(Math.abs(monthlyPnl) / maxAbs * 100, 100);
-            const yPct    = Math.min(Math.abs(ytdPnl)    / maxAbs * 100, 100);
-            const monthName = now.toLocaleString("default", { month: "short" });
-            return (
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/30">
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">{monthName} P&amp;L</div>
-                  <div className={`text-xl font-bold ${monthlyPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {monthlyPnl >= 0 ? "+" : ""}{monthlyPnl.toFixed(2)}$
-                  </div>
-                  <div className={`text-[10px] mt-0.5 ${monthlyPnl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                    {((monthlyPnl / INITIAL_CAPITAL) * 100) >= 0 ? "+" : ""}{((monthlyPnl / INITIAL_CAPITAL) * 100).toFixed(2)}%
-                  </div>
-                  <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${monthlyPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${mPct}%` }} />
-                  </div>
-                </div>
-                <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/30">
-                  <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">YTD P&amp;L</div>
-                  <div className={`text-xl font-bold ${ytdPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {ytdPnl >= 0 ? "+" : ""}{ytdPnl.toFixed(2)}$
-                  </div>
-                  <div className={`text-[10px] mt-0.5 ${ytdPnl >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                    {((ytdPnl / INITIAL_CAPITAL) * 100) >= 0 ? "+" : ""}{((ytdPnl / INITIAL_CAPITAL) * 100).toFixed(2)}%
-                  </div>
-                  <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${ytdPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${yPct}%` }} />
-                  </div>
-                </div>
-                {/* Comparison bar */}
-                <div className="col-span-2 bg-slate-900/30 rounded-lg px-3 py-2 border border-slate-700/20">
-                  <div className="text-[9px] text-slate-600 uppercase tracking-wide mb-1.5">{monthName} vs YTD comparison</div>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[9px] text-slate-500 w-8">{monthName}</span>
-                      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${monthlyPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`} style={{ width: `${mPct}%` }} />
-                      </div>
-                      <span className={`text-[9px] font-semibold w-10 text-right ${monthlyPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {monthlyPnl >= 0 ? "+" : ""}{monthlyPnl.toFixed(1)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[9px] text-slate-500 w-8">YTD</span>
-                      <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${ytdPnl >= 0 ? "bg-sky-500" : "bg-red-400"}`} style={{ width: `${yPct}%` }} />
-                      </div>
-                      <span className={`text-[9px] font-semibold w-10 text-right ${ytdPnl >= 0 ? "text-sky-400" : "text-red-400"}`}>
-                        {ytdPnl >= 0 ? "+" : ""}{ytdPnl.toFixed(1)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Daily P&L bar chart */}
-          <div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Daily P&amp;L</div>
-            {days.length === 0 ? (
-              <div className="text-xs text-slate-600 text-center py-4">No closed trades yet.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${TW}px` }}>
-                  <line x1={-4} y1={MY} x2={TW + 4} y2={MY} stroke="#334155" strokeWidth="1" />
-                  {days.map((day, i) => {
-                    const val  = dailyV[i];
-                    const barH = Math.max(Math.abs(val) / maxAbsDay * (MY - 4), val !== 0 ? 2 : 1);
-                    const x    = i * (BAR_W + GAP);
-                    const y    = val >= 0 ? MY - barH : MY;
-                    const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
-                    return (
-                      <g key={day}>
-                        <rect x={x} y={y} width={BAR_W} height={barH} fill={fill} rx="2" />
-                        <text x={x + BAR_W/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="8">{dayLabel(day)}</text>
-                        {val !== 0 && <text x={x + BAR_W/2} y={val >= 0 ? y - 2 : y + barH + 8} textAnchor="middle" fill={fill} fontSize="7" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
-                      </g>
-                    );
-                  })}
-                </svg>
-              </div>
-            )}
-          </div>
-
-          {/* Running balance curve */}
-          {balances.length >= 2 && (
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Running Balance</div>
-              <div className="overflow-x-auto">
-                <svg viewBox={`-4 0 ${TW + 8} ${LCH + 14}`} width="100%" style={{ minWidth: `${TW}px` }}>
-                  {/* Baseline at initial capital */}
-                  {(() => {
-                    const baseY = LCH - ((INITIAL_CAPITAL - minBal) / bRange) * (LCH - 8);
-                    return <line x1={-4} y1={baseY} x2={TW + 4} y2={baseY} stroke="#334155" strokeWidth="1" strokeDasharray="3 2" />;
-                  })()}
-                  <polyline points={pts} fill="none" stroke={pos ? "#10b981" : "#ef4444"} strokeWidth="1.5" strokeLinejoin="round" />
-                  {/* Fill under curve */}
-                  {(() => {
-                    const first = pts.split(" ")[0];
-                    const last  = pts.split(" ").slice(-1)[0];
-                    const lastX = last.split(",")[0];
-                    const baseY = LCH - ((INITIAL_CAPITAL - minBal) / bRange) * (LCH - 8);
-                    return (
-                      <polygon
-                        points={`${first.split(",")[0]},${baseY} ${pts} ${lastX},${baseY}`}
-                        fill={pos ? "#10b98120" : "#ef444420"}
-                      />
-                    );
-                  })()}
-                  {/* Current balance dot */}
-                  {(() => {
-                    const last = pts.split(" ").slice(-1)[0];
-                    const [lx, ly] = last.split(",");
-                    return <circle cx={lx} cy={ly} r="3" fill={pos ? "#10b981" : "#ef4444"} />;
-                  })()}
-                  {/* Labels */}
-                  <text x={TW + 2} y={4} fill={pos ? "#10b981" : "#ef4444"} fontSize="8" textAnchor="end">
-                    ${balances[balances.length - 1].toFixed(0)}
-                  </text>
-                  <text x={0} y={LCH + 12} fill="#64748b" fontSize="8">{dayLabel(days[0])}</text>
-                  <text x={TW} y={LCH + 12} fill="#64748b" fontSize="8" textAnchor="end">{dayLabel(days[days.length - 1])}</text>
-                </svg>
-              </div>
-            </div>
-          )}
-
-          {/* Cost breakdown */}
-          <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-700/40">
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Monthly Costs (this month)</div>
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">Replit Core</span>
-                <span className="text-slate-300">${REPLIT_MONTHLY_COST.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-400">Claude API ({mDecisions.length} calls × $0.003)</span>
-                <span className="text-slate-300">${claudeCost.toFixed(3)}</span>
-              </div>
-              <div className="border-t border-slate-700/40 pt-1.5 flex justify-between text-xs font-semibold">
-                <span className="text-slate-300">Total costs</span>
-                <span className="text-red-400">-${totalCost.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs font-bold">
-                <span className="text-slate-200">Net P&amp;L after costs</span>
-                <span className={netPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
-                  {netPnl >= 0 ? "+" : ""}{netPnl.toFixed(2)} $
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Headline modal ───────────────────────────────────────────────
-
-function HeadlineModal({ headline, overallSentiment, onClose }: { headline: string; overallSentiment: string; onClose: () => void }) {
-  const hl     = headline.toLowerCase();
-  const tags   = ALERT_KEYWORDS.filter(([kw]) => hl.includes(kw)).map(([, label]) => label);
-  const bull   = overallSentiment.includes("bullish");
-  const bear   = overallSentiment.includes("bearish");
-  const impact = bull ? "Bullish signal" : bear ? "Bearish signal" : "Neutral / mixed";
-  const impCol = bull ? "text-emerald-400" : bear ? "text-red-400" : "text-slate-400";
-  const newsUrl = `https://www.google.com/search?q=${encodeURIComponent(headline)}&tbm=nws`;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-3 sm:p-6 bg-black/65 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 w-full max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="flex items-start justify-between gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-white leading-snug">{headline}</h3>
-          <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors text-xl leading-none flex-shrink-0">✕</button>
-        </div>
-        {tags.length > 0 && (
-          <div className="flex flex-wrap gap-1 mb-3">{tags.map(t => <span key={t} className="text-[9px] font-bold text-amber-400">[{t}]</span>)}</div>
-        )}
-        <div className="bg-slate-900/50 rounded-lg p-3 mb-4 space-y-2 border border-slate-700/40">
-          <p className="text-xs text-slate-400 leading-relaxed">Detected by the market scanner from MarketWatch, CNBC, and Google Finance RSS feeds. This headline is weighted in the sentiment score used by the AI trading agent.</p>
-          <p className="text-xs text-slate-400 leading-relaxed">Financial news is filtered for relevance using 40+ market keywords. High-alert terms (FED, TRUMP, WAR…) carry extra weight and can override technical signals.</p>
-          <p className="text-xs text-slate-400 leading-relaxed">Sentiment is scored on a scale of −10 to +10 and feeds directly into the Claude prompt as market context before each analysis cycle.</p>
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-0.5">Market impact</div>
-            <div className={`text-xs font-semibold ${impCol}`}>{impact}</div>
-          </div>
-          <a href={newsUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-sky-400 hover:text-sky-200 underline transition-colors">Read more →</a>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Signal modal ─────────────────────────────────────────────────
-
-function SignalModal({ signal, onClose }: { signal: Decision; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-3 sm:p-6 bg-black/65 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 w-full max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-white">{signal.symbol}</span>
-            <DecisionBadge decision={signal.decision} />
-          </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors text-xl leading-none">✕</button>
-        </div>
-        <div className="mb-3"><ConfBar value={signal.confidence} /></div>
-        <div className="text-[10px] text-slate-600 mb-3">{fmtDateTime(signal.decided_at)}</div>
-        <div className="bg-slate-900/50 rounded-lg p-3 border-l-2 border-sky-700/50 max-h-52 overflow-y-auto">
-          <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{signal.reasoning}</p>
-        </div>
-        <button onClick={onClose} className="mt-4 w-full text-xs text-slate-500 hover:text-slate-300 transition-colors border border-slate-700 rounded-lg py-2">Close</button>
-      </div>
-    </div>
-  );
-}
-
-// ── Helpers ──────────────────────────────────────────────────────
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(s: string) {
   const d = new Date(s.includes("T") ? s : s.replace(" ", "T") + "Z");
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -513,584 +61,887 @@ function fmtDateTime(s: string) {
   const d = new Date(s.includes("T") ? s : s.replace(" ", "T") + "Z");
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
-
-// ── Earnings helpers ─────────────────────────────────────────────
-
-function getUpcomingEarnings(days = 30) {
-  const now     = new Date();
-  const cutoff  = new Date(now.getTime() + days * 86400_000);
-  return EARNINGS_CALENDAR.filter(e => {
-    const d = new Date(e.date + "T12:00:00Z");
-    return d >= new Date(now.getTime() - 86400_000) && d <= cutoff;
-  }).sort((a, b) => a.date.localeCompare(b.date));
+function fmtPrice(n: number) {
+  if (n >= 1000) return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (n >= 1)    return n.toFixed(2);
+  return n.toFixed(4);
 }
-
-function earningsDaysAway(dateStr: string) {
-  const d    = new Date(dateStr + "T12:00:00Z");
-  const diff = Math.round((d.getTime() - Date.now()) / 86400_000);
-  if (diff < 0)  return "yesterday";
+function fmtPnl(n: number) { return (n >= 0 ? "+" : "") + "$" + Math.abs(n).toFixed(2); }
+function fmtPct(n: number) { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
+function daysUntil(dateStr: string) {
+  const diff = Math.round((new Date(dateStr + "T12:00:00Z").getTime() - Date.now()) / 86400_000);
+  if (diff < 0)   return `${Math.abs(diff)}d ago`;
   if (diff === 0) return "today";
   if (diff === 1) return "tomorrow";
   return `in ${diff}d`;
 }
 
-// ── App ──────────────────────────────────────────────────────────
+function inferHeadlineTier(text: string): 1 | 2 | 3 {
+  const t = text.toLowerCase();
+  const t1 = ["fed rate cut", "rate hike", "bank failure", "default", "war declaration", "nuclear", "circuit breaker", "flash crash", "cpi beat", "jobs miss", "gdp miss", "recession"];
+  const t2 = ["fed dovish", "fed hawkish", "tariff", "trade war", "earnings", "guidance", "layoffs", "bankruptcy", "sec investigation", "fed pivot", "rate cut"];
+  if (t1.some(k => t.includes(k))) return 1;
+  if (t2.some(k => t.includes(k))) return 2;
+  return 3;
+}
 
-export default function App() {
-  const [status, setStatus]         = useState<Status | null>(null);
-  const [decisions, setDecisions]   = useState<Decision[]>([]);
-  const [error, setError]           = useState(false);
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-  const [movers, setMovers]         = useState<Mover[]>([]);
-  const [sentiment, setSentiment]   = useState<SentimentResponse | null>(null);
-  const [calendar, setCalendar]     = useState<CalendarResponse | null>(null);
-  const [headlineModal, setHeadlineModal] = useState<{ text: string; overallSentiment: string } | null>(null);
-  const [signalModal, setSignalModal]     = useState<Decision | null>(null);
-  const [pnlModalOpen, setPnlModalOpen]   = useState(false);
-  const [positions, setPositions]         = useState<Position[]>([]);
+function parseSynthesisBreakdown(reasoning: string) {
+  const m = reasoning.match(/Breakdown: Base: (-?\d+) \| Regime: ([+-]?\d+) \| RelStr: ([+-]?\d+) \| DXY: ([+-]?\d+) \| Corr: ([+-]?\d+) \| Geo: ([+-]?\d+) \| News: ([+-]?\d+) \| FINAL: (\d+)/);
+  if (!m) return null;
+  return { base: +m[1], regime: +m[2], relStr: +m[3], dxy: +m[4], corr: +m[5], geo: +m[6], news: +m[7], final: +m[8] };
+}
 
-  async function fetchAll() {
-    try {
-      const [sRes, dRes, pRes] = await Promise.all([
-        fetch(`${BASE}/api/status`),
-        fetch(`${BASE}/api/decisions`),
-        fetch(`${BASE}/api/positions`),
-      ]);
-      if (sRes.ok) setStatus(await sRes.json() as Status);
-      if (dRes.ok) { const d: DecisionsResponse = await dRes.json(); setDecisions(d.decisions ?? []); }
-      if (pRes.ok) { const p: PositionsResponse = await pRes.json(); setPositions(p.positions ?? []); }
-      setError(false);
-    } catch { setError(true); }
-    setLastRefresh(new Date());
-  }
+function parseRegimeFromReasoning(reasoning: string): string {
+  const m = reasoning.match(/\b(BEAR_MARKET|BULL_MARKET|CHOPPY|TRENDING_BULL|TRENDING_BEAR|VOLATILE)\b/);
+  if (m) return m[1].replace("_MARKET", "").replace("TRENDING_", "TRENDING ");
+  if (reasoning.toLowerCase().includes("bear")) return "BEAR";
+  if (reasoning.toLowerCase().includes("bull")) return "BULL";
+  return "—";
+}
 
-  async function fetchMarket() {
-    try {
-      const [mRes, sRes, cRes] = await Promise.all([fetch(`${BASE}/api/movers`), fetch(`${BASE}/api/sentiment`), fetch(`${BASE}/api/calendar`)]);
-      if (mRes.ok) { const d: MoversResponse = await mRes.json(); setMovers(d.movers ?? []); }
-      if (sRes.ok) setSentiment(await sRes.json() as SentimentResponse);
-      if (cRes.ok) setCalendar(await cRes.json() as CalendarResponse);
-    } catch { /* non-critical */ }
-  }
+function parsePatternsFromMarketData(md?: string): string[] {
+  if (!md) return [];
+  try {
+    const parsed = JSON.parse(md);
+    return (parsed.patterns_detected ?? parsed.patterns ?? []) as string[];
+  } catch { return []; }
+}
 
-  useEffect(() => {
-    fetchAll(); fetchMarket();
-    const id1 = setInterval(fetchAll, 30_000);
-    const id2 = setInterval(fetchMarket, 60_000);
-    return () => { clearInterval(id1); clearInterval(id2); };
-  }, []);
+function regimeBadgeStyle(regime: string): { bg: string; text: string; emoji: string } {
+  const r = regime.toUpperCase();
+  if (r.includes("BEAR")) return { bg: "bg-red-900/60 border-red-700",   text: "text-red-400",   emoji: "🔴" };
+  if (r.includes("BULL")) return { bg: "bg-emerald-900/60 border-emerald-700", text: "text-emerald-400", emoji: "🟢" };
+  return { bg: "bg-yellow-900/60 border-yellow-700", text: "text-yellow-400", emoji: "🟡" };
+}
 
-  const totalPnl = status?.recent_trades.filter(t => t.pnl != null).reduce((s, t) => s + (t.pnl ?? 0), 0) ?? 0;
-  const returnPct = (totalPnl / INITIAL_CAPITAL) * 100;
+// ── Shared Small Components ───────────────────────────────────────────────────
+function DecisionBadge({ decision }: { decision: string }) {
+  const d = decision.toUpperCase();
+  const cls = d === "BUY"  ? "bg-emerald-900/70 text-emerald-400 border-emerald-700" :
+              d === "SELL" ? "bg-red-900/70 text-red-400 border-red-700" :
+                             "bg-slate-700/70 text-slate-400 border-slate-600";
+  return <span className={`inline-block px-2 py-0.5 rounded text-xs font-bold border ${cls}`}>{d}</span>;
+}
 
-  const latestBySymbol: Record<string, Decision> = {};
-  decisions.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
-  const latestDecisions = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
+function TierBadge({ tier }: { tier: 1 | 2 | 3 }) {
+  const cls = tier === 1 ? "bg-red-900/60 text-red-400 border-red-700" :
+              tier === 2 ? "bg-amber-900/60 text-amber-400 border-amber-700" :
+                           "bg-slate-700/60 text-slate-500 border-slate-600";
+  return <span className={`text-[9px] font-bold border rounded px-1 py-0 ${cls}`}>T{tier}</span>;
+}
 
-  const PREVIEW_LEN     = 120;
-  const upcomingEarnings = getUpcomingEarnings(30);
+function SideBadge({ side }: { side: string }) {
+  const isLong = side.toLowerCase() === "long" || side.toLowerCase() === "buy";
+  return (
+    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${isLong ? "bg-emerald-900/50 text-emerald-400 border-emerald-700" : "bg-red-900/50 text-red-400 border-red-700"}`}>
+      {isLong ? "LONG" : "SHORT"}
+    </span>
+  );
+}
 
-  // Monthly costs
-  const now = new Date();
-  const mDecisions  = decisions.filter(d => { const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z"); return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear(); });
-  const claudeCost  = mDecisions.length * CLAUDE_COST_PER_CALL;
-  const totalCost   = REPLIT_MONTHLY_COST + claudeCost;
-  const netPnl      = totalPnl - totalCost;
+// ── Top Navigation Bar ────────────────────────────────────────────────────────
+function TopNav({ activePage, setActivePage, regime, portfolioValue, portfolioDelta, positionsCount, lastRefresh, error }: {
+  activePage: Page; setActivePage: (p: Page) => void;
+  regime: string; portfolioValue: number; portfolioDelta: number;
+  positionsCount: number; lastRefresh: Date; error: boolean;
+}) {
+  const rb   = regimeBadgeStyle(regime);
+  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "PERFORMANCE"];
+  const pPos = portfolioDelta >= 0;
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-200">
-
-      {/* Sticky mobile mini-header */}
-      <div className="sm:hidden sticky top-0 z-40 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 px-4 py-2.5 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${error ? "bg-red-400" : "bg-emerald-400"}`} />
-          <span className={`text-sm font-bold ${totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)} $
-          </span>
-          <span className={`text-xs font-semibold ${returnPct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-            ({returnPct >= 0 ? "+" : ""}{returnPct.toFixed(1)}%)
-          </span>
-        </div>
-        {decisions.length > 0 && <div className="text-[11px] text-slate-500">Signal {fmtTime(decisions[0].decided_at)}</div>}
+    <nav className="fixed top-0 left-0 right-0 z-50 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 h-14 flex items-center px-3 gap-2 sm:gap-4">
+      {/* Brand */}
+      <div className="flex items-center gap-1.5 flex-shrink-0">
+        <span className="text-sky-400 font-bold text-sm sm:text-base">⚡ Jim Bot</span>
+        <span className={`hidden sm:inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded border ${rb.bg} ${rb.text}`}>
+          {rb.emoji} {regime === "UNKNOWN" ? "—" : regime.replace("_MARKET","").replace("TRENDING_","")}
+        </span>
       </div>
 
-      <div className="p-4 sm:p-6 md:p-10">
-
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6 sm:mb-8">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-sky-400">⚡ Trading Agent</h1>
-            <p className="text-slate-500 text-xs sm:text-sm mt-0.5">AI-powered paper trading · Claude + Alpaca · crypto weekend mode</p>
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] text-slate-600">Last refresh</div>
-            <div className="text-xs sm:text-sm text-slate-400">{lastRefresh.toLocaleTimeString()}</div>
-            <button onClick={fetchAll} className="mt-1 text-xs text-sky-500 hover:text-sky-300 transition-colors">Refresh ↻</button>
-          </div>
+      {/* Portfolio value */}
+      <div className="flex-shrink-0 hidden sm:block">
+        <div className="text-[10px] text-slate-600 leading-none">Portfolio</div>
+        <div className={`text-sm font-bold leading-tight ${pPos ? "text-emerald-400" : "text-red-400"}`}>
+          ${portfolioValue.toFixed(0)}
+          <span className="text-[10px] font-semibold ml-1 opacity-80">({fmtPct(portfolioDelta)})</span>
         </div>
+      </div>
 
-        {/* KPI cards */}
-        <div className="flex flex-wrap gap-3 mb-6 sm:mb-8">
-          <StatCard label="Agent" value={error ? "⚠ Error" : status ? "🟢 Running" : "⏳ Loading"} color={error ? "text-red-400" : "text-emerald-400"} />
-          <StatCard label="Total Trades" value={status ? String(status.total_trades) : "—"} color="text-sky-400" />
-          <PnlStatCard totalPnl={totalPnl} onClick={() => setPnlModalOpen(true)} />
-          <StatCard label="AI Signals" value={decisions.length > 0 ? String(decisions.length) : "—"} sub={decisions.length > 0 ? `last: ${fmtTime(decisions[0].decided_at)}` : undefined} color="text-violet-400" />
-          <StatCard label="DB" value={status?.db_connected ? "Connected" : "—"} color={status?.db_connected ? "text-emerald-400" : "text-slate-500"} />
+      {/* Mobile portfolio */}
+      <div className={`flex-shrink-0 sm:hidden text-sm font-bold ${pPos ? "text-emerald-400" : "text-red-400"}`}>
+        ${portfolioValue.toFixed(0)}
+      </div>
+
+      {/* Tabs */}
+      <div className="flex items-center gap-0 flex-1 justify-center">
+        {tabs.map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActivePage(tab)}
+            className={`px-2 sm:px-4 py-1.5 text-xs sm:text-sm font-semibold rounded transition-colors ${activePage === tab ? "bg-sky-600/20 text-sky-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* Right info */}
+      <div className="flex items-center gap-2 flex-shrink-0 text-right">
+        <div className="hidden sm:flex items-center gap-1.5">
+          <span className="text-[10px] text-slate-600">{positionsCount} pos</span>
+          <span className={`w-2 h-2 rounded-full ${error ? "bg-red-400" : "bg-emerald-400"}`} title={error ? "Error" : "Running"} />
         </div>
+        <div className="text-[10px] text-slate-600 hidden sm:block">{lastRefresh.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+      </div>
+    </nav>
+  );
+}
 
-        {/* Watchlist */}
-        <div className="mb-6">
-          <div className="sm:hidden bg-slate-800/50 rounded-lg px-4 py-3 flex items-center justify-between">
-            <span className="text-xs text-slate-400"><span className="font-semibold text-white">{CRYPTO_SYMBOLS.length} crypto</span> watching — weekend mode</span>
-            <span className="text-[10px] text-slate-600">{ALL_SYMBOLS.length} total assets</span>
+// ── HOME PAGE ────────────────────────────────────────────────────────────────
+function PositionRow({ pos, decisions, partialProfits, stops, totalPortfolio }: {
+  pos: Position; decisions: Decision[];
+  partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const pnl     = pos.unrealized_pl;
+  const pnlPct  = pos.unrealized_plpc;
+  const isPos   = pnl >= 0;
+  const secured = partialProfits[pos.symbol]?.secured_pnl ?? 0;
+  const stopVal = stops[pos.symbol] ?? (pos.side === "long"
+    ? pos.current_price * 0.95
+    : pos.current_price * 1.03);
+  const sizePct = (pos.cost_basis / Math.max(totalPortfolio, INITIAL_CAPITAL)) * 100;
+  const latestDec = decisions.find(d => d.symbol === pos.symbol || d.symbol === pos.symbol.replace("/",""));
+  const breakdown = latestDec ? parseSynthesisBreakdown(latestDec.reasoning) : null;
+  const patterns  = latestDec ? parsePatternsFromMarketData(latestDec.market_data) : [];
+  const ticker    = pos.symbol.replace("/USD","");
+
+  return (
+    <>
+      <tr
+        className={`border-l-2 cursor-pointer hover:bg-slate-800/60 transition-colors ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}
+        onClick={() => setExpanded(v => !v)}
+      >
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-white text-sm">{ticker}</span>
+            <SideBadge side={pos.side} />
           </div>
-          <div className="hidden sm:block">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Watchlist</h2>
-              <span className="text-xs text-slate-700">{ALL_SYMBOLS.length} actifs · weekend = crypto seulement</span>
-            </div>
-            <div className="mb-2">
-              <p className="text-[10px] text-slate-600 mb-2 uppercase tracking-wider">Crypto</p>
-              <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
-                {CRYPTO_SYMBOLS.map(s => <SymbolCard key={s} symbol={s} decision={latestBySymbol[s]} />)}
+        </td>
+        <td className="px-3 py-2.5 text-xs text-slate-300 font-mono">${fmtPrice(pos.entry_price)}</td>
+        <td className="px-3 py-2.5 text-xs text-slate-200 font-mono">${fmtPrice(pos.current_price)}</td>
+        <td className="px-3 py-2.5">
+          <div className={`text-xs font-bold ${isPos ? "text-emerald-400" : "text-red-400"}`}>{fmtPnl(pnl)}</div>
+          <div className={`text-[10px] ${isPos ? "text-emerald-500" : "text-red-500"}`}>{fmtPct(pnlPct)}</div>
+        </td>
+        <td className="px-3 py-2.5">
+          {secured > 0
+            ? <span className="text-[10px] font-semibold bg-emerald-900/40 border border-emerald-700/50 text-emerald-400 rounded px-1.5 py-0.5">✅ +${secured.toFixed(2)}</span>
+            : <span className="text-[10px] text-slate-700">—</span>}
+        </td>
+        <td className="px-3 py-2.5 text-xs font-mono text-amber-400">${fmtPrice(stopVal)}</td>
+        <td className="px-3 py-2.5 text-xs text-slate-400">{sizePct.toFixed(1)}%</td>
+        <td className="px-3 py-2.5 text-slate-600 text-xs">{expanded ? "▲" : "▼"}</td>
+      </tr>
+      {expanded && (
+        <tr className={`border-l-2 ${isPos ? "border-emerald-600/40" : "border-red-600/40"}`}>
+          <td colSpan={8} className="px-4 pb-4 pt-1 bg-slate-800/40">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
+              {/* Position details */}
+              <div className="space-y-2">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-1">Position Details</div>
+                {[
+                  ["Qty",        pos.qty.toString()],
+                  ["Cost Basis", "$" + fmtPrice(pos.cost_basis)],
+                  ["Market Val", "$" + fmtPrice(pos.market_value)],
+                  ["~Stop",      "$" + fmtPrice(stopVal)],
+                  ["Size %",     sizePct.toFixed(1) + "% of portfolio"],
+                ].map(([k, v]) => (
+                  <div key={k} className="flex justify-between text-xs">
+                    <span className="text-slate-500">{k}</span>
+                    <span className="text-slate-300 font-mono">{v}</span>
+                  </div>
+                ))}
+                {patterns.length > 0 && (
+                  <div className="flex items-center gap-1 flex-wrap mt-1">
+                    {patterns.map(p => (
+                      <span key={p} className="text-[9px] bg-violet-900/40 text-violet-400 border border-violet-700/50 rounded px-1.5 py-0.5">{p}</span>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-            <div className="mt-3">
-              <p className="text-[10px] text-slate-600 mb-2 uppercase tracking-wider">Actions &amp; ETF · marché fermé le weekend</p>
-              <div className="grid grid-cols-4 sm:grid-cols-10 gap-2">
-                {[...STOCK_SYMBOLS, ...ETF_SYMBOLS].map(s => <SymbolCard key={s} symbol={s} decision={latestBySymbol[s]} />)}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Market Intelligence */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-
-          {/* TOP MOVERS */}
-          <div className="bg-slate-800 rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">🔥 Top Movers Today</h2>
-              <span className="text-[10px] text-slate-600">60s refresh</span>
-            </div>
-            <div className="p-3 space-y-1.5">
-              {movers.length === 0 && <div className="text-xs text-slate-600 text-center py-4">{status ? "Market closed or no movers" : "Loading…"}</div>}
-              {movers.map(m => (
-                <div key={m.symbol} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-slate-700/40">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className={`text-sm font-bold ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>{m.direction === "up" ? "↑" : "↓"}</span>
-                    <span className="text-xs font-semibold text-white truncate">{m.symbol}</span>
-                  </div>
-                  <span className={`text-sm sm:text-xs font-bold flex-shrink-0 ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>
-                    {m.change_pct > 0 ? "+" : ""}{m.change_pct.toFixed(1)}%
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* MARKET SENTIMENT */}
-          <div className="bg-slate-800 rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">📰 Market Sentiment</h2>
-              <span className="text-[10px] text-slate-600">60s refresh</span>
-            </div>
-            <div className="p-4">
-              {!sentiment ? <div className="text-[10px] text-slate-600 text-center py-4">Loading…</div> : (() => {
-                const s          = sentiment.sentiment;
-                const scoreColor = s.includes("bullish") ? "text-emerald-400" : s.includes("bearish") ? "text-red-400" : "text-slate-500";
-                const badgeColor = s.includes("bullish") ? "text-emerald-400" : s.includes("bearish") ? "text-red-400" : "text-slate-400";
-                const emoji      = s === "very_bullish" ? "🚀" : s === "bullish" ? "🟢" : s === "very_bearish" ? "💀" : s === "bearish" ? "🔴" : "⚪";
-                const headlines  = (sentiment.headlines ?? []).slice(0, 3);
-                return (
-                  <div className="space-y-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] font-bold uppercase tracking-wide ${badgeColor}`}>{emoji} {s.replace(/_/g, " ")}</span>
-                      <span className="text-slate-700 text-[10px]">·</span>
-                      <span className={`text-[10px] font-semibold ${scoreColor}`}>score {sentiment.score > 0 ? "+" : ""}{sentiment.score}</span>
-                    </div>
-                    <div className="space-y-1.5">
-                      {headlines.length === 0 ? <div className="text-[10px] text-slate-600">No market headlines available</div>
-                        : headlines.map((h, i) => {
-                          const hl   = h.toLowerCase();
-                          const tags = ALERT_KEYWORDS.filter(([kw]) => hl.includes(kw)).map(([, label]) => label);
-                          return (
-                            <button key={i} onClick={() => setHeadlineModal({ text: h, overallSentiment: s })}
-                              className="w-full flex items-baseline gap-1 min-w-0 text-left group hover:opacity-80 transition-opacity cursor-pointer">
-                              <span className="text-slate-600 flex-shrink-0 text-[10px]">•</span>
-                              {tags.map(t => <span key={t} className="text-[8px] font-bold text-amber-400 flex-shrink-0 leading-none">[{t}]</span>)}
-                              <span className="text-[10px] text-slate-400 group-hover:text-slate-200 truncate min-w-0 leading-snug transition-colors">{h}</span>
-                            </button>
-                          );
-                        })}
-                    </div>
-                    {sentiment.ts && <div className="text-[9px] text-slate-600 pt-1.5 border-t border-slate-700/40">Updated {sentiment.ts} · tap for details</div>}
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-
-          {/* ECONOMIC CALENDAR + EARNINGS */}
-          <div className="bg-slate-800 rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">📅 Calendar</h2>
-              <span className="text-[10px] text-slate-600">eco + earnings</span>
-            </div>
-            <div className="p-4 space-y-3">
-              {/* Economic event */}
-              {!calendar ? (
-                <div className="text-xs text-slate-600 text-center py-2">Loading…</div>
-              ) : calendar.event ? (
-                <div className="bg-amber-900/20 border border-amber-600/50 rounded-lg px-3 py-2.5">
-                  <div className="flex items-start gap-2">
-                    <span className="text-amber-400 text-base leading-none">⚡</span>
-                    <div>
-                      <div className="text-xs font-bold text-amber-300">{calendar.event}</div>
-                      <div className="text-[9px] text-amber-500 mt-0.5 uppercase tracking-wide">{calendar.timing === "today" ? "TODAY" : "UPCOMING"}</div>
-                    </div>
-                  </div>
-                  <p className="text-[9px] text-amber-600/80 mt-1.5 leading-relaxed">{calendar.note}</p>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 text-emerald-400">
-                  <span>✅</span>
-                  <span className="text-xs font-semibold">No macro events this week</span>
-                </div>
-              )}
-
-              {/* Earnings */}
-              {upcomingEarnings.length > 0 && (
-                <div>
-                  <div className="text-[9px] text-slate-600 uppercase tracking-wider mb-1.5">💰 Upcoming Earnings</div>
-                  <div className="space-y-1">
-                    {upcomingEarnings.map(e => {
-                      const daysAway  = earningsDaysAway(e.date);
-                      const isToday   = daysAway === "today";
-                      const isSoon    = daysAway === "tomorrow" || daysAway.startsWith("in 2") || daysAway.startsWith("in 3");
-                      const dateLabel = new Date(e.date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
-                      return (
-                        <div key={e.symbol} className={`flex items-center justify-between px-2 py-1 rounded ${isToday ? "bg-violet-900/30 border border-violet-700/40" : isSoon ? "bg-slate-700/30" : ""}`}>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-bold text-white">{e.symbol}</span>
-                            <span className="text-[9px] text-slate-600">{dateLabel}</span>
+              {/* Score breakdown + Claude reasoning */}
+              <div>
+                {breakdown && (
+                  <div className="mb-2">
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-1">Synthesis Score</div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {[
+                        ["Base", breakdown.base],
+                        ["Regime", breakdown.regime],
+                        ["RelStr", breakdown.relStr],
+                        ["DXY", breakdown.dxy],
+                        ["Corr", breakdown.corr],
+                        ["Geo", breakdown.geo],
+                        ["News", breakdown.news],
+                        ["FINAL", breakdown.final],
+                      ].map(([label, val]) => (
+                        <div key={label as string} className={`text-center rounded p-1 ${label === "FINAL" ? "bg-sky-900/40 col-span-2" : "bg-slate-800"}`}>
+                          <div className="text-[8px] text-slate-600 uppercase">{label as string}</div>
+                          <div className={`text-xs font-bold ${typeof val === "number" && val > 0 ? "text-emerald-400" : typeof val === "number" && val < 0 ? "text-red-400" : "text-slate-300"}`}>
+                            {typeof val === "number" && label !== "Base" && label !== "FINAL" && val > 0 ? "+" : ""}{val}
                           </div>
-                          <span className={`text-[10px] font-semibold ${isToday ? "text-violet-400" : isSoon ? "text-amber-400" : "text-slate-500"}`}>
-                            {daysAway}
-                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {upcomingEarnings.length === 0 && (
-                <div className="text-[10px] text-slate-600">No major earnings in the next 30 days</div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* AI Analysis + Signal History */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-
-          {/* Latest AI Analysis */}
-          <div className="bg-slate-800 rounded-xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Latest AI Analysis</h2>
-              <span className="text-xs text-slate-600">per symbol · most recent</span>
-            </div>
-            <div className="divide-y divide-slate-700/50">
-              {latestDecisions.length === 0 && (
-                <div className="px-6 py-8 text-center text-slate-600 text-sm">No signals yet — agent is analyzing markets.</div>
-              )}
-              {latestDecisions.map((d, i) => {
-                const preview  = d.reasoning.length > PREVIEW_LEN ? d.reasoning.slice(0, PREVIEW_LEN).trimEnd() + "…" : d.reasoning;
-                const hasMore  = d.reasoning.length > PREVIEW_LEN;
-                const expanded = expandedIdx === i;
-                return (
-                  <div key={d.symbol} className="px-5 py-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-white text-sm">{d.symbol}</span>
-                        <DecisionBadge decision={d.decision} />
-                      </div>
-                      <span className="text-xs text-slate-600">{fmtDateTime(d.decided_at)}</span>
+                      ))}
                     </div>
-                    <ConfBar value={d.confidence} />
-                    <p className="mt-2 text-xs text-slate-400 leading-relaxed border-l-2 border-slate-700 pl-3">
-                      {expanded ? d.reasoning : preview}
-                    </p>
-                    {hasMore && (
-                      <button onClick={() => setExpandedIdx(expanded ? null : i)} className="mt-1 text-[10px] text-slate-600 hover:text-slate-400 transition-colors">
-                        {expanded ? "▲ less" : "▼ more"}
-                      </button>
-                    )}
                   </div>
-                );
-              })}
+                )}
+                {latestDec && (
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-1">
+                      Claude — {fmtDateTime(latestDec.decided_at)}
+                    </div>
+                    <div className="bg-slate-900/60 rounded p-2 max-h-28 overflow-y-auto border-l-2 border-sky-700/40">
+                      <p className="text-[10px] text-slate-400 leading-relaxed whitespace-pre-wrap">
+                        {latestDec.reasoning.replace(/Breakdown:.*$/m, "").trim().slice(0, 400)}
+                        {latestDec.reasoning.length > 400 ? "…" : ""}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
 
-          {/* Signal History */}
-          <div className="bg-slate-800 rounded-xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Signal History</h2>
-              <span className="text-xs text-slate-600">tap row for reasoning</span>
-            </div>
-            <div className="overflow-y-auto max-h-[420px]">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-slate-900 z-10">
-                  <tr className="text-slate-500 text-xs uppercase tracking-wider">
-                    <th className="hidden sm:table-cell px-4 py-2 text-left">Time</th>
-                    <th className="px-4 py-2 text-left">Symbol</th>
-                    <th className="px-4 py-2 text-left">Signal</th>
-                    <th className="px-4 py-2 text-right">Conf.</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {decisions.length === 0 && <tr><td colSpan={4} className="px-4 py-8 text-center text-slate-600">No signals yet.</td></tr>}
-                  {decisions.slice(0, 20).map((d, i) => (
-                    <tr key={i} onClick={() => setSignalModal(d)}
-                      className="border-t border-slate-700/40 hover:bg-slate-700/30 active:bg-slate-700/50 transition-colors cursor-pointer">
-                      <td className="hidden sm:table-cell px-4 py-2.5 text-slate-500 text-xs whitespace-nowrap">{fmtTime(d.decided_at)}</td>
-                      <td className="px-4 py-2.5 font-medium text-white text-xs">{d.symbol}</td>
-                      <td className="px-4 py-2.5"><DecisionBadge decision={d.decision} /></td>
-                      <td className="px-4 py-2.5 text-right text-xs text-slate-400">{Math.round(d.confidence * 100)}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+function HomePage({ positions, decisions, partialProfits, stops, totalPortfolio }: {
+  positions: Position[]; decisions: Decision[];
+  partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
+}) {
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-base font-bold text-white">Open Positions</h2>
+        <span className="text-xs text-slate-600">{positions.length} active</span>
+      </div>
+      {positions.length === 0 ? (
+        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">
+          No open positions
         </div>
-
-        {/* Open Positions — live from Alpaca */}
-        <div className="bg-slate-800 rounded-xl overflow-hidden mb-6">
-          <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
-              📂 Open Positions
-              {positions.length > 0 && (
-                <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 text-[10px] font-bold">{positions.length}</span>
-              )}
-            </h2>
-            <span className="text-xs text-slate-600">live · Alpaca paper account</span>
-          </div>
-          {positions.length === 0 ? (
-            <div className="px-6 py-8 text-center text-slate-600 text-sm">No open positions — agent is in cash.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-slate-900 text-slate-500 text-xs uppercase tracking-wider">
-                    <th className="px-5 py-3 text-left">Symbol</th>
-                    <th className="px-5 py-3 text-left">Side</th>
-                    <th className="px-5 py-3 text-right">Qty</th>
-                    <th className="px-5 py-3 text-right">Entry</th>
-                    <th className="px-5 py-3 text-right">Current</th>
-                    <th className="px-5 py-3 text-right">Mkt Val</th>
-                    <th className="px-5 py-3 text-right">P&amp;L $</th>
-                    <th className="px-5 py-3 text-right">P&amp;L %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {positions.map((p, i) => {
-                    const displaySym = (() => {
-                      const norm = p.symbol.replace("/", "");
-                      const found = [...CRYPTO_SYMBOLS].find(s => s.replace("/", "") === norm);
-                      return found ?? p.symbol;
-                    })();
-                    const pnlPos  = p.unrealized_pl >= 0;
-                    const pnlPctFmt = p.unrealized_plpc.toFixed(2);
-                    const isLong  = p.side === "long";
-                    return (
-                      <tr key={i} className="border-t border-slate-700/50 hover:bg-slate-700/30 transition-colors">
-                        <td className="px-5 py-3 font-semibold text-white">{displaySym}</td>
-                        <td className="px-5 py-3">
-                          <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${isLong ? "bg-emerald-900/50 text-emerald-400" : "bg-red-900/50 text-red-400"}`}>
-                            {p.side.toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3 text-right text-slate-300">{p.qty % 1 === 0 ? p.qty : p.qty.toPrecision(6)}</td>
-                        <td className="px-5 py-3 text-right text-slate-300">${p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
-                        <td className="px-5 py-3 text-right text-slate-200 font-medium">${p.current_price.toFixed(p.current_price < 1 ? 6 : 2)}</td>
-                        <td className="px-5 py-3 text-right text-slate-300">${p.market_value.toFixed(2)}</td>
-                        <td className="px-5 py-3 text-right font-semibold">
-                          <span className={pnlPos ? "text-emerald-400" : "text-red-400"}>
-                            {pnlPos ? "+" : ""}{p.unrealized_pl.toFixed(2)}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3 text-right">
-                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${pnlPos ? "bg-emerald-900/40 text-emerald-300" : "bg-red-900/40 text-red-300"}`}>
-                            {pnlPos ? "+" : ""}{pnlPctFmt}%
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot className="bg-slate-900/50">
-                  <tr>
-                    <td colSpan={5} className="px-5 py-2 text-xs text-slate-600 uppercase tracking-wide">Total</td>
-                    <td className="px-5 py-2 text-right text-xs text-slate-400 font-semibold">
-                      ${positions.reduce((s, p) => s + p.market_value, 0).toFixed(2)}
-                    </td>
-                    <td className="px-5 py-2 text-right">
-                      {(() => {
-                        const tot = positions.reduce((s, p) => s + p.unrealized_pl, 0);
-                        return <span className={`text-xs font-bold ${tot >= 0 ? "text-emerald-400" : "text-red-400"}`}>{tot >= 0 ? "+" : ""}{tot.toFixed(2)}</span>;
-                      })()}
-                    </td>
-                    <td className="px-5 py-2 text-right">
-                      {(() => {
-                        const totCost = positions.reduce((s, p) => s + p.cost_basis, 0);
-                        const totPl   = positions.reduce((s, p) => s + p.unrealized_pl, 0);
-                        const pct     = totCost > 0 ? (totPl / totCost) * 100 : 0;
-                        return <span className={`text-xs font-bold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</span>;
-                      })()}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* Executed Trades */}
-        <div className="bg-slate-800 rounded-xl overflow-hidden mb-6">
-          <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Executed Trades</h2>
-            <span className="text-xs text-slate-600">paper trading only</span>
-          </div>
+      ) : (
+        <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full">
               <thead>
-                <tr className="bg-slate-900 text-slate-500 text-xs uppercase tracking-wider">
-                  <th className="px-6 py-3 text-left">Time</th>
-                  <th className="px-6 py-3 text-left">Symbol</th>
-                  <th className="px-6 py-3 text-left">Side</th>
-                  <th className="px-6 py-3 text-right">Price</th>
-                  <th className="px-6 py-3 text-right">Qty</th>
-                  <th className="px-6 py-3 text-left">Status</th>
-                  <th className="px-6 py-3 text-right">P&amp;L</th>
+                <tr className="border-b border-slate-700">
+                  {["Asset","Entry","Current","Unrealized","Secured","~Stop","Size",""].map(h => (
+                    <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                  ))}
                 </tr>
               </thead>
-              <tbody>
-                {!status && !error && <tr><td colSpan={7} className="px-6 py-8 text-center text-slate-600">Loading…</td></tr>}
-                {error && <tr><td colSpan={7} className="px-6 py-8 text-center text-red-500">Could not reach the API.</td></tr>}
-                {status && status.recent_trades.length === 0 && (
-                  <tr><td colSpan={7} className="px-6 py-10 text-center text-slate-600">
-                    No trades executed yet.<br />
-                    <span className="text-xs mt-1 block">L'agent requiert ≥70% de confiance pour passer un ordre.</span>
-                  </td></tr>
-                )}
-                {status?.recent_trades.map((t, i) => (
-                  <tr key={i} className="border-t border-slate-700/50 hover:bg-slate-700/30 transition-colors">
-                    <td className="px-6 py-3 text-slate-400 whitespace-nowrap text-xs">{t.timestamp ? fmtDateTime(t.timestamp) : "—"}</td>
-                    <td className="px-6 py-3 font-semibold text-white">{t.symbol}</td>
-                    <td className="px-6 py-3"><DecisionBadge decision={t.action} /></td>
-                    <td className="px-6 py-3 text-right text-slate-300">${Number(t.price).toFixed(2)}</td>
-                    <td className="px-6 py-3 text-right text-slate-300">{t.qty}</td>
-                    <td className="px-6 py-3 text-xs text-slate-500 capitalize">{t.status}</td>
-                    <td className="px-6 py-3 text-right">
-                      {t.pnl != null
-                        ? <span className={t.pnl >= 0 ? "text-emerald-400" : "text-red-400"}>{t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(2)}</span>
-                        : <span className="text-slate-600">—</span>}
-                    </td>
-                  </tr>
+              <tbody className="divide-y divide-slate-700/50">
+                {positions.map(p => (
+                  <PositionRow key={p.symbol} pos={p} decisions={decisions}
+                    partialProfits={partialProfits} stops={stops} totalPortfolio={totalPortfolio} />
                 ))}
               </tbody>
             </table>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
 
-        {/* Monthly P&L chart */}
-        <div className="bg-slate-800 rounded-xl overflow-hidden mb-6">
-          <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Monthly P&amp;L</h2>
-            <span className="text-xs text-slate-600">closed trades · by month</span>
+// ── MARKET PAGE ───────────────────────────────────────────────────────────────
+function MarketPage({ movers, sentiment, regime }: {
+  movers: Mover[]; sentiment: SentimentResponse | null; regime: RegimeResponse | null;
+}) {
+  const [calHovered, setCalHovered] = useState<string | null>(null);
+  const [mobileSection, setMobileSection] = useState<"movers" | "calendar" | null>(null);
+
+  const regimeLabel = regime?.regime ?? "UNKNOWN";
+  const rb          = regimeBadgeStyle(regimeLabel);
+  const sentColor   = sentiment?.sentiment?.includes("bull") ? "text-emerald-400" :
+                      sentiment?.sentiment?.includes("bear") ? "text-red-400" : "text-slate-400";
+  const headlines   = sentiment?.headlines ?? [];
+  const alerts      = sentiment?.alerts ?? [];
+  const trumpSignal = alerts.find(a => a.toLowerCase().includes("trump")) ?? null;
+  const upcoming    = EARNINGS_CALENDAR
+    .filter(e => { const d = new Date(e.date + "T12:00:00Z"); return d >= new Date(Date.now() - 86400_000); })
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 6);
+
+  return (
+    <div className="p-4 sm:p-6">
+      {/* Desktop: 3 equal columns */}
+      <div className="hidden sm:grid grid-cols-3 gap-4">
+        {/* LEFT: Top Movers */}
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Top Movers</span>
+            <span className="text-[9px] text-slate-600">60s refresh</span>
           </div>
-          <div className="p-4 sm:p-6">
-            <MonthlyPnlChart trades={status?.recent_trades ?? []} />
+          <div className="p-3 space-y-1.5">
+            {movers.length === 0
+              ? <div className="text-xs text-slate-600 text-center py-6">Fetching movers…</div>
+              : movers.map(m => (
+                <div key={m.symbol} className="flex items-center justify-between py-1.5 border-b border-slate-700/30 last:border-0">
+                  <span className="text-sm font-bold text-white">{m.symbol.replace("/USD","")}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-slate-400">${fmtPrice(m.price)}</span>
+                    <span className={`text-xs font-bold ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>
+                      {m.direction === "up" ? "▲" : "▼"} {Math.abs(m.change_pct).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
           </div>
         </div>
 
-        {/* Monthly Costs Tracker */}
-        <div className="bg-slate-800 rounded-xl overflow-hidden mb-6">
-          <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">💸 Monthly Costs</h2>
-            <span className="text-xs text-slate-600">{now.toLocaleString("default", { month: "long", year: "numeric" })}</span>
-          </div>
-          <div className="p-5">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Cost breakdown */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                  <div>
-                    <div className="text-xs font-medium text-slate-300">Replit Core</div>
-                    <div className="text-[10px] text-slate-600">fixed monthly</div>
-                  </div>
-                  <span className="text-sm font-semibold text-red-400">-${REPLIT_MONTHLY_COST.toFixed(2)}</span>
-                </div>
-                <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                  <div>
-                    <div className="text-xs font-medium text-slate-300">Claude API</div>
-                    <div className="text-[10px] text-slate-600">{mDecisions.length} calls × $0.003</div>
-                  </div>
-                  <span className="text-sm font-semibold text-red-400">-${claudeCost.toFixed(3)}</span>
-                </div>
-                <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                  <div className="text-xs font-bold text-slate-200">Total costs</div>
-                  <span className="text-sm font-bold text-red-400">-${totalCost.toFixed(2)}</span>
-                </div>
-                <div className="flex items-center justify-between py-2">
-                  <div>
-                    <div className="text-xs font-bold text-slate-200">Net P&amp;L</div>
-                    <div className="text-[10px] text-slate-600">after all costs</div>
-                  </div>
-                  <span className={`text-lg font-bold ${netPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {netPnl >= 0 ? "+" : ""}{netPnl.toFixed(2)} $
-                  </span>
-                </div>
-              </div>
+        {/* CENTER: Market Sentiment + Regime */}
+        <SentimentColumn sentiment={sentiment} regime={regime} headlines={headlines}
+          trumpSignal={trumpSignal} rb={rb} regimeLabel={regimeLabel} sentColor={sentColor} />
 
-              {/* Visual summary */}
-              <div className="bg-slate-900/40 rounded-xl p-4 flex flex-col justify-center items-center gap-2 border border-slate-700/30">
-                <div className="text-[10px] text-slate-500 uppercase tracking-wider">Net return (after costs)</div>
-                <div className={`text-4xl font-bold ${netPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {((netPnl / INITIAL_CAPITAL) * 100) >= 0 ? "+" : ""}{((netPnl / INITIAL_CAPITAL) * 100).toFixed(2)}%
+        {/* RIGHT: Calendar */}
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700">
+            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Calendar</span>
+          </div>
+          <div className="p-3 space-y-2">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Macro Events</div>
+            {MACRO_EVENTS.map(e => (
+              <div key={e.event} className="bg-slate-900/40 rounded-lg p-2.5 border border-slate-700/30">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-300">{e.event}</span>
+                  <span className="text-[10px] text-amber-400 font-mono">{daysUntil(e.date)}</span>
                 </div>
-                <div className={`text-xs text-slate-500`}>
-                  on ${INITIAL_CAPITAL.toLocaleString()} capital
-                </div>
-                <div className="mt-2 w-full bg-slate-700/50 rounded-full h-1.5 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full ${netPnl >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-                    style={{ width: `${Math.min(Math.abs(netPnl / INITIAL_CAPITAL) * 100, 100)}%` }}
-                  />
-                </div>
+                <div className="text-[10px] text-slate-600 mt-0.5">{e.note}</div>
               </div>
+            ))}
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mt-3 mb-1">Earnings</div>
+            {upcoming.map(e => (
+              <div key={e.symbol}
+                className="bg-slate-900/40 rounded-lg p-2.5 border border-slate-700/30 cursor-pointer hover:border-amber-700/50 transition-colors"
+                onMouseEnter={() => setCalHovered(e.symbol)}
+                onMouseLeave={() => setCalHovered(null)}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-white">{e.symbol}</span>
+                  <span className="text-[10px] text-amber-400 font-mono">{daysUntil(e.date)}</span>
+                </div>
+                {calHovered === e.symbol && (
+                  <div className="text-[10px] text-slate-400 mt-1 leading-snug">{e.whisper}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile: sentiment first, then collapsibles */}
+      <div className="sm:hidden space-y-4">
+        <SentimentColumn sentiment={sentiment} regime={regime} headlines={headlines}
+          trumpSignal={trumpSignal} rb={rb} regimeLabel={regimeLabel} sentColor={sentColor} />
+        <button className="w-full flex items-center justify-between bg-slate-800 rounded-xl px-4 py-3 border border-slate-700/50"
+          onClick={() => setMobileSection(mobileSection === "movers" ? null : "movers")}>
+          <span className="text-xs font-semibold text-slate-300">📊 Top Movers</span>
+          <span className="text-slate-600">{mobileSection === "movers" ? "▲" : "▼"}</span>
+        </button>
+        {mobileSection === "movers" && (
+          <div className="bg-slate-800 rounded-xl border border-slate-700/50 p-3 space-y-1.5">
+            {movers.map(m => (
+              <div key={m.symbol} className="flex items-center justify-between py-1.5 border-b border-slate-700/30 last:border-0">
+                <span className="text-sm font-bold text-white">{m.symbol.replace("/USD","")}</span>
+                <span className={`text-xs font-bold ${m.direction === "up" ? "text-emerald-400" : "text-red-400"}`}>
+                  {m.direction === "up" ? "▲" : "▼"} {Math.abs(m.change_pct).toFixed(2)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <button className="w-full flex items-center justify-between bg-slate-800 rounded-xl px-4 py-3 border border-slate-700/50"
+          onClick={() => setMobileSection(mobileSection === "calendar" ? null : "calendar")}>
+          <span className="text-xs font-semibold text-slate-300">📅 Calendar</span>
+          <span className="text-slate-600">{mobileSection === "calendar" ? "▲" : "▼"}</span>
+        </button>
+        {mobileSection === "calendar" && (
+          <div className="bg-slate-800 rounded-xl border border-slate-700/50 p-3 space-y-2">
+            {upcoming.map(e => (
+              <div key={e.symbol} className="bg-slate-900/40 rounded-lg p-2.5 border border-slate-700/30"
+                onClick={() => setCalHovered(calHovered === e.symbol ? null : e.symbol)}>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-white">{e.symbol}</span>
+                  <span className="text-[10px] text-amber-400">{daysUntil(e.date)}</span>
+                </div>
+                {calHovered === e.symbol && <div className="text-[10px] text-slate-400 mt-1">{e.whisper}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SentimentColumn({ sentiment, regime, headlines, trumpSignal, rb, regimeLabel, sentColor }: {
+  sentiment: SentimentResponse | null; regime: RegimeResponse | null;
+  headlines: string[]; trumpSignal: string | null;
+  rb: ReturnType<typeof regimeBadgeStyle>; regimeLabel: string; sentColor: string;
+}) {
+  const sentimentLabel = sentiment?.sentiment?.replace("_", " ").toUpperCase() ?? "—";
+  const params = regime?.params as Record<string, unknown> | undefined;
+
+  return (
+    <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-700">
+        <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Market Sentiment</span>
+      </div>
+      <div className="p-4 space-y-3">
+        {/* Regime */}
+        <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${rb.bg}`}>
+          <span className="text-base">{rb.emoji}</span>
+          <div>
+            <div className={`text-sm font-bold ${rb.text}`}>
+              {regimeLabel === "UNKNOWN" ? "Loading…" : regimeLabel.replace("_MARKET","").replace("TRENDING_","")}
+            </div>
+            <div className="text-[10px] text-slate-500">Market Regime</div>
+          </div>
+          {params && (
+            <div className="ml-auto text-right">
+              {params["vix"] !== undefined && params["vix"] !== null && (
+                <div className="text-[10px] text-slate-500">VIX <span className="text-slate-300">{String(params["vix"])}</span></div>
+              )}
+              {params["position_size_multiplier"] !== undefined && (
+                <div className="text-[10px] text-slate-500">Size <span className="text-slate-300">{((params["position_size_multiplier"] as number) * 100).toFixed(0)}%</span></div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Sentiment */}
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">News Sentiment</div>
+            <div className={`text-base font-bold ${sentColor}`}>{sentimentLabel}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] text-slate-500">Score</div>
+            <div className={`text-lg font-bold font-mono ${(sentiment?.score ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {(sentiment?.score ?? 0) >= 0 ? "+" : ""}{sentiment?.score ?? "—"}
             </div>
           </div>
         </div>
 
-        <footer className="mt-4 text-center text-xs text-slate-700">
-          Trading Agent · Paper Trading Only · Not Financial Advice
-        </footer>
+        {/* Trump signal */}
+        {trumpSignal && (
+          <div className="bg-amber-900/20 border border-amber-700/40 rounded-lg px-3 py-2 flex items-center gap-2">
+            <span className="text-base">🇺🇸</span>
+            <span className="text-[11px] text-amber-300">{trumpSignal}</span>
+          </div>
+        )}
+
+        {/* Headlines */}
+        {headlines.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Top Headlines</div>
+            {headlines.slice(0, 3).map((hl, i) => {
+              const tier = inferHeadlineTier(hl);
+              return (
+                <div key={i} className="flex items-start gap-1.5 py-1.5 border-b border-slate-700/30 last:border-0">
+                  <TierBadge tier={tier} />
+                  <span className="text-[11px] text-slate-400 leading-snug line-clamp-2">{hl}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {sentiment?.ts && (
+          <div className="text-[9px] text-slate-700 text-right">Updated {fmtTime(sentiment.ts)}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── SIGNALS PAGE ──────────────────────────────────────────────────────────────
+function SignalRow({ dec }: { dec: Decision }) {
+  const [expanded, setExpanded] = useState(false);
+  const breakdown = parseSynthesisBreakdown(dec.reasoning);
+  const patterns  = parsePatternsFromMarketData(dec.market_data);
+  const regimeStr = parseRegimeFromReasoning(dec.reasoning);
+  const conf      = Math.round(dec.confidence * 100);
+  const finalScore = breakdown?.final ?? null;
+
+  return (
+    <>
+      <tr className="hover:bg-slate-800/50 cursor-pointer transition-colors" onClick={() => setExpanded(v => !v)}>
+        <td className="px-3 py-2.5 text-xs text-slate-500 whitespace-nowrap">{fmtDateTime(dec.decided_at)}</td>
+        <td className="px-3 py-2.5 font-bold text-white text-sm">{dec.symbol.replace("/USD","")}</td>
+        <td className="px-3 py-2.5"><DecisionBadge decision={dec.decision} /></td>
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div className={`h-full rounded-full ${conf >= 80 ? "bg-emerald-500" : conf >= 60 ? "bg-sky-500" : "bg-slate-500"}`} style={{ width: `${conf}%` }} />
+            </div>
+            <span className="text-xs text-slate-400">{conf}%</span>
+          </div>
+        </td>
+        <td className="px-3 py-2.5 text-xs font-bold font-mono text-sky-400">{finalScore ?? "—"}</td>
+        <td className="px-3 py-2.5">
+          <span className={`text-[10px] font-semibold ${regimeStr.includes("BEAR") ? "text-red-400" : regimeStr.includes("BULL") ? "text-emerald-400" : "text-slate-500"}`}>
+            {regimeStr}
+          </span>
+        </td>
+        <td className="px-3 py-2.5 text-slate-600 text-xs">{expanded ? "▲" : "▼"}</td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={7} className="px-4 pb-4 pt-1 bg-slate-800/30">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
+              {/* Score breakdown */}
+              {breakdown && (
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-2">Synthesis Breakdown</div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      ["Base", breakdown.base, false],
+                      ["Regime", breakdown.regime, true],
+                      ["RelStr", breakdown.relStr, true],
+                      ["DXY", breakdown.dxy, true],
+                      ["Corr", breakdown.corr, true],
+                      ["Geo", breakdown.geo, true],
+                      ["News", breakdown.news, true],
+                      ["FINAL", breakdown.final, false],
+                    ].map(([label, val, signed]) => (
+                      <div key={label as string} className={`text-center rounded p-1.5 ${label === "FINAL" ? "bg-sky-900/40 col-span-2" : "bg-slate-800"}`}>
+                        <div className="text-[8px] text-slate-600 uppercase">{label as string}</div>
+                        <div className={`text-xs font-bold ${typeof val === "number" && val > 0 ? "text-emerald-400" : typeof val === "number" && val < 0 ? "text-red-400" : "text-slate-300"}`}>
+                          {signed && typeof val === "number" && val > 0 ? "+" : ""}{val as number}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {patterns.length > 0 && (
+                    <div className="flex items-center gap-1 flex-wrap mt-2">
+                      <span className="text-[9px] text-slate-600">Patterns:</span>
+                      {patterns.map(p => (
+                        <span key={p} className="text-[9px] bg-violet-900/40 text-violet-400 border border-violet-700/50 rounded px-1.5 py-0.5">{p}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Claude reasoning */}
+              <div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-2">Claude Reasoning</div>
+                <div className="bg-slate-900/60 rounded p-2.5 max-h-36 overflow-y-auto border-l-2 border-sky-700/40">
+                  <p className="text-[10px] text-slate-400 leading-relaxed whitespace-pre-wrap">
+                    {dec.reasoning.replace(/Breakdown:.*$/m, "").trim()}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function SignalsPage({ decisions }: { decisions: Decision[] }) {
+  const [filter, setFilter] = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
+
+  const latestBySymbol: Record<string, Decision> = {};
+  decisions.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
+  const deduped = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
+  const filtered = filter === "ALL" ? deduped : deduped.filter(d => d.decision.toUpperCase() === filter);
+
+  return (
+    <div className="p-4 sm:p-6">
+      {/* Filter bar */}
+      <div className="flex items-center gap-2 mb-4">
+        {(["ALL", "BUY", "SELL", "HOLD"] as const).map(f => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${filter === f
+              ? f === "BUY"  ? "bg-emerald-900/50 text-emerald-400 border border-emerald-700"
+              : f === "SELL" ? "bg-red-900/50 text-red-400 border border-red-700"
+              : f === "HOLD" ? "bg-slate-700 text-slate-300 border border-slate-600"
+              : "bg-sky-900/40 text-sky-400 border border-sky-700"
+              : "text-slate-500 hover:text-slate-300 border border-transparent"}`}>
+            {f}
+          </button>
+        ))}
+        <span className="ml-auto text-xs text-slate-600">{filtered.length} signals (latest per asset)</span>
       </div>
 
-      {/* Modals */}
-      {pnlModalOpen && (
-        <PnlModal trades={status?.recent_trades ?? []} decisions={decisions} onClose={() => setPnlModalOpen(false)} />
+      {filtered.length === 0 ? (
+        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">No signals yet</div>
+      ) : (
+        <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-700">
+                  {["Time","Asset","Signal","Confidence","Score","Regime",""].map(h => (
+                    <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                {filtered.map(d => <SignalRow key={`${d.symbol}-${d.decided_at}`} dec={d} />)}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
-      {headlineModal && (
-        <HeadlineModal headline={headlineModal.text} overallSentiment={headlineModal.overallSentiment} onClose={() => setHeadlineModal(null)} />
-      )}
-      {signalModal && (
-        <SignalModal signal={signalModal} onClose={() => setSignalModal(null)} />
-      )}
+    </div>
+  );
+}
+
+// ── PERFORMANCE PAGE ──────────────────────────────────────────────────────────
+function DailyBarChart({ trades }: { trades: Trade[] }) {
+  const closed = trades.filter(t => t.pnl != null);
+  if (closed.length === 0) return <div className="text-xs text-slate-600 text-center py-6">No closed trades yet</div>;
+  const byDay: Record<string, number> = {};
+  closed.forEach(t => {
+    const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
+    const k = d.toISOString().slice(0, 10);
+    byDay[k] = (byDay[k] ?? 0) + (t.pnl ?? 0);
+  });
+  const days = Object.keys(byDay).sort();
+  const vals = days.map(k => byDay[k]);
+  const maxAbs = Math.max(...vals.map(Math.abs), 0.01);
+  const BW = 32, GAP = 8, CH = 80, LH = 16, MY = CH / 2;
+  const TW = Math.max(days.length * (BW + GAP) - GAP, 300);
+  const dayLabel = (k: string) => { const d = new Date(k + "T00:00:00Z"); return `${d.getDate()}/${d.getMonth()+1}`; };
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${TW}px` }}>
+        <line x1={-4} y1={MY} x2={TW+4} y2={MY} stroke="#334155" strokeWidth="1" />
+        {days.map((day, i) => {
+          const val = vals[i];
+          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 4), val !== 0 ? 2 : 1);
+          const x = i * (BW + GAP);
+          const y = val >= 0 ? MY - barH : MY;
+          const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
+          return (
+            <g key={day}>
+              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="2" />
+              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="8">{dayLabel(day)}</text>
+              {val !== 0 && <text x={x + BW/2} y={val >= 0 ? y - 2 : y + barH + 8} textAnchor="middle" fill={fill} fontSize="8" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function MonthlyBarChart({ trades }: { trades: Trade[] }) {
+  const closed = trades.filter(t => t.pnl != null);
+  if (closed.length === 0) return <div className="text-xs text-slate-600 text-center py-6">No closed trades yet</div>;
+  const byMonth: Record<string, number> = {};
+  closed.forEach(t => {
+    const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
+    const k = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    byMonth[k] = (byMonth[k] ?? 0) + (t.pnl ?? 0);
+  });
+  const now = new Date();
+  const ck  = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+  if (!(ck in byMonth)) byMonth[ck] = 0;
+  const months = Object.keys(byMonth).sort();
+  const vals   = months.map(k => byMonth[k]);
+  const maxAbs = Math.max(...vals.map(Math.abs), 0.01);
+  const BW = 42, GAP = 12, CH = 80, LH = 16, MY = CH / 2;
+  const TW = months.length * (BW + GAP) - GAP;
+  const ML = (k: string) => ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(k.split("-")[1],10)-1];
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${Math.max(TW, 200)}px` }}>
+        <line x1={-4} y1={MY} x2={TW+4} y2={MY} stroke="#334155" strokeWidth="1" />
+        {months.map((m, i) => {
+          const val = vals[i];
+          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 6), val !== 0 ? 3 : 1);
+          const x = i * (BW + GAP);
+          const y = val >= 0 ? MY - barH : MY;
+          const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
+          const cur = m === ck;
+          return (
+            <g key={m}>
+              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="2" opacity={cur ? 0.6 : 1} />
+              {cur && <rect x={x} y={y} width={BW} height={barH} fill="none" stroke={fill} strokeWidth="1" rx="2" strokeDasharray="3 2" />}
+              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="9">{ML(m)}{cur ? "*" : ""}</text>
+              {val !== 0 && <text x={x + BW/2} y={val >= 0 ? y - 3 : y + barH + 9} textAnchor="middle" fill={fill} fontSize="8" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="text-[9px] text-slate-600 text-right mt-0.5">* current month (partial)</div>
+    </div>
+  );
+}
+
+function PerformancePage({ trades, decisions, stats, positions }: {
+  trades: Trade[]; decisions: Decision[];
+  stats: StatsResponse | null; positions: Position[];
+}) {
+  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const closedPnl       = stats?.total_pnl ?? trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0);
+  const totalReturn     = ((closedPnl + unrealizedTotal) / INITIAL_CAPITAL) * 100;
+  const now             = new Date();
+  const mDecisions      = decisions.filter(d => {
+    const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
+    return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
+  });
+  const claudeCost = mDecisions.length * CLAUDE_COST_PER_CALL;
+  const totalCost  = REPLIT_MONTHLY_COST + claudeCost;
+  const netPnl     = closedPnl - totalCost;
+
+  const kpis = [
+    { label: "Total Return", value: (totalReturn >= 0 ? "+" : "") + totalReturn.toFixed(2) + "%", color: totalReturn >= 0 ? "text-emerald-400" : "text-red-400" },
+    { label: "Win Rate",     value: stats ? stats.win_rate.toFixed(1) + "%" : "—",               color: "text-sky-400" },
+    { label: "Profit Factor",value: stats ? (stats.profit_factor >= 999 ? "∞" : stats.profit_factor.toFixed(2)) : "—", color: "text-violet-400" },
+    { label: "Best Asset",   value: stats?.best_asset ?? "—",                                    color: "text-amber-400" },
+  ];
+
+  return (
+    <div className="p-4 sm:p-6 space-y-5">
+      {/* KPI row */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {kpis.map(k => (
+          <div key={k.label} className="bg-slate-800 rounded-xl p-4 border border-slate-700/50">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{k.label}</div>
+            <div className={`text-2xl font-bold ${k.color}`}>{k.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Daily P&L chart */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Daily P&L</span>
+          <span className="text-xs text-slate-600">closed trades · per day</span>
+        </div>
+        <div className="p-4">
+          <DailyBarChart trades={trades} />
+        </div>
+      </div>
+
+      {/* Monthly P&L chart */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Monthly P&L</span>
+          <span className="text-xs text-slate-600">closed trades · by month</span>
+        </div>
+        <div className="p-4">
+          <MonthlyBarChart trades={trades} />
+        </div>
+      </div>
+
+      {/* Costs */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700">
+          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">💸 Monthly Costs — {now.toLocaleString("default", { month: "long", year: "numeric" })}</span>
+        </div>
+        <div className="p-4 space-y-2 max-w-sm">
+          {[
+            ["Replit Core", `-$${REPLIT_MONTHLY_COST.toFixed(2)}`, "text-red-400"],
+            [`Claude API (${mDecisions.length} calls × $0.003)`, `-$${claudeCost.toFixed(3)}`, "text-red-400"],
+            ["Total Costs", `-$${totalCost.toFixed(2)}`, "text-red-400 font-bold border-t border-slate-700 pt-2"],
+            ["Net P&L (after costs)", (netPnl >= 0 ? "+" : "") + `$${netPnl.toFixed(2)}`, netPnl >= 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"],
+          ].map(([label, value, cls]) => (
+            <div key={label as string} className={`flex justify-between text-xs ${cls as string}`}>
+              <span className="text-slate-400">{label as string}</span>
+              <span className="font-mono">{value as string}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [activePage, setActivePage] = useState<Page>("HOME");
+  const [status,     setStatus]     = useState<Status | null>(null);
+  const [decisions,  setDecisions]  = useState<Decision[]>([]);
+  const [positions,  setPositions]  = useState<Position[]>([]);
+  const [movers,     setMovers]     = useState<Mover[]>([]);
+  const [sentiment,  setSentiment]  = useState<SentimentResponse | null>(null);
+  const [regime,     setRegime]     = useState<RegimeResponse | null>(null);
+  const [stats,      setStats]      = useState<StatsResponse | null>(null);
+  const [partialProfits, setPartialProfits] = useState<PartialProfits>({});
+  const [stops,      setStops]      = useState<Stops>({});
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [error,      setError]      = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes] = await Promise.all([
+        fetch(`${BASE}/api/status`),
+        fetch(`${BASE}/api/decisions`),
+        fetch(`${BASE}/api/positions`),
+        fetch(`${BASE}/api/movers`),
+        fetch(`${BASE}/api/sentiment`),
+        fetch(`${BASE}/api/regime`),
+        fetch(`${BASE}/api/stats`),
+        fetch(`${BASE}/api/partial-profits`),
+        fetch(`${BASE}/api/stops`),
+      ]);
+      if (sRes.ok)     { const d = await sRes.json() as Status;   setStatus(d); }
+      if (dRes.ok)     { const d = await dRes.json();             setDecisions(d.decisions ?? []); }
+      if (pRes.ok)     { const d = await pRes.json();             setPositions(d.positions ?? []); }
+      if (mRes.ok)     { const d = await mRes.json();             setMovers(d.movers ?? []); }
+      if (senRes.ok)   setSentiment(await senRes.json() as SentimentResponse);
+      if (regRes.ok)   setRegime(await regRes.json() as RegimeResponse);
+      if (stRes.ok)    setStats(await stRes.json() as StatsResponse);
+      if (ppRes.ok)    { const d = await ppRes.json(); setPartialProfits(d.partial_profits ?? {}); }
+      if (stopsRes.ok) { const d = await stopsRes.json(); setStops(d.stops ?? {}); }
+      setError(false);
+    } catch { setError(true); }
+    setLastRefresh(new Date());
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 15_000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  // Derived state
+  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const closedPnl       = stats?.total_pnl ?? status?.recent_trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0) ?? 0;
+  const portfolioValue  = INITIAL_CAPITAL + closedPnl + unrealizedTotal;
+  const portfolioDelta  = ((closedPnl + unrealizedTotal) / INITIAL_CAPITAL) * 100;
+  const allTrades       = status?.recent_trades ?? [];
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-200">
+      <TopNav
+        activePage={activePage}
+        setActivePage={setActivePage}
+        regime={regime?.regime ?? "UNKNOWN"}
+        portfolioValue={portfolioValue}
+        portfolioDelta={portfolioDelta}
+        positionsCount={positions.length}
+        lastRefresh={lastRefresh}
+        error={error}
+      />
+      {/* Page content — push below fixed nav */}
+      <div className="pt-14">
+        {activePage === "HOME"        && <HomePage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} />}
+        {activePage === "MARKET"      && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
+        {activePage === "SIGNALS"     && <SignalsPage decisions={decisions} />}
+        {activePage === "PERFORMANCE" && <PerformancePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} />}
+      </div>
     </div>
   );
 }
