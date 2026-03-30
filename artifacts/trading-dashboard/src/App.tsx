@@ -50,7 +50,7 @@ interface StatsResponse {
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
 
-type Page = "HOME" | "MARKET" | "SIGNALS" | "PERFORMANCE";
+type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(s: string) {
@@ -146,7 +146,7 @@ function TopNav({ activePage, setActivePage, regime, portfolioValue, portfolioDe
   positionsCount: number; lastRefresh: Date; error: boolean;
 }) {
   const rb   = regimeBadgeStyle(regime);
-  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "PERFORMANCE"];
+  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "TRADES"];
   const pPos = portfolioDelta >= 0;
 
   return (
@@ -319,7 +319,7 @@ function PositionRow({ pos, decisions, partialProfits, stops, totalPortfolio }: 
   );
 }
 
-function HomePage({ positions, decisions, partialProfits, stops, totalPortfolio }: {
+function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio }: {
   positions: Position[]; decisions: Decision[];
   partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
 }) {
@@ -705,7 +705,7 @@ function SignalsPage({ decisions }: { decisions: Decision[] }) {
   );
 }
 
-// ── PERFORMANCE PAGE ──────────────────────────────────────────────────────────
+// ── HOME PAGE (Performance Overview) ─────────────────────────────────────────
 function DailyBarChart({ trades }: { trades: Trade[] }) {
   const closed = trades.filter(t => t.pnl != null);
   if (closed.length === 0) return <div className="text-xs text-slate-600 text-center py-6">No closed trades yet</div>;
@@ -718,24 +718,25 @@ function DailyBarChart({ trades }: { trades: Trade[] }) {
   const days = Object.keys(byDay).sort();
   const vals = days.map(k => byDay[k]);
   const maxAbs = Math.max(...vals.map(Math.abs), 0.01);
-  const BW = 32, GAP = 8, CH = 80, LH = 16, MY = CH / 2;
-  const TW = Math.max(days.length * (BW + GAP) - GAP, 300);
+  const BW = 18, GAP = 6, CH = 56, LH = 14, MY = CH / 2;
+  const TW = Math.max(days.length * (BW + GAP) - GAP, 260);
+  const SVG_H = CH + LH + 12;
   const dayLabel = (k: string) => { const d = new Date(k + "T00:00:00Z"); return `${d.getDate()}/${d.getMonth()+1}`; };
   return (
     <div className="overflow-x-auto">
-      <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${TW}px` }}>
+      <svg viewBox={`-4 -4 ${TW + 8} ${SVG_H}`} width="100%" height={SVG_H} style={{ minWidth: `${TW}px` }} preserveAspectRatio="none">
         <line x1={-4} y1={MY} x2={TW+4} y2={MY} stroke="#334155" strokeWidth="1" />
         {days.map((day, i) => {
           const val = vals[i];
-          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 4), val !== 0 ? 2 : 1);
+          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 3), val !== 0 ? 2 : 1);
           const x = i * (BW + GAP);
           const y = val >= 0 ? MY - barH : MY;
           const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
           return (
             <g key={day}>
-              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="2" />
-              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="8">{dayLabel(day)}</text>
-              {val !== 0 && <text x={x + BW/2} y={val >= 0 ? y - 2 : y + barH + 8} textAnchor="middle" fill={fill} fontSize="8" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
+              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="1" />
+              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill="#475569" fontSize="7">{dayLabel(day)}</text>
+              {val !== 0 && <text x={x + BW/2} y={val >= 0 ? y - 2 : y + barH + 7} textAnchor="middle" fill={fill} fontSize="7" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
             </g>
           );
         })}
@@ -747,48 +748,78 @@ function DailyBarChart({ trades }: { trades: Trade[] }) {
 function MonthlyBarChart({ trades }: { trades: Trade[] }) {
   const closed = trades.filter(t => t.pnl != null);
   if (closed.length === 0) return <div className="text-xs text-slate-600 text-center py-6">No closed trades yet</div>;
+
+  const now = new Date();
+  const startYear = now.getFullYear();
+  const allMonths: string[] = [];
+  for (let m = 0; m < 12; m++) {
+    allMonths.push(`${startYear}-${String(m+1).padStart(2,"0")}`);
+  }
   const byMonth: Record<string, number> = {};
+  allMonths.forEach(k => { byMonth[k] = 0; });
   closed.forEach(t => {
     const d = new Date(t.timestamp.includes("T") ? t.timestamp : t.timestamp.replace(" ", "T") + "Z");
     const k = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
-    byMonth[k] = (byMonth[k] ?? 0) + (t.pnl ?? 0);
+    if (k in byMonth) byMonth[k] = (byMonth[k] ?? 0) + (t.pnl ?? 0);
   });
-  const now = new Date();
-  const ck  = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
-  if (!(ck in byMonth)) byMonth[ck] = 0;
-  const months = Object.keys(byMonth).sort();
+  const ck     = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+  const months = allMonths;
   const vals   = months.map(k => byMonth[k]);
-  const maxAbs = Math.max(...vals.map(Math.abs), 0.01);
-  const BW = 42, GAP = 12, CH = 80, LH = 16, MY = CH / 2;
+
+  const activeVals = vals.filter(v => v !== 0);
+  const maxAbs = Math.max(...activeVals.map(Math.abs), 0.01);
+
+  const ytd: number[] = [];
+  let cum = 0;
+  vals.forEach(v => { cum += v; ytd.push(cum); });
+
+  const BW = 22, GAP = 8, CH = 52, LH = 14, MY = CH / 2;
   const TW = months.length * (BW + GAP) - GAP;
+  const SVG_H = CH + LH + 24;
   const ML = (k: string) => ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(k.split("-")[1],10)-1];
+
   return (
     <div className="overflow-x-auto">
-      <svg viewBox={`-4 -8 ${TW + 8} ${CH + LH + 16}`} width="100%" style={{ minWidth: `${Math.max(TW, 200)}px` }}>
+      <svg viewBox={`-4 -18 ${TW + 8} ${SVG_H}`} width="100%" height={SVG_H} style={{ minWidth: `${Math.max(TW, 260)}px` }} preserveAspectRatio="none">
         <line x1={-4} y1={MY} x2={TW+4} y2={MY} stroke="#334155" strokeWidth="1" />
         {months.map((m, i) => {
-          const val = vals[i];
-          const barH = Math.max(Math.abs(val) / maxAbs * (MY - 6), val !== 0 ? 3 : 1);
-          const x = i * (BW + GAP);
-          const y = val >= 0 ? MY - barH : MY;
-          const fill = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#475569";
-          const cur = m === ck;
+          const val   = vals[i];
+          const ytdV  = ytd[i];
+          const barH  = Math.max(Math.abs(val) / maxAbs * (MY - 4), val !== 0 ? 2 : 1);
+          const x     = i * (BW + GAP);
+          const y     = val >= 0 ? MY - barH : MY;
+          const fill  = val > 0 ? "#10b981" : val < 0 ? "#ef4444" : "#334155";
+          const cur   = m === ck;
+          const ytdFill = ytdV > 0 ? "#22d3ee" : ytdV < 0 ? "#f87171" : "#475569";
+          const isFuture = m > ck;
           return (
-            <g key={m}>
-              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="2" opacity={cur ? 0.6 : 1} />
-              {cur && <rect x={x} y={y} width={BW} height={barH} fill="none" stroke={fill} strokeWidth="1" rx="2" strokeDasharray="3 2" />}
-              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill="#64748b" fontSize="9">{ML(m)}{cur ? "*" : ""}</text>
-              {val !== 0 && <text x={x + BW/2} y={val >= 0 ? y - 3 : y + barH + 9} textAnchor="middle" fill={fill} fontSize="8" fontWeight="bold">{val >= 0 ? "+" : ""}{val.toFixed(1)}</text>}
+            <g key={m} opacity={isFuture ? 0.25 : 1}>
+              <rect x={x} y={y} width={BW} height={barH} fill={fill} rx="1" opacity={cur ? 0.65 : 1} />
+              {cur && <rect x={x} y={y} width={BW} height={barH} fill="none" stroke={fill} strokeWidth="1" rx="1" strokeDasharray="3 2" />}
+              <text x={x + BW/2} y={CH + LH} textAnchor="middle" fill={cur ? "#94a3b8" : "#475569"} fontSize="8">{ML(m)}</text>
+              {val !== 0 && (
+                <text x={x + BW/2} y={val >= 0 ? y - 2 : y + barH + 7} textAnchor="middle" fill={fill} fontSize="6.5" fontWeight="bold">
+                  {val >= 0 ? "+" : ""}{val.toFixed(1)}
+                </text>
+              )}
+              {ytdV !== 0 && !isFuture && (
+                <text x={x + BW/2} y={-8} textAnchor="middle" fill={ytdFill} fontSize="6.5" fontWeight="bold">
+                  {ytdV >= 0 ? "+" : ""}{ytdV.toFixed(1)}
+                </text>
+              )}
             </g>
           );
         })}
       </svg>
-      <div className="text-[9px] text-slate-600 text-right mt-0.5">* current month (partial)</div>
+      <div className="flex items-center gap-3 mt-1">
+        <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" /><span className="text-[9px] text-slate-600">YTD running total</span></div>
+        <div className="text-[9px] text-slate-600 ml-auto">* current month</div>
+      </div>
     </div>
   );
 }
 
-function PerformancePage({ trades, decisions, stats, positions }: {
+function HomePage({ trades, decisions, stats, positions }: {
   trades: Trade[]; decisions: Decision[];
   stats: StatsResponse | null; positions: Position[];
 }) {
@@ -937,10 +968,10 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"        && <HomePage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} />}
-        {activePage === "MARKET"      && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
-        {activePage === "SIGNALS"     && <SignalsPage decisions={decisions} />}
-        {activePage === "PERFORMANCE" && <PerformancePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} />}
+        {activePage === "HOME"    && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} />}
+        {activePage === "MARKET"  && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
+        {activePage === "SIGNALS" && <SignalsPage decisions={decisions} />}
+        {activePage === "TRADES"  && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} />}
       </div>
     </div>
   );
