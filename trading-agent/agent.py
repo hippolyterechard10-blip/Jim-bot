@@ -778,10 +778,27 @@ class TradingAgent:
 
         for symbol in passed:
             try:
-                data = symbols_data[symbol]
-                bars = data["bars"]
+                data  = symbols_data[symbol]
+                bars  = data["bars"]
+                synth = data.get("synthesis", {})
 
-                synth_ctx = data.get("synthesis", {}).get("full_context", "")
+                # ── Hard gate: only call Claude when synthesis says go ────────
+                if not synth.get("should_call_claude", True):
+                    reason = synth.get("decision_reason", "synthesis score below threshold")
+                    logger.info(f"⛔ SYNTHESIS SKIP {symbol}: {reason}")
+                    if self.memory:
+                        self.memory.log_decision(
+                            decision="hold",
+                            reasoning=(
+                                f"Synthesis engine blocked Claude call — {reason}. "
+                                f"Breakdown: {synth.get('score_breakdown', '')}"
+                            ),
+                            symbol=symbol,
+                            confidence=0.0,
+                        )
+                    continue
+
+                synth_ctx = synth.get("full_context", "")
                 decision = self.analyze_market(
                     symbol, bars,
                     market_context=f"{market_context}\n\n{synth_ctx}"
@@ -890,26 +907,28 @@ class TradingAgent:
                             logger.warning(f"Pre-earnings cap error: {cap_err}")
 
                     amount = qty * current_price
-                    # Prefer ATR-anchored stop from synthesis (geometry layer)
-                    _synth = data.get("synthesis", {})
-                    geo_sl = _synth.get("stop_loss")
+                    # Prefer ATR-anchored stop/target from synthesis (geometry layer)
+                    geo_sl = synth.get("stop_loss")
+                    geo_tp = synth.get("take_profit")
                     sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "buy")
                     if geo_sl:
-                        geo_stop_pct = _synth.get("stop_pct", 0)
+                        geo_stop_pct = synth.get("stop_pct", 0)
                         if geo_stop_pct and geo_stop_pct / 100 < trail_pct:
                             trail_pct               = geo_stop_pct / 100
                             self._trail_pcts[symbol] = trail_pct
 
+                    rr_str = f" | R:R={synth.get('risk_reward', 0):.1f}x" if synth.get("risk_reward") else ""
+                    tp_str = f" | target=${geo_tp:.4f}" if geo_tp else ""
                     logger.info(
                         f"TRADE ENTRY: {symbol} buy | score={opp_score} "
                         f"| position={pct*100:.0f}% = ${amount:,.2f} "
-                        f"| stop={trail_pct*100:.0f}%"
+                        f"| stop={trail_pct*100:.0f}%{tp_str}{rr_str}"
                     )
 
                     # Store trail_pct so _manage_trailing_stops uses the correct %
                     self._trail_pcts[symbol] = trail_pct
 
-                    self.broker.place_order(symbol, qty, "buy", sl)
+                    self.broker.place_order(symbol, qty, "buy", sl, take_profit=geo_tp)
 
                 elif action == "sell" and confidence >= min_confidence:
                     self.broker.close_position(symbol)
