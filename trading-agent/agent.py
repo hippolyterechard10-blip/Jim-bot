@@ -1,9 +1,10 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 import anthropic
 import config
+import pytz
 from scanner import MarketScanner
 from strategy import (
     compute_indicators,
@@ -39,6 +40,8 @@ class TradingAgent:
         self._partial_taken: set = set()
         # Score-based trailing stop % per symbol (set at entry, read during management)
         self._trail_pcts: dict = {}
+        # Daily dedup: date string (YYYY-MM-DD ET) when cash liberation last fired
+        self._cash_lib_last_date: str = ""
 
     def _sync_orphan_positions(self):
         """Detect Alpaca positions with no matching open SQLite record and create them."""
@@ -84,6 +87,148 @@ class TradingAgent:
                 logger.info(f"✅ Orphan sync complete: {synced} position(s) added to SQLite")
         except Exception as e:
             logger.error(f"_sync_orphan_positions error: {e}")
+
+    def _pre_market_cash_liberation(self):
+        """
+        9:25 AM ET weekdays — if total crypto portfolio gain > +2%,
+        sell 50% of every profitable open crypto position to free cash
+        for the stock market open at 9:30 AM.
+        """
+        ET = pytz.timezone("America/New_York")
+        now_et = datetime.now(ET)
+
+        # Weekdays only
+        if now_et.weekday() >= 5:
+            return
+
+        # Window: 9:23 – 9:28 AM ET (covers any 5-min cycle that straddles 9:25)
+        t = now_et.time()
+        if not (dtime(9, 23) <= t <= dtime(9, 28)):
+            return
+
+        # Daily dedup — fire at most once per calendar day
+        today_str = now_et.strftime("%Y-%m-%d")
+        if self._cash_lib_last_date == today_str:
+            return
+
+        # Fetch all open positions from Alpaca
+        try:
+            positions = self.broker.get_positions()
+        except Exception as e:
+            logger.error(f"_pre_market_cash_liberation: cannot fetch positions: {e}")
+            return
+
+        if not positions:
+            return
+
+        # Filter to long crypto positions only
+        crypto_positions = []
+        for pos in positions:
+            if not self._is_crypto(pos.symbol):
+                continue
+            try:
+                if getattr(pos, "side", "long") != "long" or float(pos.qty) <= 0:
+                    continue
+                crypto_positions.append(pos)
+            except Exception:
+                continue
+
+        if not crypto_positions:
+            return
+
+        # Compute total cost basis + total market value for open crypto
+        total_cost  = sum(float(p.cost_basis)    for p in crypto_positions)
+        total_value = sum(float(p.market_value)  for p in crypto_positions)
+        if total_cost <= 0:
+            return
+
+        portfolio_gain_pct = ((total_value - total_cost) / total_cost) * 100
+        logger.info(
+            f"📊 PRE-MARKET CHECK (9:25 ET): crypto portfolio "
+            f"gain = {portfolio_gain_pct:+.2f}% "
+            f"(value=${total_value:.2f}, cost=${total_cost:.2f})"
+        )
+
+        if portfolio_gain_pct < 2.0:
+            logger.info(
+                f"💤 PRE-MARKET CASH LIBERATION skipped — "
+                f"gain {portfolio_gain_pct:+.2f}% < +2.00% threshold"
+            )
+            self._cash_lib_last_date = today_str   # still mark so we don't re-check
+            return
+
+        # Mark as done before executing orders (prevent double-fire on error)
+        self._cash_lib_last_date = today_str
+
+        # Sell 50% of each profitable position
+        freed_total = 0.0
+        for pos in crypto_positions:
+            try:
+                current_price = float(pos.current_price)
+                avg_entry     = float(pos.avg_entry_price)
+                if current_price <= avg_entry:
+                    logger.info(
+                        f"  ↳ {pos.symbol}: skipping — not profitable "
+                        f"(entry={avg_entry:.4f} > current={current_price:.4f})"
+                    )
+                    continue
+
+                qty_total = float(pos.qty)
+                sell_qty  = round(qty_total * 0.50, 8)
+                if sell_qty <= 0:
+                    continue
+
+                freed = sell_qty * current_price
+                freed_total += freed
+
+                # Determine display symbol
+                display_sym = pos.symbol
+                for crypto in config.CRYPTO_SYMBOLS:
+                    if crypto.replace("/", "").upper() == pos.symbol.replace("/", "").upper():
+                        display_sym = crypto
+                        break
+
+                logger.info(
+                    f"💵 PRE-MARKET CASH LIBERATION: sold 50% of {display_sym} "
+                    f"at ${current_price:.4f} — freeing ${freed:.2f} for market open"
+                )
+
+                order = self.broker.place_order(display_sym, sell_qty, "sell")
+
+                # Update SQLite memory
+                if order and self.memory:
+                    try:
+                        open_trades = self.memory.get_open_trades()
+                        match = next(
+                            (t for t in open_trades
+                             if t.get("symbol", "").replace("/", "").upper()
+                                == pos.symbol.replace("/", "").upper()
+                             and t.get("status") == "open"),
+                            None,
+                        )
+                        if match:
+                            entry_p  = float(match["entry_price"])
+                            pnl      = (current_price - entry_p) * sell_qty
+                            pnl_pct  = (current_price - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                            self.memory.log_trade_close(
+                                match["trade_id"],
+                                exit_price=current_price,
+                                close_reason="pre_market_cash_liberation",
+                                pnl=round(pnl, 4),
+                                pnl_pct=round(pnl_pct, 4),
+                            )
+                    except Exception as me:
+                        logger.warning(f"Memory update after cash liberation ({display_sym}): {me}")
+
+            except Exception as e:
+                logger.error(f"Cash liberation error for {pos.symbol}: {e}")
+
+        if freed_total > 0:
+            logger.info(
+                f"✅ PRE-MARKET CASH LIBERATION complete — "
+                f"${freed_total:.2f} freed ahead of 9:30 open "
+                f"(portfolio was +{portfolio_gain_pct:.2f}%)"
+            )
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
         """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
@@ -336,6 +481,9 @@ class TradingAgent:
             return None
 
     def run_cycle(self):
+        # 9:25 ET weekdays: free crypto cash ahead of stock market open
+        self._pre_market_cash_liberation()
+
         # Sync any Alpaca positions that have no SQLite record (e.g. manual trades)
         self._sync_orphan_positions()
 
