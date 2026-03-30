@@ -126,12 +126,30 @@ class MarketScanner:
 
     def get_dynamic_watchlist(self):
         from strategy import is_good_stock_window
-        watchlist = list(config.CRYPTO_SYMBOLS)
+        seen = set()
+        watchlist = []
+
+        def _add(symbols):
+            for s in symbols:
+                if s not in seen:
+                    seen.add(s)
+                    watchlist.append(s)
+
         if is_good_stock_window():
             movers = self.get_top_movers(top_n=6)
             mover_symbols = [m["symbol"] for m in movers]
-            watchlist = mover_symbols + watchlist
-            logger.info(f"📋 Dynamic watchlist: {watchlist}")
+            _add(mover_symbols)          # priority: top movers first
+            _add(config.BLUECHIP_SYMBOLS)  # always: blue chips after movers (deduped)
+
+        _add(config.CRYPTO_SYMBOLS)      # always: crypto
+
+        bc_in_list = [s for s in config.BLUECHIP_SYMBOLS if s in seen]
+        logger.info(
+            f"📋 Watchlist ({len(watchlist)}): "
+            f"movers={[s for s in watchlist if s not in config.BLUECHIP_SYMBOLS and s not in config.CRYPTO_SYMBOLS]} | "
+            f"bluechips={bc_in_list} | "
+            f"crypto={[s for s in watchlist if s in config.CRYPTO_SYMBOLS]}"
+        )
         return watchlist
 
     def fetch_news_headlines(self):
