@@ -5,6 +5,7 @@ from datetime import datetime, timezone, time as dtime
 import anthropic
 import config
 import pytz
+from regime import MarketRegime
 from scanner import MarketScanner
 from strategy import (
     compute_indicators,
@@ -32,6 +33,7 @@ class TradingAgent:
         self.memory = memory
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self.scanner = MarketScanner()
+        self.regime  = MarketRegime()
         # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
@@ -539,13 +541,16 @@ class TradingAgent:
         if self.memory:
             memory_context = self.memory.get_context_for_agent(symbol)
 
+        regime_context = self.regime.build_regime_context()
+        combined_context = f"{market_context}\n\n{regime_context}" if market_context else regime_context
+
         prompt = build_strategy_prompt(
             symbol=symbol,
             indicators=indicators,
             patterns=patterns,
             session_ctx=session_ctx,
             memory_context=memory_context,
-            market_context=market_context,
+            market_context=combined_context,
         )
 
         try:
@@ -586,6 +591,19 @@ class TradingAgent:
         session_ctx = get_session_context()
         session = session_ctx["session"]
         logger.info(f"📅 Session: {session} ({session_ctx['time_et']}) — stocks: {session_ctx['good_for_stocks']} | crypto: {session_ctx['good_for_crypto']}")
+
+        # ── Regime-driven dynamic parameters ─────────────────────────────────
+        regime_params   = self.regime.get_params()
+        _regime         = regime_params["regime"]
+        score_long_min  = regime_params["score_long_threshold"]
+        score_short_max = regime_params["score_short_threshold"]
+        size_mult       = regime_params["position_size_multiplier"]
+        regime_conf_min = regime_params["confidence_threshold"] / 100
+        logger.info(
+            f"🎯 Regime: {_regime.upper()} | "
+            f"long_min={score_long_min} | short_max={score_short_max} | "
+            f"size={size_mult}x | conf_min={regime_conf_min:.0%}"
+        )
 
         dynamic_watchlist = self.scanner.get_dynamic_watchlist()
         symbols_to_scan = []
@@ -664,9 +682,9 @@ class TradingAgent:
                     opp_score = 90
                     data["opportunity_score"] = 90
 
-            if opp_score > SCORE_LONG_MIN:
+            if opp_score > score_long_min:
                 passed_long.append(symbol)
-            elif opp_score < SCORE_SHORT_MAX:
+            elif opp_score < score_short_max:
                 if is_crypto:
                     no_short_crypto.append(symbol)
                     logger.info(f"BEARISH CRYPTO {symbol}: no short on Alpaca")
@@ -741,12 +759,13 @@ class TradingAgent:
                 # Store for short selling pass
                 claude_confidences[symbol] = confidence
 
-                if session == "weekend":
-                    min_confidence = 0.70
-                elif session in ("mid_day", "after_hours", "closed"):
-                    min_confidence = 0.85
+                # Regime sets the base bar; session can only raise it, never lower
+                if session in ("mid_day", "after_hours", "closed"):
+                    min_confidence = max(regime_conf_min, 0.85)
+                elif session == "weekend":
+                    min_confidence = max(regime_conf_min, 0.70)
                 else:
-                    min_confidence = 0.70
+                    min_confidence = regime_conf_min
 
                 if action == "buy" and confidence >= min_confidence:
                     # Look up daily volume from scanner cache (movers only; None for crypto)
@@ -758,6 +777,16 @@ class TradingAgent:
                     qty, pct, trail_pct = self.risk.get_position_size_by_score(
                         symbol, current_price, opp_score, volume=daily_volume
                     )
+
+                    # ── Regime size multiplier ──────────────────────────────────
+                    if size_mult != 1.0:
+                        orig_qty = qty
+                        qty  = max(1, round(qty * size_mult, 8))
+                        pct  = pct * size_mult
+                        logger.info(
+                            f"  ↳ Regime {_regime} size_mult={size_mult}x: "
+                            f"qty {orig_qty} → {qty} | position={pct*100:.0f}%"
+                        )
 
                     # ── Pre-earnings cap: limit to 10% of portfolio ─────────────
                     ea_buy = earnings_alerts_map.get(symbol)
