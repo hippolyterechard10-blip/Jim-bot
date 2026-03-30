@@ -6,6 +6,7 @@ import anthropic
 import config
 import pytz
 from correlations import CorrelationIntelligence
+from geometry import GeometryAnalysis
 from regime import MarketRegime
 from scanner import MarketScanner
 from strategy import (
@@ -36,6 +37,7 @@ class TradingAgent:
         self.scanner       = MarketScanner()
         self.regime        = MarketRegime()
         self.correlations  = CorrelationIntelligence()
+        self.geometry      = GeometryAnalysis()
         # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
@@ -642,13 +644,21 @@ class TradingAgent:
                 bars = self.broker.get_bars(symbol)
                 if bars is None or bars.empty:
                     continue
-                prices = bars.tail(50)['close'].tolist()
-                volumes = bars.tail(50)['volume'].tolist()
+                bars50  = bars.tail(50)
+                prices  = bars50['close'].tolist()
+                volumes = bars50['volume'].tolist()
+                opens   = bars50['open'].tolist()
+                highs   = bars50['high'].tolist()
+                lows    = bars50['low'].tolist()
                 if len(prices) < 20:
                     continue
                 indicators = compute_indicators(prices, volumes)
-                patterns = detect_patterns(indicators, session)
-                symbols_data[symbol] = {"indicators": indicators, "patterns": patterns, "bars": bars}
+                patterns   = detect_patterns(indicators, session)
+                symbols_data[symbol] = {
+                    "indicators": indicators, "patterns": patterns, "bars": bars,
+                    "opens": opens, "highs": highs, "lows": lows,
+                    "prices": prices, "volumes": volumes,
+                }
             except Exception as e:
                 logger.error(f"Pre-scan error on {symbol}: {e}")
 
@@ -666,6 +676,28 @@ class TradingAgent:
             data      = symbols_data[symbol]
             is_crypto = "/" in symbol
             opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
+
+            # ── Geometry analysis — adjusts score + supplies ATR stops ──────
+            _geo_side = "short" if opp_score < 45 else "long"
+            try:
+                geo = self.geometry.build_geometry_context(
+                    symbol,
+                    data["opens"], data["highs"], data["lows"],
+                    data["prices"], data["volumes"],
+                    side=_geo_side,
+                )
+                data["geometry"] = geo
+                if geo["score_adjustment"] != 0:
+                    raw = opp_score
+                    opp_score = max(0, min(100, opp_score + geo["score_adjustment"]))
+                    logger.debug(
+                        f"  📐 Geometry adj {symbol}: {raw} → {opp_score} "
+                        f"({geo['score_adjustment']:+d}) | patterns={geo['patterns_detected']}"
+                    )
+            except Exception as geo_err:
+                logger.warning(f"Geometry error on {symbol}: {geo_err}")
+                data["geometry"] = {}
+
             data["opportunity_score"] = opp_score
 
             # ── Earnings day: hard skip (stocks only) ──────────────────────
@@ -747,9 +779,10 @@ class TradingAgent:
                 corr_ctx  = self.correlations.build_correlation_context(
                     symbol, open_pos_symbols, corr_changes, dxy_trend
                 )
+                geo_ctx   = data.get("geometry", {}).get("context", "")
                 decision = self.analyze_market(
                     symbol, bars,
-                    market_context=f"{market_context}\n\n{corr_ctx}"
+                    market_context=f"{market_context}\n\n{geo_ctx}\n\n{corr_ctx}"
                 )
                 if not decision:
                     continue
@@ -855,7 +888,14 @@ class TradingAgent:
                             logger.warning(f"Pre-earnings cap error: {cap_err}")
 
                     amount = qty * current_price
-                    sl     = self.risk.calculate_stop_loss(current_price, "buy")
+                    # Prefer geometry ATR-anchored stop over flat % stop
+                    geo_sl = data.get("geometry", {}).get("stop_loss")
+                    sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "buy")
+                    if geo_sl:
+                        geo_stop_pct = data["geometry"].get("stop_pct", 0)
+                        if geo_stop_pct and geo_stop_pct / 100 < trail_pct:
+                            trail_pct               = geo_stop_pct / 100
+                            self._trail_pcts[symbol] = trail_pct
 
                     logger.info(
                         f"TRADE ENTRY: {symbol} buy | score={opp_score} "
