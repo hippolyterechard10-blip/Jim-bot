@@ -93,31 +93,70 @@ class MarketScanner:
             tradeable = [a for a in assets if a.tradable and a.fractionable]
             symbols = [a.symbol for a in tradeable[:500]]
             snapshots = self.api.get_snapshots(symbols)
-            movers = []
+            gappers = []
+            movers  = []
             for symbol, snap in snapshots.items():
                 try:
                     if not snap.daily_bar or not snap.prev_daily_bar:
                         continue
-                    prev = snap.prev_daily_bar.close
-                    curr = snap.daily_bar.close
+                    prev       = snap.prev_daily_bar.close
+                    curr       = snap.daily_bar.close
+                    prev_vol   = snap.prev_daily_bar.volume or 1
+                    volume     = snap.daily_bar.volume
                     if prev <= 0:
                         continue
-                    change_pct = ((curr - prev) / prev) * 100
-                    volume = snap.daily_bar.volume
-                    if abs(change_pct) >= 3 and volume > 50000:
-                        movers.append({
-                            "symbol": symbol,
-                            "price": round(curr, 4),
-                            "change_pct": round(change_pct, 2),
-                            "volume": volume,
-                            "direction": "up" if change_pct > 0 else "down",
-                        })
+                    change_pct   = ((curr - prev) / prev) * 100
+                    volume_ratio = round(volume / prev_vol, 1) if prev_vol > 0 else 0
+                    is_microcap  = 0.50 <= curr <= 10.0
+
+                    # Qualify as a mover:
+                    # - Standard:  |change| ≥ 3% AND volume > 50 000
+                    # - Micro/small cap ($0.50–$10): volume must exceed 500 000 (higher bar)
+                    if is_microcap:
+                        qualifies = abs(change_pct) >= 3 and volume > 500_000
+                    else:
+                        qualifies = abs(change_pct) >= 3 and volume > 50_000
+
+                    if not qualifies:
+                        continue
+
+                    entry = {
+                        "symbol":       symbol,
+                        "price":        round(curr, 4),
+                        "change_pct":   round(change_pct, 2),
+                        "volume":       volume,
+                        "volume_ratio": volume_ratio,
+                        "direction":    "up" if change_pct > 0 else "down",
+                        "is_gapper":    False,
+                        "is_microcap":  is_microcap,
+                    }
+
+                    # GAPPER ALERT: >50% gain on >5× average volume
+                    if change_pct >= 50 and volume_ratio >= 5:
+                        entry["is_gapper"] = True
+                        logger.info(
+                            f"🚨 GAPPER ALERT: {symbol} +{change_pct:.1f}% "
+                            f"volume={volume_ratio}x — potential 100-200% move"
+                        )
+                        gappers.append(entry)
+                    else:
+                        movers.append(entry)
+
                 except Exception:
                     continue
+
+            # Sort each bucket by magnitude; gappers always win
+            gappers.sort(key=lambda x: x["change_pct"], reverse=True)
             movers.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
-            top = movers[:top_n]
+
+            # Gappers all included; regular movers capped at top_n
+            top = gappers + movers[:top_n]
             self._movers_cache = {"symbols": top, "cached_at": now}
-            mover_labels = [f"{m['symbol']} {m['change_pct']:+.1f}%" for m in top]
+
+            gap_labels   = [f"🚨{m['symbol']} +{m['change_pct']:.1f}% {m['volume_ratio']}x" for m in gappers]
+            mover_labels = [f"{m['symbol']} {m['change_pct']:+.1f}%" for m in movers[:top_n]]
+            if gap_labels:
+                logger.info(f"🚨 GAPPERS: {gap_labels}")
             logger.info(f"🔥 Top movers: {mover_labels}")
             return top
         except Exception as e:
@@ -137,16 +176,24 @@ class MarketScanner:
 
         if is_good_stock_window():
             movers = self.get_top_movers(top_n=6)
-            mover_symbols = [m["symbol"] for m in movers]
-            _add(mover_symbols)          # priority: top movers first
-            _add(config.BLUECHIP_SYMBOLS)  # always: blue chips after movers (deduped)
 
-        _add(config.CRYPTO_SYMBOLS)      # always: crypto
+            # Split movers into gappers (highest priority) and regular movers
+            gapper_symbols = [m["symbol"] for m in movers if m.get("is_gapper")]
+            regular_symbols = [m["symbol"] for m in movers if not m.get("is_gapper")]
 
-        bc_in_list = [s for s in config.BLUECHIP_SYMBOLS if s in seen]
+            _add(gapper_symbols)          # 1. GAPPERS — absolute priority
+            _add(regular_symbols)         # 2. Regular top movers
+            _add(config.BLUECHIP_SYMBOLS) # 3. Blue chips — always present
+
+        _add(config.CRYPTO_SYMBOLS)       # 4. Crypto — always present
+
+        gappers_in = [s for s in watchlist if s in {m["symbol"] for m in self._movers_cache.get("symbols", []) if m.get("is_gapper")}]
+        bc_in_list  = [s for s in config.BLUECHIP_SYMBOLS if s in seen]
+        mover_only  = [s for s in watchlist if s not in config.BLUECHIP_SYMBOLS and s not in config.CRYPTO_SYMBOLS and s not in gappers_in]
         logger.info(
             f"📋 Watchlist ({len(watchlist)}): "
-            f"movers={[s for s in watchlist if s not in config.BLUECHIP_SYMBOLS and s not in config.CRYPTO_SYMBOLS]} | "
+            f"gappers={gappers_in} | "
+            f"movers={mover_only} | "
             f"bluechips={bc_in_list} | "
             f"crypto={[s for s in watchlist if s in config.CRYPTO_SYMBOLS]}"
         )
@@ -276,12 +323,21 @@ class MarketScanner:
 
         if movers:
             lines.append("🔥 TOP MOVERS:")
-            for m in movers[:4]:
-                lines.append(f"  {'↑' if m['direction']=='up' else '↓'} {m['symbol']}: {m['change_pct']:+.1f}%")
+            for m in movers[:6]:
+                vol_str = f" vol={m.get('volume_ratio','')}x" if m.get("volume_ratio") else ""
+                tag     = " 🚨 GAPPER — prioritize, potential 100-200% move" if m.get("is_gapper") else ""
+                lines.append(f"  {'↑' if m['direction']=='up' else '↓'} {m['symbol']}: {m['change_pct']:+.1f}%{vol_str}{tag}")
         if symbol:
             sm = next((m for m in movers if m["symbol"] == symbol), None)
             if sm:
-                lines.append(f"⭐ {symbol} IS A TOP MOVER: {sm['change_pct']:+.1f}%")
+                if sm.get("is_gapper"):
+                    lines.append(
+                        f"🚨 {symbol} IS A CONFIRMED GAPPER: {sm['change_pct']:+.1f}% "
+                        f"volume={sm.get('volume_ratio','')}x average — "
+                        f"score this 90+, use max position size, set tight trailing stop"
+                    )
+                else:
+                    lines.append(f"⭐ {symbol} IS A TOP MOVER: {sm['change_pct']:+.1f}%")
         if sentiment["sentiment"] in ["very_bullish", "bullish"]:
             lines.append("💡 Conditions favorable for LONG positions")
         elif sentiment["sentiment"] in ["very_bearish", "bearish"]:
