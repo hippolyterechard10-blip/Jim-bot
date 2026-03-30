@@ -90,9 +90,10 @@ class TradingAgent:
 
     def _pre_market_cash_liberation(self):
         """
-        9:25 AM ET weekdays — if total crypto portfolio gain > +2%,
-        sell 50% of every profitable open crypto position to free cash
-        for the stock market open at 9:30 AM.
+        9:25 AM ET weekdays — per-position rules to free cash for stock market open:
+          • Negative position          → skip (let trailing stop manage it)
+          • Profitable but < +2% gain  → sell 100% (weak overnight, free all capital)
+          • Profitable and >= +2% gain → sell 50%  (keep half running with trailing stop)
         """
         ET = pytz.timezone("America/New_York")
         now_et = datetime.now(ET)
@@ -111,6 +112,9 @@ class TradingAgent:
         if self._cash_lib_last_date == today_str:
             return
 
+        # Mark immediately to prevent double-fire if an error occurs mid-loop
+        self._cash_lib_last_date = today_str
+
         # Fetch all open positions from Alpaca
         try:
             positions = self.broker.get_positions()
@@ -119,6 +123,7 @@ class TradingAgent:
             return
 
         if not positions:
+            logger.info("💤 PRE-MARKET LIBERATION (9:25 ET): no open positions")
             return
 
         # Filter to long crypto positions only
@@ -134,63 +139,62 @@ class TradingAgent:
                 continue
 
         if not crypto_positions:
+            logger.info("💤 PRE-MARKET LIBERATION (9:25 ET): no open crypto positions")
             return
 
-        # Compute total cost basis + total market value for open crypto
-        total_cost  = sum(float(p.cost_basis)    for p in crypto_positions)
-        total_value = sum(float(p.market_value)  for p in crypto_positions)
-        if total_cost <= 0:
-            return
-
-        portfolio_gain_pct = ((total_value - total_cost) / total_cost) * 100
         logger.info(
-            f"📊 PRE-MARKET CHECK (9:25 ET): crypto portfolio "
-            f"gain = {portfolio_gain_pct:+.2f}% "
-            f"(value=${total_value:.2f}, cost=${total_cost:.2f})"
+            f"⏰ PRE-MARKET LIBERATION triggered (9:25 ET) — "
+            f"evaluating {len(crypto_positions)} crypto position(s)"
         )
 
-        if portfolio_gain_pct < 2.0:
-            logger.info(
-                f"💤 PRE-MARKET CASH LIBERATION skipped — "
-                f"gain {portfolio_gain_pct:+.2f}% < +2.00% threshold"
-            )
-            self._cash_lib_last_date = today_str   # still mark so we don't re-check
-            return
-
-        # Mark as done before executing orders (prevent double-fire on error)
-        self._cash_lib_last_date = today_str
-
-        # Sell 50% of each profitable position
         freed_total = 0.0
+
         for pos in crypto_positions:
             try:
                 current_price = float(pos.current_price)
                 avg_entry     = float(pos.avg_entry_price)
-                if current_price <= avg_entry:
-                    logger.info(
-                        f"  ↳ {pos.symbol}: skipping — not profitable "
-                        f"(entry={avg_entry:.4f} > current={current_price:.4f})"
-                    )
-                    continue
+                qty_total     = float(pos.qty)
 
-                qty_total = float(pos.qty)
-                sell_qty  = round(qty_total * 0.50, 8)
-                if sell_qty <= 0:
-                    continue
-
-                freed = sell_qty * current_price
-                freed_total += freed
-
-                # Determine display symbol
+                # Resolve display symbol (e.g. "BTCUSD" → "BTC/USD")
                 display_sym = pos.symbol
                 for crypto in config.CRYPTO_SYMBOLS:
                     if crypto.replace("/", "").upper() == pos.symbol.replace("/", "").upper():
                         display_sym = crypto
                         break
 
+                # Position gain %
+                if avg_entry <= 0:
+                    continue
+                pos_gain_pct = (current_price - avg_entry) / avg_entry * 100
+
+                # ── Rule 1: Negative → skip ──────────────────────────────────
+                if pos_gain_pct < 0:
+                    logger.info(
+                        f"  ↳ PRE-MARKET LIBERATION: {display_sym} "
+                        f"{pos_gain_pct:+.2f}% — HOLDING (negative, trailing stop managing)"
+                    )
+                    continue
+
+                # ── Rule 2: Profitable < +2% → sell 100% ────────────────────
+                # ── Rule 3: Profitable >= +2% → sell 50% ────────────────────
+                if pos_gain_pct < 2.0:
+                    sell_ratio = 1.00
+                    sell_pct_label = "100%"
+                else:
+                    sell_ratio = 0.50
+                    sell_pct_label = "50%"
+
+                sell_qty = round(qty_total * sell_ratio, 8)
+                if sell_qty <= 0:
+                    continue
+
+                freed = sell_qty * current_price
+                freed_total += freed
+
                 logger.info(
-                    f"💵 PRE-MARKET CASH LIBERATION: sold 50% of {display_sym} "
-                    f"at ${current_price:.4f} — freeing ${freed:.2f} for market open"
+                    f"💵 PRE-MARKET LIBERATION: {display_sym} "
+                    f"{pos_gain_pct:+.2f}% — selling {sell_pct_label} "
+                    f"— freeing ${freed:.2f} for market open"
                 )
 
                 order = self.broker.place_order(display_sym, sell_qty, "sell")
@@ -207,9 +211,8 @@ class TradingAgent:
                             None,
                         )
                         if match:
-                            entry_p  = float(match["entry_price"])
-                            pnl      = (current_price - entry_p) * sell_qty
-                            pnl_pct  = (current_price - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                            pnl     = (current_price - float(match["entry_price"])) * sell_qty
+                            pnl_pct = (current_price - float(match["entry_price"])) / float(match["entry_price"]) * 100
                             self.memory.log_trade_close(
                                 match["trade_id"],
                                 exit_price=current_price,
@@ -218,16 +221,20 @@ class TradingAgent:
                                 pnl_pct=round(pnl_pct, 4),
                             )
                     except Exception as me:
-                        logger.warning(f"Memory update after cash liberation ({display_sym}): {me}")
+                        logger.warning(f"Memory update after liberation ({display_sym}): {me}")
 
             except Exception as e:
                 logger.error(f"Cash liberation error for {pos.symbol}: {e}")
 
         if freed_total > 0:
             logger.info(
-                f"✅ PRE-MARKET CASH LIBERATION complete — "
-                f"${freed_total:.2f} freed ahead of 9:30 open "
-                f"(portfolio was +{portfolio_gain_pct:.2f}%)"
+                f"✅ PRE-MARKET LIBERATION complete — "
+                f"${freed_total:.2f} total freed ahead of 9:30 open"
+            )
+        else:
+            logger.info(
+                "💤 PRE-MARKET LIBERATION complete — "
+                "no positions sold (all negative or zero qty)"
             )
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
