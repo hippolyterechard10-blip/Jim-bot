@@ -53,6 +53,10 @@ interface AccountResponse {
   equity: number; cash: number; buying_power: number;
   portfolio_value: number; last_equity: number;
 }
+interface ClosedTodayItem {
+  symbol: string; pnl: number; trade_count: number;
+  qty_sold: number; last_exit: string; reasons: string;
+}
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES";
 
@@ -327,13 +331,24 @@ function PositionRow({ pos, decisions, partialProfits, stops, totalPortfolio }: 
   );
 }
 
-function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio }: {
+function ReasonBadge({ reasons }: { reasons: string }) {
+  const r = reasons.toLowerCase();
+  if (r.includes("partial"))  return <span className="text-[9px] bg-sky-900/40 text-sky-400 border border-sky-700/40 rounded px-1.5 py-0.5">partial</span>;
+  if (r.includes("stop"))     return <span className="text-[9px] bg-red-900/40 text-red-400 border border-red-700/40 rounded px-1.5 py-0.5">stop</span>;
+  if (r.includes("target"))   return <span className="text-[9px] bg-emerald-900/40 text-emerald-400 border border-emerald-700/40 rounded px-1.5 py-0.5">target</span>;
+  return <span className="text-[9px] bg-slate-700/40 text-slate-500 border border-slate-600/40 rounded px-1.5 py-0.5">{reasons.split(",")[0]}</span>;
+}
+
+function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday }: {
   positions: Position[]; decisions: Decision[];
   partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
+  closedToday: ClosedTodayItem[];
 }) {
+  const closedTotalPnl = closedToday.reduce((s, c) => s + c.pnl, 0);
+
   return (
-    <div className="p-4 sm:p-6">
-      <div className="flex items-center justify-between mb-4">
+    <div className="p-4 sm:p-6 space-y-5">
+      <div className="flex items-center justify-between">
         <h2 className="text-base font-bold text-white">Open Positions</h2>
         <span className="text-xs text-slate-600">{positions.length} active</span>
       </div>
@@ -362,6 +377,56 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
           </div>
         </div>
       )}
+
+      {/* ── Closed Today ──────────────────────────────────────────── */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-base font-bold text-white">Closed Today</h2>
+          {closedToday.length > 0 && (
+            <span className={`text-sm font-bold font-mono ${closedTotalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {closedTotalPnl >= 0 ? "+" : "-"}${Math.abs(closedTotalPnl).toFixed(4)}
+            </span>
+          )}
+        </div>
+        {closedToday.length === 0 ? (
+          <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
+            No closed trades today
+          </div>
+        ) : (
+          <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-700">
+                  {["Asset","Realized P&L","# Trades","Qty Sold","Last Exit","Type"].map(h => (
+                    <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                {closedToday.map(c => {
+                  const isPos = c.pnl >= 0;
+                  return (
+                    <tr key={c.symbol} className={`border-l-2 ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
+                      <td className="px-3 py-2.5">
+                        <span className="font-bold text-white text-sm">{c.symbol.replace("/USD","")}</span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                          {isPos ? "+" : "-"}${Math.abs(c.pnl).toFixed(4)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-slate-400">{c.trade_count}</td>
+                      <td className="px-3 py-2.5 text-xs text-slate-400 font-mono">{c.qty_sold.toFixed(6)}</td>
+                      <td className="px-3 py-2.5 text-xs text-slate-500">{c.last_exit ? fmtTime(c.last_exit) : "—"}</td>
+                      <td className="px-3 py-2.5"><ReasonBadge reasons={c.reasons} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -933,12 +998,13 @@ export default function App() {
   const [partialProfits, setPartialProfits] = useState<PartialProfits>({});
   const [stops,      setStops]      = useState<Stops>({});
   const [account,    setAccount]    = useState<AccountResponse | null>(null);
+  const [closedToday, setClosedToday] = useState<ClosedTodayItem[]>([]);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [error,      setError]      = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes] = await Promise.all([
+      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes, ctRes] = await Promise.all([
         fetch(`${BASE}/api/status`),
         fetch(`${BASE}/api/decisions`),
         fetch(`${BASE}/api/positions`),
@@ -949,6 +1015,7 @@ export default function App() {
         fetch(`${BASE}/api/partial-profits`),
         fetch(`${BASE}/api/stops`),
         fetch(`${BASE}/api/account`),
+        fetch(`${BASE}/api/closed-today`),
       ]);
       if (sRes.ok)     { const d = await sRes.json() as Status;   setStatus(d); }
       if (dRes.ok)     { const d = await dRes.json();             setDecisions(d.decisions ?? []); }
@@ -960,6 +1027,7 @@ export default function App() {
       if (ppRes.ok)    { const d = await ppRes.json(); setPartialProfits(d.partial_profits ?? {}); }
       if (stopsRes.ok) { const d = await stopsRes.json(); setStops(d.stops ?? {}); }
       if (accRes.ok)   { const d = await accRes.json() as AccountResponse; if (d.portfolio_value > 0) setAccount(d); }
+      if (ctRes.ok)    { const d = await ctRes.json(); setClosedToday(d.closed ?? []); }
       setError(false);
     } catch { setError(true); }
     setLastRefresh(new Date());
@@ -997,7 +1065,7 @@ export default function App() {
         {activePage === "HOME"    && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} />}
         {activePage === "MARKET"  && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS" && <SignalsPage decisions={decisions} />}
-        {activePage === "TRADES"  && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} />}
+        {activePage === "TRADES"  && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} />}
       </div>
     </div>
   );

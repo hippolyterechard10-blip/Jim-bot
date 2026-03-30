@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -106,6 +107,44 @@ def api_regime():
         })
     except Exception as e:
         return jsonify({"regime": "UNKNOWN", "error": str(e)})
+
+@app.route("/api/closed-today")
+def api_closed_today():
+    if not _memory:
+        return jsonify({"closed": [], "date": ""})
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        conn  = sqlite3.connect(_memory.db_path, timeout=10)
+        c     = conn.cursor()
+        c.execute("""
+            SELECT symbol,
+                   SUM(pnl)         AS total_pnl,
+                   COUNT(*)         AS trade_count,
+                   SUM(qty)         AS total_qty_sold,
+                   MAX(exit_at)     AS last_exit_at,
+                   GROUP_CONCAT(DISTINCT close_reason) AS reasons
+            FROM trades
+            WHERE status = 'closed' AND exit_at >= ?
+            GROUP BY symbol
+            ORDER BY total_pnl DESC
+        """, (today,))
+        rows = c.fetchall()
+        conn.close()
+        closed = [
+            {
+                "symbol":     r[0],
+                "pnl":        round(r[1], 6) if r[1] is not None else 0,
+                "trade_count": r[2],
+                "qty_sold":   round(r[3], 8) if r[3] is not None else 0,
+                "last_exit":  r[4] or "",
+                "reasons":    r[5] or "",
+            }
+            for r in rows
+        ]
+        return jsonify({"closed": closed, "date": today})
+    except Exception as e:
+        logger.error(f"api_closed_today error: {e}")
+        return jsonify({"closed": [], "error": str(e)})
 
 @app.route("/api/account")
 def api_account():

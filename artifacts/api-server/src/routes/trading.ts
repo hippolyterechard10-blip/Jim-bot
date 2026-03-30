@@ -185,4 +185,8 @@ router.get("/account", async (_req, res) => {
   }));
 });
 
+router.get("/closed-today", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/closed-today`, { closed: [], date: "" }));
+});
+
 export default router;
