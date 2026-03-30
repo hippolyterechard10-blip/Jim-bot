@@ -8,6 +8,7 @@ import pytz
 from correlations import CorrelationIntelligence
 from geometry import GeometryAnalysis
 from regime import MarketRegime
+from synthesis import SynthesisEngine
 from scanner import MarketScanner
 from strategy import (
     compute_indicators,
@@ -38,6 +39,9 @@ class TradingAgent:
         self.regime        = MarketRegime()
         self.correlations  = CorrelationIntelligence()
         self.geometry      = GeometryAnalysis()
+        self.synthesis     = SynthesisEngine(
+            self.regime, self.correlations, self.geometry, self.scanner
+        )
         # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
@@ -675,29 +679,30 @@ class TradingAgent:
         for symbol in ranked:
             data      = symbols_data[symbol]
             is_crypto = "/" in symbol
-            opp_score = compute_opportunity_score(data["indicators"], data["patterns"])
+            base_score = compute_opportunity_score(data["indicators"], data["patterns"])
+            _side      = "short" if base_score < 45 else "long"
 
-            # ── Geometry analysis — adjusts score + supplies ATR stops ──────
-            _geo_side = "short" if opp_score < 45 else "long"
+            # ── Synthesis: all intelligence layers → one final score ─────────
             try:
-                geo = self.geometry.build_geometry_context(
-                    symbol,
-                    data["opens"], data["highs"], data["lows"],
-                    data["prices"], data["volumes"],
-                    side=_geo_side,
+                synth = self.synthesis.run(
+                    symbol=symbol,
+                    base_score=base_score,
+                    opens=data["opens"], highs=data["highs"], lows=data["lows"],
+                    closes=data["prices"], volumes=data["volumes"],
+                    open_positions=open_pos_symbols,
+                    side=_side,
                 )
-                data["geometry"] = geo
-                if geo["score_adjustment"] != 0:
-                    raw = opp_score
-                    opp_score = max(0, min(100, opp_score + geo["score_adjustment"]))
-                    logger.debug(
-                        f"  📐 Geometry adj {symbol}: {raw} → {opp_score} "
-                        f"({geo['score_adjustment']:+d}) | patterns={geo['patterns_detected']}"
-                    )
-            except Exception as geo_err:
-                logger.warning(f"Geometry error on {symbol}: {geo_err}")
-                data["geometry"] = {}
+            except Exception as synth_err:
+                logger.warning(f"Synthesis error on {symbol}: {synth_err}")
+                synth = {
+                    "final_score": base_score, "should_call_claude": True,
+                    "full_context": "", "stop_loss": None, "take_profit": None,
+                    "stop_pct": None, "target_pct": None, "risk_reward": None,
+                    "size_multiplier": 1.0,
+                }
 
+            data["synthesis"] = synth
+            opp_score = synth["final_score"]
             data["opportunity_score"] = opp_score
 
             # ── Earnings day: hard skip (stocks only) ──────────────────────
@@ -776,13 +781,10 @@ class TradingAgent:
                 data = symbols_data[symbol]
                 bars = data["bars"]
 
-                corr_ctx  = self.correlations.build_correlation_context(
-                    symbol, open_pos_symbols, corr_changes, dxy_trend
-                )
-                geo_ctx   = data.get("geometry", {}).get("context", "")
+                synth_ctx = data.get("synthesis", {}).get("full_context", "")
                 decision = self.analyze_market(
                     symbol, bars,
-                    market_context=f"{market_context}\n\n{geo_ctx}\n\n{corr_ctx}"
+                    market_context=f"{market_context}\n\n{synth_ctx}"
                 )
                 if not decision:
                     continue
@@ -888,11 +890,12 @@ class TradingAgent:
                             logger.warning(f"Pre-earnings cap error: {cap_err}")
 
                     amount = qty * current_price
-                    # Prefer geometry ATR-anchored stop over flat % stop
-                    geo_sl = data.get("geometry", {}).get("stop_loss")
+                    # Prefer ATR-anchored stop from synthesis (geometry layer)
+                    _synth = data.get("synthesis", {})
+                    geo_sl = _synth.get("stop_loss")
                     sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "buy")
                     if geo_sl:
-                        geo_stop_pct = data["geometry"].get("stop_pct", 0)
+                        geo_stop_pct = _synth.get("stop_pct", 0)
                         if geo_stop_pct and geo_stop_pct / 100 < trail_pct:
                             trail_pct               = geo_stop_pct / 100
                             self._trail_pcts[symbol] = trail_pct
