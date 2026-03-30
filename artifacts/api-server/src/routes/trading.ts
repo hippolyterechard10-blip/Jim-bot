@@ -80,6 +80,40 @@ router.get("/decisions", (_req, res) => {
   res.json({ db_connected: connected, decisions });
 });
 
+const ALPACA_BASE = "https://paper-api.alpaca.markets";
+const ALPACA_KEY  = process.env["ALPACA_API_KEY"]  ?? "";
+const ALPACA_SEC  = process.env["ALPACA_SECRET_KEY"] ?? "";
+
+router.get("/positions", async (_req, res) => {
+  try {
+    const r = await fetch(`${ALPACA_BASE}/v2/positions`, {
+      headers: {
+        "APCA-API-KEY-ID":     ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SEC,
+      },
+    });
+    if (!r.ok) {
+      res.json({ positions: [], error: `Alpaca HTTP ${r.status}` });
+      return;
+    }
+    const raw = (await r.json()) as Record<string, string>[];
+    const positions = raw.map(p => ({
+      symbol:          p.symbol,
+      side:            p.side,
+      qty:             parseFloat(p.qty),
+      entry_price:     parseFloat(p.avg_entry_price),
+      current_price:   parseFloat(p.current_price),
+      market_value:    parseFloat(p.market_value),
+      unrealized_pl:   parseFloat(p.unrealized_pl),
+      unrealized_plpc: parseFloat(p.unrealized_plpc) * 100,
+      cost_basis:      parseFloat(p.cost_basis),
+    }));
+    res.json({ positions });
+  } catch (err) {
+    res.json({ positions: [], error: String(err) });
+  }
+});
+
 const FLASK_BASE = "http://localhost:5000";
 
 router.get("/movers", async (_req, res) => {

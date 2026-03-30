@@ -44,6 +44,13 @@ interface Status {
   total_trades: number; recent_trades: Trade[];
 }
 interface DecisionsResponse { db_connected: boolean; decisions: Decision[]; }
+interface Position {
+  symbol: string; side: string; qty: number;
+  entry_price: number; current_price: number;
+  market_value: number; unrealized_pl: number; unrealized_plpc: number;
+  cost_basis: number;
+}
+interface PositionsResponse { positions: Position[]; error?: string; }
 interface Mover { symbol: string; price: number; change_pct: number; volume: number; direction: "up" | "down"; }
 interface MoversResponse  { movers: Mover[]; ts?: string; error?: string; }
 interface SentimentResponse { sentiment: string; score: number; headlines?: string[]; alerts?: string[]; ts?: string; error?: string; }
@@ -541,12 +548,18 @@ export default function App() {
   const [headlineModal, setHeadlineModal] = useState<{ text: string; overallSentiment: string } | null>(null);
   const [signalModal, setSignalModal]     = useState<Decision | null>(null);
   const [pnlModalOpen, setPnlModalOpen]   = useState(false);
+  const [positions, setPositions]         = useState<Position[]>([]);
 
   async function fetchAll() {
     try {
-      const [sRes, dRes] = await Promise.all([fetch(`${BASE}/api/status`), fetch(`${BASE}/api/decisions`)]);
+      const [sRes, dRes, pRes] = await Promise.all([
+        fetch(`${BASE}/api/status`),
+        fetch(`${BASE}/api/decisions`),
+        fetch(`${BASE}/api/positions`),
+      ]);
       if (sRes.ok) setStatus(await sRes.json() as Status);
       if (dRes.ok) { const d: DecisionsResponse = await dRes.json(); setDecisions(d.decisions ?? []); }
+      if (pRes.ok) { const p: PositionsResponse = await pRes.json(); setPositions(p.positions ?? []); }
       setError(false);
     } catch { setError(true); }
     setLastRefresh(new Date());
@@ -852,6 +865,97 @@ export default function App() {
               </table>
             </div>
           </div>
+        </div>
+
+        {/* Open Positions — live from Alpaca */}
+        <div className="bg-slate-800 rounded-xl overflow-hidden mb-6">
+          <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+              📂 Open Positions
+              {positions.length > 0 && (
+                <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 text-[10px] font-bold">{positions.length}</span>
+              )}
+            </h2>
+            <span className="text-xs text-slate-600">live · Alpaca paper account</span>
+          </div>
+          {positions.length === 0 ? (
+            <div className="px-6 py-8 text-center text-slate-600 text-sm">No open positions — agent is in cash.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-900 text-slate-500 text-xs uppercase tracking-wider">
+                    <th className="px-5 py-3 text-left">Symbol</th>
+                    <th className="px-5 py-3 text-left">Side</th>
+                    <th className="px-5 py-3 text-right">Qty</th>
+                    <th className="px-5 py-3 text-right">Entry</th>
+                    <th className="px-5 py-3 text-right">Current</th>
+                    <th className="px-5 py-3 text-right">Mkt Val</th>
+                    <th className="px-5 py-3 text-right">P&amp;L $</th>
+                    <th className="px-5 py-3 text-right">P&amp;L %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map((p, i) => {
+                    const displaySym = (() => {
+                      const norm = p.symbol.replace("/", "");
+                      const found = [...CRYPTO_SYMBOLS].find(s => s.replace("/", "") === norm);
+                      return found ?? p.symbol;
+                    })();
+                    const pnlPos  = p.unrealized_pl >= 0;
+                    const pnlPctFmt = p.unrealized_plpc.toFixed(2);
+                    const isLong  = p.side === "long";
+                    return (
+                      <tr key={i} className="border-t border-slate-700/50 hover:bg-slate-700/30 transition-colors">
+                        <td className="px-5 py-3 font-semibold text-white">{displaySym}</td>
+                        <td className="px-5 py-3">
+                          <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${isLong ? "bg-emerald-900/50 text-emerald-400" : "bg-red-900/50 text-red-400"}`}>
+                            {p.side.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-right text-slate-300">{p.qty % 1 === 0 ? p.qty : p.qty.toPrecision(6)}</td>
+                        <td className="px-5 py-3 text-right text-slate-300">${p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
+                        <td className="px-5 py-3 text-right text-slate-200 font-medium">${p.current_price.toFixed(p.current_price < 1 ? 6 : 2)}</td>
+                        <td className="px-5 py-3 text-right text-slate-300">${p.market_value.toFixed(2)}</td>
+                        <td className="px-5 py-3 text-right font-semibold">
+                          <span className={pnlPos ? "text-emerald-400" : "text-red-400"}>
+                            {pnlPos ? "+" : ""}{p.unrealized_pl.toFixed(2)}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-right">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${pnlPos ? "bg-emerald-900/40 text-emerald-300" : "bg-red-900/40 text-red-300"}`}>
+                            {pnlPos ? "+" : ""}{pnlPctFmt}%
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="bg-slate-900/50">
+                  <tr>
+                    <td colSpan={5} className="px-5 py-2 text-xs text-slate-600 uppercase tracking-wide">Total</td>
+                    <td className="px-5 py-2 text-right text-xs text-slate-400 font-semibold">
+                      ${positions.reduce((s, p) => s + p.market_value, 0).toFixed(2)}
+                    </td>
+                    <td className="px-5 py-2 text-right">
+                      {(() => {
+                        const tot = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+                        return <span className={`text-xs font-bold ${tot >= 0 ? "text-emerald-400" : "text-red-400"}`}>{tot >= 0 ? "+" : ""}{tot.toFixed(2)}</span>;
+                      })()}
+                    </td>
+                    <td className="px-5 py-2 text-right">
+                      {(() => {
+                        const totCost = positions.reduce((s, p) => s + p.cost_basis, 0);
+                        const totPl   = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+                        const pct     = totCost > 0 ? (totPl / totCost) * 100 : 0;
+                        return <span className={`text-xs font-bold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>{pct >= 0 ? "+" : ""}{pct.toFixed(2)}%</span>;
+                      })()}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Executed Trades */}

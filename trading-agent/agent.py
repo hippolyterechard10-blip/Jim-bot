@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 import anthropic
 import config
 from scanner import MarketScanner
@@ -38,6 +39,51 @@ class TradingAgent:
         self._partial_taken: set = set()
         # Score-based trailing stop % per symbol (set at entry, read during management)
         self._trail_pcts: dict = {}
+
+    def _sync_orphan_positions(self):
+        """Detect Alpaca positions with no matching open SQLite record and create them."""
+        if not self.memory:
+            return
+        try:
+            alpaca_positions = self.broker.get_positions()
+            if not alpaca_positions:
+                return
+            open_trades = self.memory.get_open_trades()
+            open_symbols = {t["symbol"].replace("/", "").upper(): t for t in open_trades}
+            synced = 0
+            for pos in alpaca_positions:
+                sym_normalized = pos.symbol.replace("/", "").upper()
+                if sym_normalized in open_symbols:
+                    continue
+                # Determine proper display symbol (crypto: "BTCUSD" → "BTC/USD")
+                display_symbol = pos.symbol
+                for crypto in config.CRYPTO_SYMBOLS:
+                    if crypto.replace("/", "").upper() == sym_normalized:
+                        display_symbol = crypto
+                        break
+                side        = "buy" if getattr(pos, "side", "long") == "long" else "sell"
+                qty         = abs(float(pos.qty))
+                entry_price = float(pos.avg_entry_price)
+                trade_id    = str(uuid.uuid4())
+                logger.info(
+                    f"🔄 SYNC orphan: {display_symbol} {side} qty={qty:.6g} "
+                    f"entry=${entry_price:.4f} — writing to SQLite"
+                )
+                self.memory.log_trade_open(
+                    trade_id=trade_id,
+                    symbol=display_symbol,
+                    side=side,
+                    qty=qty,
+                    entry_price=entry_price,
+                    alpaca_order_id=f"orphan_{sym_normalized}",
+                    market_context={"source": "alpaca_sync",
+                                    "synced_at": datetime.now(timezone.utc).isoformat()},
+                )
+                synced += 1
+            if synced:
+                logger.info(f"✅ Orphan sync complete: {synced} position(s) added to SQLite")
+        except Exception as e:
+            logger.error(f"_sync_orphan_positions error: {e}")
 
     def _is_crypto(self, alpaca_symbol: str) -> bool:
         """Alpaca returns crypto as 'BTCUSD'; our config uses 'BTC/USD'."""
@@ -290,7 +336,10 @@ class TradingAgent:
             return None
 
     def run_cycle(self):
-        # First: manage trailing stops on all open positions (long and short)
+        # Sync any Alpaca positions that have no SQLite record (e.g. manual trades)
+        self._sync_orphan_positions()
+
+        # Manage trailing stops on all open positions (long and short)
         self._manage_trailing_stops()
         self._manage_short_trailing_stops()
 
