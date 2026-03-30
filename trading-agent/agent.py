@@ -5,6 +5,7 @@ from datetime import datetime, timezone, time as dtime
 import anthropic
 import config
 import pytz
+from correlations import CorrelationIntelligence
 from regime import MarketRegime
 from scanner import MarketScanner
 from strategy import (
@@ -32,8 +33,9 @@ class TradingAgent:
         self.risk = risk_manager
         self.memory = memory
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-        self.scanner = MarketScanner()
-        self.regime  = MarketRegime()
+        self.scanner       = MarketScanner()
+        self.regime        = MarketRegime()
+        self.correlations  = CorrelationIntelligence()
         # Tracks highest price seen per LONG position (for trailing stop)
         self._high_water: dict = {}
         # Tracks lowest price seen per SHORT position (for trailing stop)
@@ -622,6 +624,15 @@ class TradingAgent:
         # Build market context once per cycle (news sentiment + top movers + calendar + earnings)
         market_context = self.scanner.build_market_context()
 
+        # ── Correlation intelligence — refresh prices once per cycle ──────────
+        corr_changes    = self.correlations.refresh_prices(symbols_to_scan)
+        dxy_trend       = self.regime._cache.get("dxy") or "neutral"
+        try:
+            _open_pos_list  = self.broker.get_positions() or []
+            open_pos_symbols = [p.symbol for p in _open_pos_list]
+        except Exception:
+            open_pos_symbols = []
+
         # Build earnings alert map: symbol → {type, days_away}
         earnings_alerts_map = {ea["symbol"]: ea for ea in self.scanner.get_earnings_alerts()}
 
@@ -733,7 +744,13 @@ class TradingAgent:
                 data = symbols_data[symbol]
                 bars = data["bars"]
 
-                decision = self.analyze_market(symbol, bars, market_context=market_context)
+                corr_ctx  = self.correlations.build_correlation_context(
+                    symbol, open_pos_symbols, corr_changes, dxy_trend
+                )
+                decision = self.analyze_market(
+                    symbol, bars,
+                    market_context=f"{market_context}\n\n{corr_ctx}"
+                )
                 if not decision:
                     continue
 
@@ -778,6 +795,24 @@ class TradingAgent:
                         symbol, current_price, opp_score, volume=daily_volume
                     )
 
+                    # ── Correlation conflict check — hard block if ≥80% overlap ──
+                    corr_check = self.correlations.check_correlation_conflict(
+                        symbol, open_pos_symbols
+                    )
+                    if corr_check["conflict"] and corr_check.get("score_adjustment", 0) <= -20:
+                        logger.info(
+                            f"🚫 CORRELATION BLOCK: {symbol} entry skipped — "
+                            f"{corr_check['reason']}"
+                        )
+                        if self.memory:
+                            self.memory.log_decision(
+                                decision="hold",
+                                reasoning=f"Correlation conflict blocked entry: {corr_check['reason']}",
+                                symbol=symbol,
+                                confidence=confidence,
+                            )
+                        continue
+
                     # ── Regime size multiplier ──────────────────────────────────
                     if size_mult != 1.0:
                         orig_qty = qty
@@ -786,6 +821,20 @@ class TradingAgent:
                         logger.info(
                             f"  ↳ Regime {_regime} size_mult={size_mult}x: "
                             f"qty {orig_qty} → {qty} | position={pct*100:.0f}%"
+                        )
+
+                    # ── Beta-adjusted size (correlations module) ────────────────
+                    beta_pct = self.correlations.get_beta_adjusted_size(
+                        symbol, pct * 100, _regime
+                    )
+                    if abs(beta_pct - pct * 100) > 0.5:
+                        ratio    = beta_pct / (pct * 100) if pct > 0 else 1.0
+                        orig_qty = qty
+                        qty      = max(1, round(qty * ratio, 8))
+                        pct      = beta_pct / 100
+                        logger.info(
+                            f"  ↳ Beta adj: {symbol} → {beta_pct:.0f}% of portfolio "
+                            f"| qty {orig_qty} → {qty}"
                         )
 
                     # ── Pre-earnings cap: limit to 10% of portfolio ─────────────
