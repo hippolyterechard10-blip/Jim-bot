@@ -179,4 +179,10 @@ router.get("/stops", async (_req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/stops`, { stops: {} }));
 });
 
+router.get("/account", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/account`, {
+    equity: 0, cash: 0, buying_power: 0, portfolio_value: 0, last_equity: 0
+  }));
+});
+
 export default router;

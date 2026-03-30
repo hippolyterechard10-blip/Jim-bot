@@ -107,6 +107,23 @@ def api_regime():
     except Exception as e:
         return jsonify({"regime": "UNKNOWN", "error": str(e)})
 
+@app.route("/api/account")
+def api_account():
+    if not _agent:
+        return jsonify({"equity": 0, "cash": 0, "buying_power": 0, "portfolio_value": 0})
+    try:
+        account = _agent.broker.get_account()
+        return jsonify({
+            "equity":          float(account.equity),
+            "cash":            float(account.cash),
+            "buying_power":    float(account.buying_power),
+            "portfolio_value": float(account.portfolio_value),
+            "last_equity":     float(account.last_equity),
+        })
+    except Exception as e:
+        logger.error(f"api_account error: {e}")
+        return jsonify({"equity": 0, "cash": 0, "buying_power": 0, "portfolio_value": 0, "error": str(e)})
+
 @app.route("/api/stops")
 def api_stops():
     """Return trailing stop prices per symbol from agent's in-memory state."""

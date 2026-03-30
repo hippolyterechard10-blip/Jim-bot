@@ -49,6 +49,10 @@ interface StatsResponse {
 }
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
+interface AccountResponse {
+  equity: number; cash: number; buying_power: number;
+  portfolio_value: number; last_equity: number;
+}
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES";
 
@@ -819,21 +823,20 @@ function MonthlyBarChart({ trades }: { trades: Trade[] }) {
   );
 }
 
-function HomePage({ trades, decisions, stats, positions }: {
+function HomePage({ trades, decisions, stats, positions, portfolioValue }: {
   trades: Trade[]; decisions: Decision[];
-  stats: StatsResponse | null; positions: Position[];
+  stats: StatsResponse | null; positions: Position[]; portfolioValue: number;
 }) {
-  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
-  const closedPnl       = stats?.total_pnl ?? trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0);
-  const totalReturn     = ((closedPnl + unrealizedTotal) / INITIAL_CAPITAL) * 100;
+  const totalReturn = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
   const now             = new Date();
   const mDecisions      = decisions.filter(d => {
     const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
     return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
   });
-  const claudeCost = mDecisions.length * CLAUDE_COST_PER_CALL;
-  const totalCost  = REPLIT_MONTHLY_COST + claudeCost;
-  const netPnl     = closedPnl - totalCost;
+  const realizedPnl = stats?.total_pnl ?? trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0);
+  const claudeCost  = mDecisions.length * CLAUDE_COST_PER_CALL;
+  const totalCost   = REPLIT_MONTHLY_COST + claudeCost;
+  const netPnl      = realizedPnl - totalCost;
 
   const kpis = [
     { label: "Total Return", value: (totalReturn >= 0 ? "+" : "") + totalReturn.toFixed(2) + "%", color: totalReturn >= 0 ? "text-emerald-400" : "text-red-400" },
@@ -911,12 +914,13 @@ export default function App() {
   const [stats,      setStats]      = useState<StatsResponse | null>(null);
   const [partialProfits, setPartialProfits] = useState<PartialProfits>({});
   const [stops,      setStops]      = useState<Stops>({});
+  const [account,    setAccount]    = useState<AccountResponse | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [error,      setError]      = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes] = await Promise.all([
+      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes] = await Promise.all([
         fetch(`${BASE}/api/status`),
         fetch(`${BASE}/api/decisions`),
         fetch(`${BASE}/api/positions`),
@@ -926,6 +930,7 @@ export default function App() {
         fetch(`${BASE}/api/stats`),
         fetch(`${BASE}/api/partial-profits`),
         fetch(`${BASE}/api/stops`),
+        fetch(`${BASE}/api/account`),
       ]);
       if (sRes.ok)     { const d = await sRes.json() as Status;   setStatus(d); }
       if (dRes.ok)     { const d = await dRes.json();             setDecisions(d.decisions ?? []); }
@@ -936,6 +941,7 @@ export default function App() {
       if (stRes.ok)    setStats(await stRes.json() as StatsResponse);
       if (ppRes.ok)    { const d = await ppRes.json(); setPartialProfits(d.partial_profits ?? {}); }
       if (stopsRes.ok) { const d = await stopsRes.json(); setStops(d.stops ?? {}); }
+      if (accRes.ok)   { const d = await accRes.json() as AccountResponse; if (d.portfolio_value > 0) setAccount(d); }
       setError(false);
     } catch { setError(true); }
     setLastRefresh(new Date());
@@ -947,11 +953,13 @@ export default function App() {
     return () => clearInterval(id);
   }, [fetchAll]);
 
-  // Derived state
+  // Derived state — use real Alpaca equity when available, fall back to computed
   const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
   const closedPnl       = stats?.total_pnl ?? status?.recent_trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0) ?? 0;
-  const portfolioValue  = INITIAL_CAPITAL + closedPnl + unrealizedTotal;
-  const portfolioDelta  = ((closedPnl + unrealizedTotal) / INITIAL_CAPITAL) * 100;
+  const portfolioValue  = account?.portfolio_value && account.portfolio_value > 0
+    ? account.portfolio_value
+    : INITIAL_CAPITAL + closedPnl + unrealizedTotal;
+  const portfolioDelta  = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
   const allTrades       = status?.recent_trades ?? [];
 
   return (
@@ -968,7 +976,7 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"    && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} />}
+        {activePage === "HOME"    && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} />}
         {activePage === "MARKET"  && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS" && <SignalsPage decisions={decisions} />}
         {activePage === "TRADES"  && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} />}
