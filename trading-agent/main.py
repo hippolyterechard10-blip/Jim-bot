@@ -19,24 +19,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+WATCHDOG_INTERVAL_SECONDS = 60
 
-def _run_fast_loop(agent: TradingAgent):
+
+def _make_fast_thread(agent: TradingAgent) -> threading.Thread:
+    """Create (but do not start) a new fast loop daemon thread."""
+    def _run():
+        logger.info("[FAST] ⚡ Fast loop thread started — 30s tick")
+        while True:
+            try:
+                agent.fast_loop_tick()
+            except Exception as e:
+                logger.error(f"[FAST] loop error: {e}")
+            time.sleep(config.FAST_LOOP_INTERVAL_SECONDS)
+
+    return threading.Thread(target=_run, daemon=True, name="FastLoop")
+
+
+def _run_watchdog(agent: TradingAgent, thread_ref: list):
     """
-    Background thread — fires every 30 seconds.
-    Handles:
-      • Trailing stop checks    → [FAST] FAST EXIT
-      • Hard stop loss checks   → [FAST] FAST STOP
-      • Technical score scan    → [FAST] FAST TRIGGER when score > 60 or < 30
-      • Volume spike detection  → [FAST] VOLUME SPIKE
-    Never calls Claude directly — triggers analyze_market() only on threshold cross.
+    Daemon thread — wakes every 60 seconds.
+    Checks whether the fast loop thread is still alive.
+    If dead, spawns a fresh replacement and updates thread_ref[0].
     """
-    logger.info("[FAST] ⚡ Fast loop thread started — 30s tick")
     while True:
-        try:
-            agent.fast_loop_tick()
-        except Exception as e:
-            logger.error(f"[FAST] loop error: {e}")
-        time.sleep(config.FAST_LOOP_INTERVAL_SECONDS)
+        time.sleep(WATCHDOG_INTERVAL_SECONDS)
+        t = thread_ref[0]
+        if t.is_alive():
+            logger.info("[WATCHDOG] fast loop alive ✅")
+        else:
+            logger.warning("[WATCHDOG] fast loop dead — restarting 🔄")
+            new_thread = _make_fast_thread(agent)
+            new_thread.start()
+            thread_ref[0] = new_thread
+            logger.info("[WATCHDOG] fast loop restarted successfully ✅")
 
 
 def main():
@@ -52,19 +68,27 @@ def main():
     start_dashboard(memory, analyzer, scanner=agent.scanner, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
 
-    # ── Start the fast loop in a daemon thread ────────────────────────────────
-    fast_thread = threading.Thread(
-        target=_run_fast_loop,
-        args=(agent,),
-        daemon=True,
-        name="FastLoop",
-    )
+    # ── Start the fast loop ───────────────────────────────────────────────────
+    fast_thread = _make_fast_thread(agent)
     fast_thread.start()
+
+    # thread_ref is a mutable list so the watchdog can swap in a replacement
+    thread_ref = [fast_thread]
+
+    # ── Start the watchdog ────────────────────────────────────────────────────
+    watchdog_thread = threading.Thread(
+        target=_run_watchdog,
+        args=(agent, thread_ref),
+        daemon=True,
+        name="Watchdog",
+    )
+    watchdog_thread.start()
 
     logger.info(
         f"✅ All systems running — "
         f"fast loop: {config.FAST_LOOP_INTERVAL_SECONDS}s | "
-        f"slow loop: {config.LOOP_INTERVAL_SECONDS}s"
+        f"slow loop: {config.LOOP_INTERVAL_SECONDS}s | "
+        f"watchdog: {WATCHDOG_INTERVAL_SECONDS}s"
     )
 
     # ── Slow loop (main thread) ───────────────────────────────────────────────

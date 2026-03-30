@@ -381,32 +381,81 @@ class TradingAgent:
                 indicators = compute_indicators(prices, volumes)
                 if "error" in indicators:
                     continue
+                opens50  = bars50["open"].tolist()
+                highs50  = bars50["high"].tolist()
+                lows50   = bars50["low"].tolist()
                 patterns = detect_patterns(indicators, session)
                 score    = compute_opportunity_score(indicators, patterns)
 
                 # ── 5: Volume spike ───────────────────────────────────────────
-                sample     = volumes[-20:] if len(volumes) >= 20 else volumes
-                avg_vol    = sum(sample) / len(sample) if sample else 1
-                last_vol   = volumes[-1] if volumes else 0
-                ratio      = last_vol / avg_vol if avg_vol > 0 else 1.0
+                sample   = volumes[-20:] if len(volumes) >= 20 else volumes
+                avg_vol  = sum(sample) / len(sample) if sample else 1
+                last_vol = volumes[-1] if volumes else 0
+                ratio    = last_vol / avg_vol if avg_vol > 0 else 1.0
                 if ratio >= 5.0:
                     logger.info(
                         f"[FAST] ⚡ VOLUME SPIKE: {symbol} {ratio:.1f}x average — monitoring"
                     )
 
-                # ── 4: Score threshold → trigger Claude ───────────────────────
+                # ── 4: Score threshold → synthesis gate → Claude ─────────────
                 if score > 60 or score < 30:
+                    _side = "long" if score > 60 else "short"
+
+                    # Run full synthesis before calling Claude — same gate as slow loop
+                    try:
+                        open_pos_syms = [p.symbol for p in positions]
+                        synth = self.synthesis.run(
+                            symbol=symbol,
+                            base_score=score,
+                            opens=opens50, highs=highs50, lows=lows50,
+                            closes=prices, volumes=volumes,
+                            open_positions=open_pos_syms,
+                            side=_side,
+                        )
+                    except Exception as synth_err:
+                        logger.warning(f"[FAST] Synthesis error on {symbol}: {synth_err}")
+                        synth = {
+                            "final_score": score, "should_call_claude": True,
+                            "full_context": "", "stop_loss": None, "take_profit": None,
+                            "stop_pct": None, "target_pct": None, "risk_reward": None,
+                            "size_multiplier": 1.0,
+                        }
+
+                    final_score = synth["final_score"]
+
+                    # Hard gate: synthesis must approve before Claude is called
+                    if not synth.get("should_call_claude", True):
+                        reason = synth.get("decision_reason", "synthesis score below threshold")
+                        logger.info(
+                            f"[FAST] ⛔ SYNTHESIS SKIP {symbol}: {reason} "
+                            f"(raw={score:.0f} → synth={final_score:.0f})"
+                        )
+                        if self.memory:
+                            self.memory.log_decision(
+                                decision="hold",
+                                reasoning=(
+                                    f"[FAST] Synthesis blocked Claude call — {reason}. "
+                                    f"Breakdown: {synth.get('score_breakdown', '')}"
+                                ),
+                                symbol=symbol,
+                                confidence=0.0,
+                            )
+                        continue
+
                     logger.info(
-                        f"[FAST] 🎯 FAST TRIGGER: {symbol} score={score:.0f} → calling Claude now"
+                        f"[FAST] 🎯 FAST TRIGGER: {symbol} score={score:.0f} "
+                        f"→ synth={final_score:.0f} → calling Claude now"
                     )
                     self._mark_analyzed(symbol)
                     with self._lock:
                         self._fast_triggered.add(symbol)
 
                     market_context = self.scanner.build_market_context()
+                    synth_ctx      = synth.get("full_context", "")
                     try:
                         decision = self.analyze_market(
-                            symbol, bars, market_context=market_context
+                            symbol, bars,
+                            market_context=f"{market_context}\n\n{synth_ctx}" if synth_ctx else market_context,
                         )
                     except Exception as e:
                         logger.error(f"[FAST] analyze_market error {symbol}: {e}")
@@ -437,16 +486,25 @@ class TradingAgent:
                     if action == "buy" and confidence >= min_conf:
                         if self.risk.can_trade():
                             qty, pct, trail_pct = self.risk.get_position_size_by_score(
-                                symbol, current_price, score
+                                symbol, current_price, final_score
                             )
-                            sl     = self.risk.calculate_stop_loss(current_price, "buy")
+                            # Prefer ATR-anchored stop/target from synthesis geometry layer
+                            geo_sl = synth.get("stop_loss")
+                            geo_tp = synth.get("take_profit")
+                            sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "buy")
+                            if geo_sl and synth.get("stop_pct"):
+                                stop_pct = synth["stop_pct"] / 100
+                                if stop_pct < trail_pct:
+                                    trail_pct = stop_pct
                             amount = qty * current_price
+                            rr_str = f" | R:R={synth.get('risk_reward', 0):.1f}x" if synth.get("risk_reward") else ""
+                            tp_str = f" | target=${geo_tp:.4f}" if geo_tp else ""
                             logger.info(
-                                f"[FAST] TRADE ENTRY: {symbol} buy | score={score:.0f} "
+                                f"[FAST] TRADE ENTRY: {symbol} buy | score={final_score:.0f} "
                                 f"| position={pct*100:.0f}% = ${amount:,.2f} "
-                                f"| stop=${sl:.4f}"
+                                f"| stop=${sl:.4f}{tp_str}{rr_str}"
                             )
-                            order = self.broker.place_order(symbol, qty, "buy", sl)
+                            order = self.broker.place_order(symbol, qty, "buy", sl, take_profit=geo_tp)
                             self._trail_pcts[symbol] = trail_pct
                             if order and self.memory:
                                 try:
@@ -459,7 +517,7 @@ class TradingAgent:
                                         stop_loss=sl,
                                         market_context={
                                             "source": "fast_loop_trigger",
-                                            "score": score,
+                                            "score": final_score,
                                         },
                                     )
                                 except Exception as me:
