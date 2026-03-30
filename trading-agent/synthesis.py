@@ -5,6 +5,7 @@ This runs BEFORE every Claude API call.
 Only calls Claude when final score crosses the threshold.
 """
 import logging
+from news_intelligence import NewsIntelligence
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ class SynthesisEngine:
         self.regime       = regime
         self.correlations = correlations
         self.geometry     = geometry
-        self.scanner      = scanner
+        self.scanner      = scanner   # kept for non-news uses (movers cache, etc.)
+        self.news         = NewsIntelligence()
         logger.info("✅ SynthesisEngine initialized — all layers connected")
 
     def run(
@@ -74,26 +76,13 @@ class SynthesisEngine:
         )
         geo_context = geo["context"]
 
-        # ── Layer 4: News Sentiment ────────────────────────────────────────────
-        sentiment = self.scanner.analyze_sentiment()
-        news_adj  = 0
-        sent      = sentiment.get("sentiment", "neutral")
-
-        if sent == "very_bullish":
-            news_adj = +15 if side == "long" else -10
-        elif sent == "bullish":
-            news_adj = +8  if side == "long" else -5
-        elif sent == "very_bearish":
-            news_adj = -15 if side == "long" else +15
-        elif sent == "bearish":
-            news_adj = -8  if side == "long" else +8
-
-        # High-urgency alerts push short bias
-        alert_adj = len(sentiment.get("alerts", [])) * 5
-        if side == "short":
-            news_adj += alert_adj
-        else:
-            news_adj -= alert_adj
+        # ── Layer 4: News Intelligence (Tier 1-4 classification) ─────────────────
+        # Replaces simple scanner keyword detection with full tiered analysis:
+        # Tier 1 = market-moving (±25), Tier 2 = directional (±12-15),
+        # Tier 3 = contextual (±6), + Trump direction signal + earnings whisper
+        news_result  = self.news.analyze(symbol)
+        news_adj     = max(-35, min(35, news_result["total_score_adjustment"]))
+        news_context = news_result["context"]
 
         # ── Final Score Calculation ────────────────────────────────────────────
         regime_score_adj = (
@@ -137,11 +126,6 @@ class SynthesisEngine:
             f"FINAL: {final_score:.0f}"
         )
 
-        news_lines = [
-            f"=== NEWS SENTIMENT ===",
-            f"{sent.upper()} (score: {sentiment.get('score', 0)})",
-        ] + sentiment.get("alerts", [])
-
         synthesis_lines = [
             "=== SYNTHESIS SCORE ===",
             score_breakdown,
@@ -152,7 +136,7 @@ class SynthesisEngine:
             regime_context,
             corr_context,
             geo_context,
-            "\n".join(news_lines),
+            news_context,          # full Tier 1-4 classification from NewsIntelligence
             "\n".join(synthesis_lines),
         ])
 
