@@ -70,7 +70,11 @@ function fmtPrice(n: number) {
   if (n >= 1)    return n.toFixed(2);
   return n.toFixed(4);
 }
-function fmtPnl(n: number) { return (n >= 0 ? "+" : "") + "$" + Math.abs(n).toFixed(2); }
+function fmtPnl(n: number) {
+  const abs = Math.abs(n);
+  const str = abs >= 1 ? abs.toFixed(2) : abs >= 0.01 ? abs.toFixed(3) : abs.toFixed(4);
+  return (n >= 0 ? "+" : "-") + "$" + str;
+}
 function fmtPct(n: number) { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
 function daysUntil(dateStr: string) {
   const diff = Math.round((new Date(dateStr + "T12:00:00Z").getTime() - Date.now()) / 86400_000);
@@ -833,10 +837,10 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue }: {
     const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
     return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
   });
-  const realizedPnl = stats?.total_pnl ?? trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0);
-  const claudeCost  = mDecisions.length * CLAUDE_COST_PER_CALL;
-  const totalCost   = REPLIT_MONTHLY_COST + claudeCost;
-  const netPnl      = realizedPnl - totalCost;
+  const grossPnl   = portfolioValue - INITIAL_CAPITAL;
+  const claudeCost = mDecisions.length * CLAUDE_COST_PER_CALL;
+  const totalCost  = REPLIT_MONTHLY_COST + claudeCost;
+  const netPnl     = grossPnl - totalCost;
 
   const kpis = [
     { label: "Total Return", value: (totalReturn >= 0 ? "+" : "") + totalReturn.toFixed(2) + "%", color: totalReturn >= 0 ? "text-emerald-400" : "text-red-400" },
@@ -885,17 +889,31 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue }: {
           <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">💸 Monthly Costs — {now.toLocaleString("default", { month: "long", year: "numeric" })}</span>
         </div>
         <div className="p-4 space-y-2 max-w-sm">
+          {/* Alpaca gross P&L */}
+          <div className="flex justify-between text-xs border-b border-slate-700 pb-2 mb-1">
+            <span className="text-slate-400">Gross P&L (Alpaca)</span>
+            <span className={`font-mono font-bold ${grossPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {grossPnl >= 0 ? "+" : "-"}${Math.abs(grossPnl).toFixed(2)}
+            </span>
+          </div>
+          {/* Costs */}
           {[
             ["Replit Core", `-$${REPLIT_MONTHLY_COST.toFixed(2)}`, "text-red-400"],
             [`Claude API (${mDecisions.length} calls × $0.003)`, `-$${claudeCost.toFixed(3)}`, "text-red-400"],
-            ["Total Costs", `-$${totalCost.toFixed(2)}`, "text-red-400 font-bold border-t border-slate-700 pt-2"],
-            ["Net P&L (after costs)", (netPnl >= 0 ? "+" : "") + `$${netPnl.toFixed(2)}`, netPnl >= 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"],
+            ["Total Costs", `-$${totalCost.toFixed(2)}`, "text-red-400 font-bold"],
           ].map(([label, value, cls]) => (
             <div key={label as string} className={`flex justify-between text-xs ${cls as string}`}>
               <span className="text-slate-400">{label as string}</span>
               <span className="font-mono">{value as string}</span>
             </div>
           ))}
+          {/* Net result */}
+          <div className="flex justify-between text-sm border-t border-slate-700 pt-2 mt-1">
+            <span className="text-slate-300 font-semibold">Net P&L (after costs)</span>
+            <span className={`font-mono font-bold text-base ${netPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {netPnl >= 0 ? "+" : "-"}${Math.abs(netPnl).toFixed(2)}
+            </span>
+          </div>
         </div>
       </div>
     </div>
