@@ -221,7 +221,7 @@ def detect_patterns(indicators: dict, session: str) -> dict:
     high_vol  = indicators.get("high_volatility", False)
 
     # ── GAPPER (stock en forte hausse à l'ouverture) ──
-    if change > 10 and vol_ratio > 3 and session == "open":
+    if change > 20 and vol_ratio > 3:
         patterns.append("GAPPER")
         score += 40
 
@@ -421,8 +421,8 @@ def build_strategy_prompt(
 - SCALP: Only if volume ratio >3x AND high volatility. Tight 1-2% target.
 
 ## Risk Rules (NON-NEGOTIABLE)
-- Max position: 30% of capital
-- Stop loss: -5% per trade
+- Max position: 40% of capital (score 90-100), 30% (score 80-89), 20% (score 70-79), 15% (score 60-69)
+- Stop loss: ATR-based (typically 1.5-3%), minimum 1:2 risk/reward enforced
 - Take profit: +10% (or +2% for scalps)
 - Max 5 open positions
 - If session is mid_day or bad hours: confidence must be >0.85 to trade

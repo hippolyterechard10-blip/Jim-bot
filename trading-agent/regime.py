@@ -164,7 +164,7 @@ class MarketRegime:
         # Use cache if fresh (30 min)
         if not force_refresh and self._cache["cached_at"]:
             age = (now - self._cache["cached_at"]).total_seconds()
-            if age < 1800:
+            if age < 300:
                 return self._cache["regime"]
 
         vix = self._fetch_vix()

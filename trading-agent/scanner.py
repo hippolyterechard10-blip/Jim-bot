@@ -91,7 +91,7 @@ class MarketScanner:
         try:
             assets = self.api.list_assets(status="active", asset_class="us_equity")
             tradeable = [a for a in assets if a.tradable and a.fractionable]
-            symbols = [a.symbol for a in tradeable[:500]]
+            symbols = [a.symbol for a in tradeable[:2000]]
             snapshots = self.api.get_snapshots(symbols)
             gappers = []
             movers  = []
