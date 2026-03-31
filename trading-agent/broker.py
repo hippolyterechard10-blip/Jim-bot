@@ -55,7 +55,7 @@ class AlpacaBroker:
                 type="market",
                 time_in_force="gtc" if is_crypto else "day"
             )
-            if stop_loss and take_profit:
+            if stop_loss and take_profit and "/" not in symbol:  # stocks only — crypto stops managed in memory
                 order_params["order_class"] = "bracket"
                 order_params["stop_loss"] = {"stop_price": round(stop_loss, 4)}
                 order_params["take_profit"] = {"limit_price": round(take_profit, 4)}
