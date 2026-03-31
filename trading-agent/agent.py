@@ -344,7 +344,11 @@ class TradingAgent:
         if self._preclose_done_date == today_str:
             return
         self._preclose_done_date = today_str
-        stock_positions = [p for p in positions if "/" not in p.symbol]
+        # hold_overnight applies to stocks only — crypto positions are never force-closed by session rules
+        if self.regime.get_params().get("hold_overnight", False):
+            logger.info("[Pre-close] hold_overnight=True (bull regime) — keeping equity positions open")
+            return
+        stock_positions = [p for p in positions if not self._is_crypto(p.symbol)]
         if not stock_positions:
             logger.info("[Pre-close] No equity positions to close before 16:00 ET")
             return
@@ -452,6 +456,7 @@ class TradingAgent:
                 preclose_positions = self.broker.get_positions() or []
             except Exception:
                 preclose_positions = []
+            # hold_overnight applies to stocks only — crypto positions are never force-closed by session rules
             self._preclose_stocks(preclose_positions, today_str)
 
         # ── 1 & 2: Position management ────────────────────────────────────────
