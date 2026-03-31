@@ -479,7 +479,7 @@ class TradingAgent:
         if is_crypto_good_hours():
             fast_watchlist.extend(config.CRYPTO_SYMBOLS)
         cached_movers = self.scanner._movers_cache.get("symbols", [])
-        for m in cached_movers[:5]:
+        for m in cached_movers[:10]:
             sym = m.get("symbol")
             if sym and sym not in fast_watchlist:
                 fast_watchlist.append(sym)
@@ -502,6 +502,10 @@ class TradingAgent:
                 indicators = compute_indicators(prices, volumes)
                 if "error" in indicators:
                     continue
+                _cm = self.scanner._movers_cache.get("symbols", [])
+                _mi = next((m for m in _cm if m["symbol"] == symbol), None)
+                if _mi and _mi.get("is_gapper"):
+                    indicators["change_pct"] = _mi["change_pct"]
                 opens50  = bars50["open"].tolist()
                 highs50  = bars50["high"].tolist()
                 lows50   = bars50["low"].tolist()
@@ -1077,6 +1081,7 @@ class TradingAgent:
         # Build earnings alert map: symbol → {type, days_away}
         earnings_alerts_map = {ea["symbol"]: ea for ea in self.scanner.get_earnings_alerts()}
 
+        cached_movers_list = self.scanner._movers_cache.get("symbols", [])
         symbols_data = {}
         for symbol in symbols_to_scan:
             try:
@@ -1092,6 +1097,9 @@ class TradingAgent:
                 if len(prices) < 20:
                     continue
                 indicators = compute_indicators(prices, volumes)
+                _mi = next((m for m in cached_movers_list if m["symbol"] == symbol), None)
+                if _mi and _mi.get("is_gapper"):
+                    indicators["change_pct"] = _mi["change_pct"]
                 patterns   = detect_patterns(indicators, session)
                 symbols_data[symbol] = {
                     "indicators": indicators, "patterns": patterns, "bars": bars,

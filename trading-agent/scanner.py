@@ -86,11 +86,11 @@ class MarketScanner:
         now = datetime.now(timezone.utc)
         if self._movers_cache["cached_at"]:
             age = (now - self._movers_cache["cached_at"]).total_seconds()
-            if age < 900 and self._movers_cache["symbols"]:
+            if age < 300 and self._movers_cache["symbols"]:
                 return self._movers_cache["symbols"]
         try:
             assets = self.api.list_assets(status="active", asset_class="us_equity")
-            tradeable = [a for a in assets if a.tradable and a.fractionable]
+            tradeable = [a for a in assets if a.tradable]
             symbols = [a.symbol for a in tradeable[:2000]]
             snapshots = self.api.get_snapshots(symbols)
             gappers = []

@@ -48,6 +48,8 @@ class AlpacaBroker:
     def place_order(self, symbol, qty, side, stop_loss=None, take_profit=None):
         try:
             is_crypto = "/" in symbol
+            if not is_crypto:
+                qty = max(1, int(qty))
             order_params = dict(
                 symbol=symbol,
                 qty=qty,
