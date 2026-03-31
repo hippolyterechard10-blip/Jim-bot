@@ -502,9 +502,9 @@ class TradingAgent:
                 indicators = compute_indicators(prices, volumes)
                 if "error" in indicators:
                     continue
-                _cm = self.scanner._movers_cache.get("symbols", [])
-                _mi = next((m for m in _cm if m["symbol"] == symbol), None)
-                if _mi and _mi.get("is_gapper"):
+                _cm_all = self.scanner._movers_cache.get("symbols", [])
+                _mi = next((m for m in _cm_all if m["symbol"] == symbol), None)
+                if _mi and _mi.get("is_gapper") and abs(_mi.get("change_pct", 0)) > 20:
                     indicators["change_pct"] = _mi["change_pct"]
                 opens50  = bars50["open"].tolist()
                 highs50  = bars50["high"].tolist()
@@ -1097,8 +1097,9 @@ class TradingAgent:
                 if len(prices) < 20:
                     continue
                 indicators = compute_indicators(prices, volumes)
-                _mi = next((m for m in cached_movers_list if m["symbol"] == symbol), None)
-                if _mi and _mi.get("is_gapper"):
+                _cm_all = self.scanner._movers_cache.get("symbols", [])
+                _mi = next((m for m in _cm_all if m["symbol"] == symbol), None)
+                if _mi and _mi.get("is_gapper") and abs(_mi.get("change_pct", 0)) > 20:
                     indicators["change_pct"] = _mi["change_pct"]
                 patterns   = detect_patterns(indicators, session)
                 symbols_data[symbol] = {
