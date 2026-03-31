@@ -210,7 +210,13 @@ router.get("/source", async (_req, res) => {
 const ALLOWED_SOURCE_FILES = new Set([
   "agent", "analyzer", "dashboard", "notifier", "news_intelligence", "synthesis",
 ]);
-const AGENT_DIR = "/home/runner/workspace/trading-agent";
+
+const SOURCE_CANDIDATE_DIRS = [
+  "/home/runner/workspace/trading-agent",
+  join(process.cwd(), "trading-agent"),
+  join(process.cwd(), "..", "trading-agent"),
+  join(import.meta.dirname, "..", "..", "..", "trading-agent"),
+];
 
 router.get("/source/:filename", (req, res) => {
   const { filename } = req.params;
@@ -218,19 +224,25 @@ router.get("/source/:filename", (req, res) => {
     res.status(404).type("text/plain").send("Not found");
     return;
   }
-  const filePath = join(AGENT_DIR, `${filename}.py`);
-  if (!existsSync(filePath)) {
-    res.status(404).type("text/plain").send("File not found");
-    return;
+  for (const dir of SOURCE_CANDIDATE_DIRS) {
+    const filePath = join(dir, `${filename}.py`);
+    console.log(`[source] trying: ${filePath}`);
+    if (existsSync(filePath)) {
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        console.log(`[source] found at: ${filePath}`);
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache");
+        res.send(content);
+        return;
+      } catch (e) {
+        console.error(`[source] read error at ${filePath}:`, e);
+      }
+    }
   }
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache");
-    res.send(content);
-  } catch {
-    res.status(500).type("text/plain").send("Read error");
-  }
+  const tried = SOURCE_CANDIDATE_DIRS.map(d => join(d, `${filename}.py`)).join(", ");
+  console.error(`[source] not found. cwd=${process.cwd()} tried: ${tried}`);
+  res.status(404).type("text/plain").send(`File not found. cwd=${process.cwd()} tried: ${tried}`);
 });
 
 export default router;
