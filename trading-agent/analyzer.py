@@ -19,37 +19,80 @@ class TradeAnalyzer:
             return None
         pnl = trade.get("pnl", 0) or 0
         outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "breakeven")
+
+        snap = {}
+        raw_snap = trade.get("entry_snapshot")
+        if raw_snap:
+            try:
+                snap = json.loads(raw_snap) if isinstance(raw_snap, str) else (raw_snap or {})
+            except Exception:
+                snap = {}
+
+        exit_vs_target = trade.get("exit_vs_target")
+
         original_decisions = self.memory.get_recent_decisions(limit=50, symbol=trade["symbol"])
         entry_decision = next(
             (d for d in original_decisions if d.get("trade_id") == trade.get("trade_id")), None
         )
-        prompt = f"""You are a trading expert analyzing your own past trades to improve.
+        reasoning_text = (
+            (entry_decision["reasoning"] if entry_decision else None)
+            or snap.get("reasoning")
+            or "N/A"
+        )
 
-Trade details:
-- Symbol: {trade['symbol']}
-- Side: {trade['side'].upper()}
-- Entry: ${trade.get('entry_price')}
-- Exit: ${trade.get('exit_price')}
-- P&L: ${pnl:.2f} ({trade.get('pnl_pct', 0):.2f}%)
-- Result: {outcome.upper()}
-- Duration: {trade.get('hold_duration_min', 0):.1f} minutes
-- Close reason: {trade.get('close_reason')}
-- Original reasoning: {entry_decision['reasoning'] if entry_decision else 'N/A'}
+        pnl_pct_str   = str(round(trade.get("pnl_pct", 0) or 0, 2))
+        duration_str  = str(round(trade.get("hold_duration_min", 0) or 0, 1))
 
-Respond ONLY with valid JSON, no markdown:
-{{
-  "analysis": "3-5 sentence narrative analysis",
-  "outcome_reason": "1 sentence explaining the result",
-  "mistakes": ["mistake 1", "mistake 2"],
-  "lessons": ["actionable lesson 1", "actionable lesson 2"],
-  "strategy_adjustments": "specific adjustments for future trades",
-  "would_take_same_trade": true,
-  "key_insight": "most important insight in 1 sentence"
-}}"""
+        prompt  = "You are a trading expert analyzing your own past trades to improve.\n\n"
+        prompt += "Trade details:\n"
+        prompt += "- Symbol: "        + str(trade["symbol"])                     + "\n"
+        prompt += "- Side: "          + str(trade["side"].upper())                + "\n"
+        prompt += "- Entry: $"        + str(trade.get("entry_price"))             + "\n"
+        prompt += "- Exit: $"         + str(trade.get("exit_price"))              + "\n"
+        prompt += "- P&L: $"          + str(round(pnl, 2)) + " (" + pnl_pct_str  + "%)\n"
+        prompt += "- Result: "        + outcome.upper()                           + "\n"
+        prompt += "- Duration: "      + duration_str                              + " minutes\n"
+        prompt += "- Exit reason: "   + str(trade.get("close_reason") or "N/A")  + "\n"
+        if exit_vs_target is not None:
+            prompt += "- Exit vs target: " + str(exit_vs_target) + "% of objective reached\n"
+        if snap:
+            prompt += "\nEntry context (captured at trade open):\n"
+            prompt += "- Session: "        + str(snap.get("session")       or "N/A") + "\n"
+            prompt += "- Strategy: "       + str(snap.get("strategy_used") or "N/A") + "\n"
+            prompt += "- Regime: "         + str(snap.get("regime")        or "N/A") + "\n"
+            score_val = snap.get("final_score") or snap.get("base_score")
+            prompt += "- Score: "          + str(score_val if score_val is not None else "N/A") + "/100\n"
+            prompt += "- Score breakdown: "+ str(snap.get("score_breakdown") or "N/A") + "\n"
+            conf = snap.get("confidence")
+            prompt += "- Confidence: "     + (str(round(conf * 100, 0)) + "%" if conf else "N/A") + "\n"
+            prompt += "- RSI: "            + str(snap.get("rsi")          or "N/A") + "\n"
+            prompt += "- MACD bullish: "   + str(snap.get("macd_bullish"))           + "\n"
+            vol = snap.get("volume_ratio")
+            prompt += "- Volume ratio: "   + (str(round(vol, 2)) + "x" if vol else "N/A") + "\n"
+            pats = snap.get("patterns") or []
+            prompt += "- Patterns: "       + (", ".join(pats) if pats else "none") + "\n"
+            prompt += "- Support: "        + str(snap.get("support")      or "N/A") + "\n"
+            prompt += "- Resistance: "     + str(snap.get("resistance")   or "N/A") + "\n"
+            rr = snap.get("risk_reward")
+            prompt += "- Risk/Reward: "    + (str(round(rr, 2)) + "x" if rr else "N/A") + "\n"
+        prompt += "- Original Claude reasoning: " + reasoning_text + "\n"
+        prompt += "\nRespond ONLY with valid JSON, no markdown:\n"
+        prompt += "{\n"
+        prompt += '  "analysis": "3-5 sentence narrative analysis",\n'
+        prompt += '  "outcome_reason": "1 sentence explaining the result",\n'
+        prompt += '  "entry_quality": "assessment of entry timing and conditions",\n'
+        prompt += '  "exit_timing": "assessment of exit: too early, too late, or optimal",\n'
+        prompt += '  "one_improvement": "single most actionable improvement for this exact type of trade",\n'
+        prompt += '  "mistakes": ["mistake 1", "mistake 2"],\n'
+        prompt += '  "lessons": ["actionable lesson 1", "actionable lesson 2"],\n'
+        prompt += '  "strategy_adjustments": "specific adjustments for future trades",\n'
+        prompt += '  "would_take_same_trade": true,\n'
+        prompt += '  "key_insight": "most important insight in 1 sentence"\n'
+        prompt += "}"
         try:
             response = self.client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=1000,
+                max_tokens=1200,
                 messages=[{"role": "user", "content": prompt}]
             )
             raw = response.content[0].text.strip()
@@ -58,15 +101,26 @@ Respond ONLY with valid JSON, no markdown:
                 if raw.startswith("json"):
                     raw = raw[4:]
             data = json.loads(raw.strip())
+            analysis_text = data.get("analysis", "")
+            entry_quality = data.get("entry_quality", "")
+            exit_timing   = data.get("exit_timing", "")
+            if entry_quality:
+                analysis_text += "\n\nEntry quality: " + entry_quality
+            if exit_timing:
+                analysis_text += "\nExit timing: " + exit_timing
+            one_improvement = data.get("one_improvement", "")
+            strategy_adj    = data.get("strategy_adjustments", "")
+            if one_improvement:
+                strategy_adj = one_improvement + (" | " + strategy_adj if strategy_adj else "")
             self.memory.save_trade_analysis(
                 trade_id=trade["trade_id"],
                 symbol=trade["symbol"],
                 outcome=outcome,
                 pnl=pnl,
-                analysis=data.get("analysis", ""),
+                analysis=analysis_text,
                 lessons=data.get("lessons", []),
                 mistakes=data.get("mistakes", []),
-                strategy_adj=data.get("strategy_adjustments", "")
+                strategy_adj=strategy_adj
             )
             if data.get("key_insight"):
                 self.memory.set_memory(

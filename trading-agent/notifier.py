@@ -101,12 +101,58 @@ class TradingNotifier:
         alert_html = ""
         if anomalies:
             alert_html = f'<div class="alert"><strong>⚠ ALERTES</strong><br><br>{"<br>".join(anomalies)}</div>'
-        rows = ""
-        for t in daily[:8]:
-            p = t.get("pnl"); cls = _pcolor(p)
-            rows += f'<tr><td><strong>{t["symbol"]}</strong></td><td>{t["side"].upper()}</td><td class="{cls}">{_fpnl(p)}</td><td style="color:#4a5568">{t.get("close_reason","—")}</td></tr>'
-        if not rows:
-            rows = '<tr><td colspan="4" style="color:#4a5568;text-align:center">Aucun trade aujourd\'hui</td></tr>'
+        real_daily = [t for t in daily if t.get("close_reason") != "partial_profit_remainder"]
+        cards = ""
+        for t in real_daily[:8]:
+            p = t.get("pnl")
+            cls = _pcolor(p)
+            snap = {}
+            raw_snap = t.get("entry_snapshot")
+            if raw_snap:
+                try:
+                    snap = json.loads(raw_snap) if isinstance(raw_snap, str) else (raw_snap or {})
+                except Exception:
+                    snap = {}
+            strategy  = snap.get("strategy_used") or "—"
+            score_val = snap.get("final_score") or snap.get("base_score")
+            score_str = str(int(score_val)) + "/100" if score_val is not None else "—"
+            session   = snap.get("session") or "—"
+            regime    = snap.get("regime")  or "—"
+            conf      = snap.get("confidence")
+            conf_str  = str(int(conf * 100)) + "%" if conf else "—"
+            vol       = snap.get("volume_ratio")
+            vol_str   = str(round(vol, 1)) + "x" if vol else "—"
+            pats      = snap.get("patterns") or []
+            pats_str  = ", ".join(pats) if pats else "—"
+            rr        = snap.get("risk_reward")
+            rr_str    = str(round(rr, 1)) + "x" if rr else "—"
+            exit_reason = t.get("close_reason") or "—"
+            evs = t.get("exit_vs_target")
+            if evs is not None:
+                evs_cls = "pos" if evs >= 100 else ("neu" if evs >= 50 else "neg")
+                evs_str = '<span class="' + evs_cls + '">' + str(evs) + "% obj.</span>"
+            else:
+                evs_str = "—"
+            cards += (
+                '<div style="border:1px solid #1a2030;border-radius:4px;padding:10px 12px;margin-bottom:8px;background:#0d1117">'
+                '<div style="display:flex;justify-content:space-between;margin-bottom:5px">'
+                "<span><strong>" + t["symbol"] + "</strong> " + t["side"].upper() + "</span>"
+                '<span class="' + cls + '">' + _fpnl(p) + " | " + exit_reason + " | " + evs_str + "</span>"
+                "</div>"
+                '<div style="font-size:9px;color:#4a5568;display:flex;flex-wrap:wrap;gap:8px">'
+                "<span>Strat: "   + strategy  + "</span>"
+                "<span>Score: "   + score_str + "</span>"
+                "<span>Session: " + session   + "</span>"
+                "<span>Regime: "  + regime    + "</span>"
+                "<span>Conf: "    + conf_str  + "</span>"
+                "<span>Vol: "     + vol_str   + "</span>"
+                "<span>Patterns: "+ pats_str  + "</span>"
+                "<span>R:R: "     + rr_str    + "</span>"
+                "</div>"
+                "</div>"
+            )
+        if not cards:
+            cards = '<p style="color:#4a5568;text-align:center;font-size:11px">Aucun trade aujourd\'hui</p>'
         lessons_html = "".join(f'<div class="lesson">{l}</div>' for l in lessons[:5])
         content = f"""{alert_html}
 <div class="st">Aujourd'hui</div>
@@ -122,9 +168,7 @@ class TradingNotifier:
 <div class="k"><div class="kl">Drawdown</div><div class="kv neg">-${stats.get('max_drawdown',0):.2f}</div></div>
 </div>
 <div class="st">Trades du jour</div>
-<table style="width:100%;border-collapse:collapse;font-size:11px">
-<thead><tr><th style="text-align:left;padding:6px;color:#4a5568">Symbol</th><th style="text-align:left;padding:6px;color:#4a5568">Dir.</th><th style="text-align:left;padding:6px;color:#4a5568">P&L</th><th style="text-align:left;padding:6px;color:#4a5568">Raison</th></tr></thead>
-<tbody>{rows}</tbody></table>
+{cards}
 {f'<div class="st">Leçons récentes</div>{lessons_html}' if lessons_html else ''}"""
         return _send(f"[Trading Agent] Résumé {today.strftime('%d/%m/%Y')} — {_fpnl(daily_pnl)}", _html("Résumé quotidien", content))
 
