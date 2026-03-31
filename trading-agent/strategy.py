@@ -68,7 +68,7 @@ def get_session_context() -> dict:
     }
 
     context["instructions"] = {
-        "pre_market": "Pre-market: observe gappers, prepare watchlist, no entry yet.",
+        "pre_market": "Pre-market 4am-9:30am ET: scan for gappers actively. If a confirmed gapper is found (>20% change, >3x volume), ENTER immediately — do not wait for open. This is the highest priority window for gap plays.",
         "open": "PRIME TIME 9:30-11h: Focus on gappers +20%. Momentum and breakout entries. Be aggressive.",
         "mid_day": "Mid-day: low volume, choppy. Reduce position sizes. Prefer crypto.",
         "power_hour": "Power hour 15-16h: good volatility returns. Look for end-of-day momentum.",

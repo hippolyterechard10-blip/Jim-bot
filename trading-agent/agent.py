@@ -1406,7 +1406,8 @@ class TradingAgent:
             short_candidates += 1
             qty, short_pct = self.risk.get_short_position_size(symbol, current_price)
             amount = qty * current_price
-            sl     = self.risk.calculate_stop_loss(current_price, "sell")
+            geo_sl = data.get("synthesis", {}).get("stop_loss")
+            sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "sell")
             opp_score_short = symbols_data[symbol]["opportunity_score"]
 
             logger.info(

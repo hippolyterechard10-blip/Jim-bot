@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Score thresholds
 LONG_THRESHOLD      = 60
 SHORT_THRESHOLD     = 30
-CONFIDENCE_MINIMUM  = 70
+CONFIDENCE_MINIMUM  = 0.70
 
 
 class SynthesisEngine:
