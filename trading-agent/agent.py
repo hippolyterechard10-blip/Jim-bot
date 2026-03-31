@@ -57,6 +57,8 @@ class TradingAgent:
         self._last_analyzed: dict  = {}  # symbol → UTC datetime of last Claude call
         self._fast_triggered: set  = set()  # symbols triggered by fast loop this cycle
         self._lock = threading.Lock()      # guards _last_analyzed, _fast_triggered
+        # Pre-close: date (YYYY-MM-DD ET) when stock pre-close already fired today
+        self._preclose_done_date: str = ""
 
     def _sync_orphan_positions(self):
         """Detect Alpaca positions with no matching open SQLite record and create them."""
@@ -326,9 +328,60 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"[FAST] Hard stop check error: {e}")
 
+    def _preclose_stocks(self, positions: list, today_str: str) -> None:
+        """
+        Close all equity (non-crypto) positions at 15:55 ET to avoid overnight
+        exposure.  Fires at most once per calendar day (guarded by _preclose_done_date).
+        """
+        if self._preclose_done_date == today_str:
+            return
+        self._preclose_done_date = today_str
+        stock_positions = [p for p in positions if "/" not in p.symbol]
+        if not stock_positions:
+            logger.info("[Pre-close] No equity positions to close before 16:00 ET")
+            return
+        for pos in stock_positions:
+            symbol = pos.symbol
+            try:
+                current_price = float(pos.current_price)
+                closed = self.broker.close_position(symbol)
+                if closed:
+                    logger.info(f"[Pre-close] ✅ Closed {symbol} before 16:00 ET")
+                    # Clean up in-memory state
+                    self._high_water.pop(symbol, None)
+                    self._low_water.pop(symbol, None)
+                    self._trail_pcts.pop(symbol, None)
+                    self._partial_taken.discard(symbol)
+                    # Update SQLite record
+                    if self.memory:
+                        try:
+                            open_trades = self.memory.get_recent_trades(limit=50)
+                            match = next(
+                                (t for t in open_trades
+                                 if t.get("symbol", "") == symbol
+                                 and t.get("status") == "open"),
+                                None,
+                            )
+                            if match:
+                                qty_m   = float(match["qty"])
+                                pnl     = (current_price - float(match["entry_price"])) * qty_m
+                                pnl_pct = round(pnl / (float(match["entry_price"]) * qty_m) * 100, 4)
+                                self.memory.log_trade_close(
+                                    match["trade_id"],
+                                    exit_price=current_price,
+                                    close_reason="pre_market_close",
+                                    pnl=round(pnl, 4),
+                                    pnl_pct=pnl_pct,
+                                )
+                        except Exception as me:
+                            logger.warning(f"[Pre-close] Memory update for {symbol}: {me}")
+            except Exception as e:
+                logger.error(f"[Pre-close] ❌ Failed to close {symbol}: {e}")
+
     def fast_loop_tick(self):
         """
         FAST LOOP — called every 30 seconds from a background thread.
+        0. Pre-close stocks at 15:55 ET (weekdays only, once per day)
         1. Trailing stop check  → FAST EXIT log
         2. Hard stop check      → FAST STOP log
         3. RSI/MACD/volume scan → compute raw opportunity score
@@ -336,6 +389,16 @@ class TradingAgent:
         5. Volume > 5× average → VOLUME SPIKE log
         Never calls Claude directly; triggers analyze_market() when threshold crossed.
         """
+        # ── 0: Pre-close equity positions at 15:55 ET ─────────────────────────
+        now_et    = datetime.now(pytz.timezone("America/New_York"))
+        today_str = now_et.strftime("%Y-%m-%d")
+        if now_et.weekday() < 5 and now_et.hour == 15 and now_et.minute >= 55:
+            try:
+                preclose_positions = self.broker.get_positions() or []
+            except Exception:
+                preclose_positions = []
+            self._preclose_stocks(preclose_positions, today_str)
+
         # ── 1 & 2: Position management ────────────────────────────────────────
         try:
             positions = self.broker.get_positions() or []
