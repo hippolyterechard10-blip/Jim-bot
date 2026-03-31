@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import Database from "better-sqlite3";
 
 const router: IRouter = Router();
@@ -203,6 +204,32 @@ router.get("/source", async (_req, res) => {
     res.send(text);
   } catch (e) {
     res.status(503).type("text/plain").send("Source unavailable — trading agent not running.");
+  }
+});
+
+const ALLOWED_SOURCE_FILES = new Set([
+  "agent", "analyzer", "dashboard", "notifier", "news_intelligence", "synthesis",
+]);
+const AGENT_DIR = "/home/runner/workspace/trading-agent";
+
+router.get("/source/:filename", (req, res) => {
+  const { filename } = req.params;
+  if (!ALLOWED_SOURCE_FILES.has(filename)) {
+    res.status(404).type("text/plain").send("Not found");
+    return;
+  }
+  const filePath = join(AGENT_DIR, `${filename}.py`);
+  if (!existsSync(filePath)) {
+    res.status(404).type("text/plain").send("File not found");
+    return;
+  }
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.send(content);
+  } catch {
+    res.status(500).type("text/plain").send("Read error");
   }
 });
 
