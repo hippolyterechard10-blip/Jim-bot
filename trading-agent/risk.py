@@ -4,8 +4,6 @@ from regime import MarketRegime
 
 logger = logging.getLogger(__name__)
 
-_regime_detector = MarketRegime()
-
 # Score tiers: (min_score_inclusive, position_pct, trailing_stop_pct)
 # Evaluated top-down; first match wins.
 SCORE_TIERS = [
@@ -21,9 +19,12 @@ LOW_VOLUME_CAP_PCT  = 0.10   # daily volume < LOW_VOLUME_THRESHOLD → cap at 10
 LOW_VOLUME_THRESHOLD = 100_000
 
 
+_REGIME_FALLBACK = {"regime": "bull", "position_size_multiplier": 1.0, "max_positions": 5, "confidence_threshold": 65}
+
 class RiskManager:
-    def __init__(self, broker):
+    def __init__(self, broker, regime=None):
         self.broker = broker
+        self.regime = regime
 
     def get_position_size_by_score(self, symbol, price, opp_score, volume=None):
         """
@@ -61,7 +62,7 @@ class RiskManager:
         pct = min(pct, MAX_POSITION_PCT)
 
         # Regime multiplier — scales down size in bear/volatile markets
-        regime_params = _regime_detector.get_params()
+        regime_params = self.regime.get_params() if self.regime else _REGIME_FALLBACK
         multiplier = regime_params.get("position_size_multiplier", 1.0)
         pct = round(min(pct * multiplier, MAX_POSITION_PCT), 4)
         logger.info(f"[Risk] {regime_params['regime']} x{multiplier} → {pct*100:.1f}%")
@@ -87,7 +88,7 @@ class RiskManager:
 
     def check_max_positions(self):
         positions = self.broker.get_positions()
-        regime_params = _regime_detector.get_params()
+        regime_params = self.regime.get_params() if self.regime else _REGIME_FALLBACK
         max_pos = regime_params.get("max_positions", config.MAX_POSITIONS)
         if len(positions) >= max_pos:
             logger.warning(f"⚠️ Max positions: {len(positions)}/{max_pos} ({regime_params['regime']} regime)")

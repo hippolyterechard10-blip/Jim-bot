@@ -38,6 +38,7 @@ class TradingAgent:
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self.scanner       = MarketScanner()
         self.regime        = MarketRegime()
+        self.risk.regime   = self.regime
         self.correlations  = CorrelationIntelligence()
         self.geometry      = GeometryAnalysis()
         self.synthesis     = SynthesisEngine(
@@ -313,11 +314,10 @@ class TradingAgent:
                         self._partial_taken.discard(symbol)
                         if self.memory:
                             try:
-                                open_trades = self.memory.get_recent_trades(limit=50)
+                                open_trades = self.memory.get_open_trades()
                                 match = next(
                                     (t for t in open_trades
-                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
-                                     and t.get("status") == "open"),
+                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")),
                                     None,
                                 )
                                 if match:
@@ -363,11 +363,10 @@ class TradingAgent:
                     # Update SQLite record
                     if self.memory:
                         try:
-                            open_trades = self.memory.get_recent_trades(limit=50)
+                            open_trades = self.memory.get_open_trades()
                             match = next(
                                 (t for t in open_trades
-                                 if t.get("symbol", "") == symbol
-                                 and t.get("status") == "open"),
+                                 if t.get("symbol", "") == symbol),
                                 None,
                             )
                             if match:
@@ -411,11 +410,10 @@ class TradingAgent:
                     self._partial_taken.discard(symbol)
                     if self.memory:
                         try:
-                            open_trades = self.memory.get_recent_trades(limit=50)
+                            open_trades = self.memory.get_open_trades()
                             match = next(
                                 (t for t in open_trades
-                                 if t.get("symbol", "") == symbol
-                                 and t.get("status") == "open"),
+                                 if t.get("symbol", "") == symbol),
                                 None,
                             )
                             if match:
@@ -783,11 +781,10 @@ class TradingAgent:
                         self._partial_taken.discard(symbol)
                         if self.memory:
                             try:
-                                open_trades = self.memory.get_recent_trades(limit=50)
+                                open_trades = self.memory.get_open_trades()
                                 match = next(
                                     (t for t in open_trades
-                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
-                                     and t.get("status") == "open"),
+                                     if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")),
                                     None
                                 )
                                 if match:
@@ -928,11 +925,10 @@ class TradingAgent:
                         self._partial_taken.discard(f"short:{symbol}")
                         if self.memory:
                             try:
-                                open_trades = self.memory.get_recent_trades(limit=50)
+                                open_trades = self.memory.get_open_trades()
                                 match = next(
                                     (t for t in open_trades
                                      if t.get("symbol", "").replace("/", "") == symbol.replace("/", "")
-                                     and t.get("status") == "open"
                                      and t.get("side") == "sell"),
                                     None
                                 )
