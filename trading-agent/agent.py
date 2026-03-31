@@ -378,15 +378,64 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"[Pre-close] ❌ Failed to close {symbol}: {e}")
 
+    def _close_dust_positions(self, positions: list, threshold: float = 5.0) -> None:
+        """
+        Close any open position whose absolute market value is below `threshold`
+        (default $5).  These 'dust' positions tie up a slot without meaningful
+        upside.
+        """
+        for pos in positions:
+            symbol = pos.symbol
+            try:
+                market_value = abs(float(pos.market_value))
+                if market_value >= threshold:
+                    continue
+                current_price = float(pos.current_price)
+                closed = self.broker.close_position(symbol)
+                if closed:
+                    logger.info(
+                        f"[Dust] 🧹 Closed dust position: {symbol} "
+                        f"(market_value=${market_value:.2f} < ${threshold:.0f})"
+                    )
+                    self._high_water.pop(symbol, None)
+                    self._low_water.pop(symbol, None)
+                    self._trail_pcts.pop(symbol, None)
+                    self._partial_taken.discard(symbol)
+                    if self.memory:
+                        try:
+                            open_trades = self.memory.get_recent_trades(limit=50)
+                            match = next(
+                                (t for t in open_trades
+                                 if t.get("symbol", "") == symbol
+                                 and t.get("status") == "open"),
+                                None,
+                            )
+                            if match:
+                                qty_m   = float(match["qty"])
+                                pnl     = (current_price - float(match["entry_price"])) * qty_m
+                                pnl_pct = round(pnl / (float(match["entry_price"]) * qty_m) * 100, 4)
+                                self.memory.log_trade_close(
+                                    match["trade_id"],
+                                    exit_price=current_price,
+                                    close_reason="dust_cleanup",
+                                    pnl=round(pnl, 4),
+                                    pnl_pct=pnl_pct,
+                                )
+                        except Exception as me:
+                            logger.warning(f"[Dust] Memory update for {symbol}: {me}")
+            except Exception as e:
+                logger.error(f"[Dust] Failed to close {symbol}: {e}")
+
     def fast_loop_tick(self):
         """
         FAST LOOP — called every 30 seconds from a background thread.
         0. Pre-close stocks at 15:55 ET (weekdays only, once per day)
         1. Trailing stop check  → FAST EXIT log
         2. Hard stop check      → FAST STOP log
-        3. RSI/MACD/volume scan → compute raw opportunity score
-        4. Score > 60 or < 30  → FAST TRIGGER → call Claude immediately
-        5. Volume > 5× average → VOLUME SPIKE log
+        3. Dust cleanup: close positions with market_value < $5
+        4. RSI/MACD/volume scan → compute raw opportunity score
+        5. Score > 60 or < 30  → FAST TRIGGER → call Claude immediately
+        6. Volume > 5× average → VOLUME SPIKE log
         Never calls Claude directly; triggers analyze_market() when threshold crossed.
         """
         # ── 0: Pre-close equity positions at 15:55 ET ─────────────────────────
@@ -409,8 +458,9 @@ class TradingAgent:
         self._manage_trailing_stops(loop_tag="FAST")
         self._manage_short_trailing_stops(loop_tag="FAST")
         self._check_hard_stops(positions)
+        self._close_dust_positions(positions)
 
-        # ── 3-5: Technical scan (no movers refresh — uses cached data) ────────
+        # ── 4-6: Technical scan (no movers refresh — uses cached data) ────────
         session_ctx = get_session_context()
         session     = session_ctx["session"]
 
