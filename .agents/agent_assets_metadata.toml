@@ -6,3 +6,9 @@ id = "-A_3p1S5mXvZl3_fS_bce"
 uri = "file://jim_bot_source.pdf"
 type = "pdf"
 title = "Jim Bot — Full Source Code"
+
+[[outputs]]
+id = "yaZO8uudJIWI3wvdrw5GD"
+uri = "file://jim_bot_export.txt"
+type = "text"
+title = "Jim Bot — Full Source Export"
