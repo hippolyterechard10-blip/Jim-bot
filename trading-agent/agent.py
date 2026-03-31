@@ -639,6 +639,7 @@ class TradingAgent:
                                         market_context={
                                             "source": "fast_loop_trigger",
                                             "score": final_score,
+                                            "regime": self.regime._cache.get("regime", "unknown"),
                                         },
                                     )
                                 except Exception as me:
@@ -973,7 +974,7 @@ class TradingAgent:
             memory_context = self.memory.get_context_for_agent(symbol)
 
         regime_context = self.regime.build_regime_context()
-        combined_context = f"{market_context}\n\n{regime_context}" if market_context else regime_context
+        combined_context = market_context if market_context else regime_context
 
         prompt = build_strategy_prompt(
             symbol=symbol,
@@ -1313,6 +1314,14 @@ class TradingAgent:
                             f"| qty {orig_qty} → {qty}"
                         )
 
+                    # ── Minimum position floor ──────────────────────────────────
+                    MIN_POSITION_PCT = 0.05
+                    if pct < MIN_POSITION_PCT:
+                        logger.info(
+                            f"  ↳ Position floor: {symbol} pct={pct*100:.1f}% below 5% minimum — skipping entry"
+                        )
+                        continue
+
                     # ── Pre-earnings cap: limit to 10% of portfolio ─────────────
                     ea_buy = earnings_alerts_map.get(symbol)
                     if ea_buy and ea_buy["type"] == "pre_earnings":
@@ -1433,6 +1442,11 @@ class TradingAgent:
                         entry_price=current_price,
                         stop_loss=sl,
                         alpaca_order_id=alpaca_id,
+                        market_context={
+                            "source": "run_cycle_short",
+                            "score": opp_score_short,
+                            "regime": self.regime._cache.get("regime", "unknown"),
+                        },
                     )
                 except Exception as me:
                     logger.warning(f"Memory log short entry: {me}")
