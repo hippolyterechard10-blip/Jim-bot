@@ -43,4 +43,4 @@ ALL_SYMBOLS      = CRYPTO_SYMBOLS + STOCK_SYMBOLS + ETF_SYMBOLS
 # Loop speeds
 LOOP_INTERVAL_SECONDS      = 300   # Slow loop: full synthesis + movers refresh
 FAST_LOOP_INTERVAL_SECONDS = 30    # Fast loop: position stops + score triggers
-INITIAL_CAPITAL = 1000.0
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
