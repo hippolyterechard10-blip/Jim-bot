@@ -47,14 +47,20 @@ class AlpacaBroker:
 
     def place_order(self, symbol, qty, side, stop_loss=None, take_profit=None):
         try:
-            order = self.api.submit_order(
+            is_crypto = "/" in symbol
+            order_params = dict(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 type="market",
-                time_in_force="gtc"
+                time_in_force="gtc" if is_crypto else "day"
             )
-            logger.info(f"✅ Order placed: {side} {qty} {symbol}")
+            if stop_loss and take_profit:
+                order_params["order_class"] = "bracket"
+                order_params["stop_loss"] = {"stop_price": round(stop_loss, 4)}
+                order_params["take_profit"] = {"limit_price": round(take_profit, 4)}
+            order = self.api.submit_order(**order_params)
+            logger.info(f"✅ Order: {side} {qty} {symbol} | stop={stop_loss} target={take_profit}")
             return order
         except Exception as e:
             logger.error(f"place_order error: {e}")
