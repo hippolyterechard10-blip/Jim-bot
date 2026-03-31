@@ -1,7 +1,10 @@
 import logging
 import config
+from regime import MarketRegime
 
 logger = logging.getLogger(__name__)
+
+_regime_detector = MarketRegime()
 
 # Score tiers: (min_score_inclusive, position_pct, trailing_stop_pct)
 # Evaluated top-down; first match wins.
@@ -56,6 +59,12 @@ class RiskManager:
 
         # Hard cap
         pct = min(pct, MAX_POSITION_PCT)
+
+        # Regime multiplier — scales down size in bear/volatile markets
+        regime_params = _regime_detector.get_params()
+        multiplier = regime_params.get("position_size_multiplier", 1.0)
+        pct = round(min(pct * multiplier, MAX_POSITION_PCT), 4)
+        logger.info(f"[Risk] {regime_params['regime']} x{multiplier} → {pct*100:.1f}%")
 
         amount = portfolio * pct
         qty = amount / price
