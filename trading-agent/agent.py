@@ -455,8 +455,8 @@ class TradingAgent:
             logger.error(f"[FAST] Cannot fetch positions: {e}")
             positions = []
 
-        self._manage_trailing_stops(loop_tag="FAST")
-        self._manage_short_trailing_stops(loop_tag="FAST")
+        self._manage_trailing_stops(loop_tag="FAST", positions=positions)
+        self._manage_short_trailing_stops(loop_tag="FAST", positions=positions)
         self._check_hard_stops(positions)
         self._close_dust_positions(positions)
 
@@ -647,13 +647,14 @@ class TradingAgent:
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _manage_trailing_stops(self, loop_tag: str = ""):
+    def _manage_trailing_stops(self, loop_tag: str = "", positions=None):
         """Check every open LONG position against its score-based trailing stop."""
-        try:
-            positions = self.broker.get_positions()
-        except Exception as e:
-            logger.error(f"_manage_trailing_stops: could not fetch positions: {e}")
-            return
+        if positions is None:
+            try:
+                positions = self.broker.get_positions()
+            except Exception as e:
+                logger.error(f"_manage_trailing_stops: could not fetch positions: {e}")
+                return
 
         for pos in positions:
             try:
@@ -790,13 +791,14 @@ class TradingAgent:
             except Exception as e:
                 logger.error(f"Trailing stop error for {symbol}: {e}")
 
-    def _manage_short_trailing_stops(self, loop_tag: str = ""):
+    def _manage_short_trailing_stops(self, loop_tag: str = "", positions=None):
         """Check every SHORT position — trailing stop 3% above the lowest price reached."""
-        try:
-            positions = self.broker.get_positions()
-        except Exception as e:
-            logger.error(f"_manage_short_trailing_stops: could not fetch positions: {e}")
-            return
+        if positions is None:
+            try:
+                positions = self.broker.get_positions()
+            except Exception as e:
+                logger.error(f"_manage_short_trailing_stops: could not fetch positions: {e}")
+                return
 
         for pos in positions:
             try:
@@ -1098,7 +1100,7 @@ class TradingAgent:
             data      = symbols_data[symbol]
             is_crypto = "/" in symbol
             base_score = compute_opportunity_score(data["indicators"], data["patterns"])
-            _side      = "short" if base_score < 45 else "long"
+            _side      = "short" if base_score < score_short_max else "long"
 
             # ── Synthesis: all intelligence layers → one final score ─────────
             try:
@@ -1282,16 +1284,6 @@ class TradingAgent:
                                 confidence=confidence,
                             )
                         continue
-
-                    # ── Regime size multiplier ──────────────────────────────────
-                    if size_mult != 1.0:
-                        orig_qty = qty
-                        qty  = max(1, round(qty * size_mult, 8))
-                        pct  = pct * size_mult
-                        logger.info(
-                            f"  ↳ Regime {_regime} size_mult={size_mult}x: "
-                            f"qty {orig_qty} → {qty} | position={pct*100:.0f}%"
-                        )
 
                     # ── Beta-adjusted size (correlations module) ────────────────
                     beta_pct = self.correlations.get_beta_adjusted_size(

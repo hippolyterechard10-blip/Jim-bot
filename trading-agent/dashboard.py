@@ -321,16 +321,14 @@ def api_stops():
         return jsonify({"stops": {}})
     try:
         stops = {}
-        high   = getattr(_agent, "_trailing_high", {})
-        trail  = getattr(_agent, "_score_trail_pct", {})
-        low    = getattr(_agent, "_trailing_low",  {})
-        s_trail = getattr(_agent, "_short_score_trail_pct", {})
+        high  = getattr(_agent, "_high_water", {})
+        trail = getattr(_agent, "_trail_pcts", {})
+        low   = getattr(_agent, "_low_water",  {})
         for sym, h in high.items():
             pct = trail.get(sym, 0.05)
             stops[sym] = round(h * (1 - pct), 4)
         for sym, l in low.items():
-            pct = s_trail.get(sym, 0.03)
-            stops[sym] = round(l * (1 + pct), 4)
+            stops[sym] = round(l * (1 + 0.03), 4)
         return jsonify({"stops": stops})
     except Exception as e:
         return jsonify({"stops": {}, "error": str(e)})
