@@ -1,6 +1,8 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
@@ -28,6 +30,37 @@ app.use(
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── Source file route — direct disk read, BEFORE router middleware ──────────
+const ALLOWED_SOURCE_FILES = new Set([
+  "agent", "analyzer", "dashboard", "notifier", "news_intelligence", "synthesis",
+]);
+
+const SOURCE_DIRS = [
+  "/home/runner/workspace/trading-agent",
+  join(import.meta.dirname, "..", "..", "..", "trading-agent"),
+  join(process.cwd(), "trading-agent"),
+];
+
+app.get("/api/source/:filename", (req, res) => {
+  const { filename } = req.params;
+  if (!ALLOWED_SOURCE_FILES.has(filename)) {
+    res.status(404).type("text/plain").send("Not found");
+    return;
+  }
+  for (const dir of SOURCE_DIRS) {
+    const fp = join(dir, `${filename}.py`);
+    if (existsSync(fp)) {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.send(readFileSync(fp, "utf-8"));
+      return;
+    }
+  }
+  const tried = SOURCE_DIRS.map(d => join(d, `${filename}.py`)).join(", ");
+  res.status(404).type("text/plain").send(`File not found. cwd=${process.cwd()} tried: ${tried}`);
+});
+// ────────────────────────────────────────────────────────────────────────────
 
 app.use("/api", router);
 
