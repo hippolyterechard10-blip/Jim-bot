@@ -55,8 +55,10 @@ class SynthesisEngine:
         size_multiplier  = regime_params["position_size_multiplier"]
 
         # ── Layer 2: Correlations ──────────────────────────────────────────────
-        # refresh_prices uses 5-min cache; parent cycle already warmed it for all symbols
-        changes      = self.correlations.refresh_prices([symbol])
+        # refresh_prices uses 5-min cache; fetch all correlated peers so relative strength works
+        all_symbols  = list(self.correlations.CORRELATION_MATRIX.keys())
+        flat_symbols = list(set([s for pair in all_symbols for s in pair] + [symbol]))
+        changes      = self.correlations.refresh_prices(flat_symbols)
         dxy_trend    = self.regime._cache.get("dxy") or "neutral"
         is_crypto    = "/" in symbol
 

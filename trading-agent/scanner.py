@@ -132,7 +132,7 @@ class MarketScanner:
                     }
 
                     # GAPPER ALERT: >50% gain on >5× average volume
-                    if change_pct >= 50 and volume_ratio >= 5:
+                    if change_pct >= 20 and volume_ratio >= 3:
                         entry["is_gapper"] = True
                         logger.info(
                             f"🚨 GAPPER ALERT: {symbol} +{change_pct:.1f}% "

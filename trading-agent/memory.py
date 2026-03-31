@@ -200,7 +200,8 @@ class TradingMemory:
             trades = [dict(r) for r in rows]
         if not trades:
             return {"total_trades": 0}
-        pnls = [t["pnl"] for t in trades if t["pnl"] is not None]
+        real_trades = [t for t in trades if t.get("close_reason") != "partial_profit_remainder"]
+        pnls = [t["pnl"] for t in real_trades if t["pnl"] is not None]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         gross_win = sum(wins) if wins else 0
