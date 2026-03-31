@@ -101,13 +101,13 @@ def compute_indicators(prices: list, volumes: list) -> dict:
     # ── Moyennes mobiles ──
     sma20 = float(np.mean(p[-20:]))
     sma9  = float(np.mean(p[-9:])) if len(p) >= 9 else sma20
-    ema12 = _ema(p, 12)
-    ema26 = _ema(p, 26)
-
     # ── MACD ──
-    macd = ema12 - ema26
-    # Signal = EMA9 du MACD (approximation)
-    macd_signal = macd * 0.9  # simplification
+    macd_series = np.array([
+        _ema(p[:i], 12) - _ema(p[:i], 26)
+        for i in range(26, len(p))
+    ])
+    macd = float(macd_series[-1]) if len(macd_series) > 0 else 0
+    macd_signal = _ema(macd_series, 9) if len(macd_series) >= 9 else macd
     macd_hist = macd - macd_signal
 
     # ── RSI ──
