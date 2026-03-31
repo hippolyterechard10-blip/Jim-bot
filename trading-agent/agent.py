@@ -1428,14 +1428,14 @@ class TradingAgent:
             if symbol in passed:
                 conf = claude_confidences.get(symbol, 1.0)
                 if conf >= config.SHORT_ENTRY_CONF_MAX:
-                    logger.debug(f"SHORT skip {symbol}: Claude conf={conf:.0%} >= {config.SHORT_ENTRY_CONF_MAX:.0%}")
+                    logger.info(f"SHORT skip {symbol}: Claude conf={conf:.0%} >= {config.SHORT_ENTRY_CONF_MAX:.0%}")
                     continue
 
             # No existing position in this symbol
             sym_key = symbol.replace("/", "")
             if sym_key in open_positions:
                 pos_side = getattr(open_positions[sym_key], "side", "long")
-                logger.debug(f"SHORT skip {symbol}: already in {pos_side} position")
+                logger.info(f"SHORT skip {symbol}: already in {pos_side} position")
                 continue
 
             if current_price <= 0:
@@ -1475,4 +1475,4 @@ class TradingAgent:
                     logger.warning(f"Memory log short entry: {me}")
 
         if short_candidates == 0:
-            logger.debug("SHORT PASS: no candidates met entry conditions")
+            logger.info("SHORT PASS: no candidates met entry conditions")

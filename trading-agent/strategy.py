@@ -345,7 +345,10 @@ def compute_opportunity_score(indicators: dict, patterns: dict) -> int:
 
     # ── Pattern détecté (±8 pts) ─────────────────────────────────────────
     if pattern_act == "buy" and pattern_sc > 0:
-        score += min(8, pattern_sc // 5)
+        if "GAPPER" in patterns.get("patterns", []):
+            score += 35
+        else:
+            score += min(8, pattern_sc // 5)
     elif pattern_act == "sell" and pattern_sc > 0:
         score -= min(8, pattern_sc // 5)
 
