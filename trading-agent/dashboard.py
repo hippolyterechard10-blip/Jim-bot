@@ -386,6 +386,22 @@ def api_source():
     chunks.append(f"\n{SEP}\nTotal: {len(PYTHON_FILES)} files, {total_lines} lines\n{SEP}\n")
     return Response("".join(chunks), mimetype="text/plain; charset=utf-8")
 
+AGENT_FILES = ["agent", "analyzer", "dashboard", "notifier", "news_intelligence", "synthesis"]
+
+@app.route("/api/source/<filename>")
+def source_file(filename):
+    """Return a single Python source file by name (no extension)."""
+    from flask import Response as _R
+    if filename not in AGENT_FILES:
+        return "Not found", 404
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, f"{filename}.py")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return _R(f.read(), status=200, mimetype="text/plain; charset=utf-8")
+    except Exception:
+        return "File not found", 404
+
 def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
     init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
     def run():
