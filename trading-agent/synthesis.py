@@ -51,7 +51,7 @@ class SynthesisEngine:
 
         long_threshold   = regime_params["score_long_threshold"]
         short_threshold  = regime_params["score_short_threshold"]
-        confidence_min   = regime_params["confidence_threshold"]
+        confidence_min   = regime_params["confidence_threshold"] / 100
         size_multiplier  = regime_params["position_size_multiplier"]
 
         # ── Layer 2: Correlations ──────────────────────────────────────────────

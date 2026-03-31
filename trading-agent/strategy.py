@@ -196,7 +196,8 @@ def _atr(prices: np.ndarray, period: int = 14) -> float:
     """Calcule l'ATR (Average True Range)."""
     if len(prices) < 2:
         return 0.0
-    trs = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+    trs = [max(abs(prices[i] - prices[i-1]), abs(prices[i] - prices[i-2]) if i > 1 else 0)
+           for i in range(1, len(prices))]
     return float(np.mean(trs[-period:]))
 
 

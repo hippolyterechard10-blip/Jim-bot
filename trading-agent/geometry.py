@@ -61,13 +61,6 @@ class GeometryAnalysis:
             if recent_lows[i] < recent_lows[i-1] and recent_lows[i] < recent_lows[i+1]:
                 swing_lows.append(recent_lows[i])
 
-        # Round numbers as additional levels
-        magnitude = 10 ** (len(str(int(current_price))) - 2)
-        round_levels = [
-            round(current_price / magnitude) * magnitude * i / 10
-            for i in range(8, 13)
-        ]
-
         supports    = [l for l in swing_lows   if l < current_price * 0.999]
         resistances = [h for h in swing_highs  if h > current_price * 1.001]
 
