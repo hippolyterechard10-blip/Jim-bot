@@ -345,53 +345,46 @@ def dashboard():
 
 @app.route("/source")
 def api_source():
-    """Return all source files as JSON: {files: [{path, lines, content}]}"""
+    """Return all Python source files concatenated as plain text — shareable in a browser."""
+    from flask import Response
     base = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(base, ".."))
 
-    SOURCE_FILES = [
+    PYTHON_FILES = [
         "trading-agent/main.py",
-        "trading-agent/agent.py",
-        "trading-agent/memory.py",
-        "trading-agent/dashboard.py",
         "trading-agent/config.py",
         "trading-agent/broker.py",
         "trading-agent/risk.py",
+        "trading-agent/memory.py",
         "trading-agent/strategy.py",
         "trading-agent/regime.py",
         "trading-agent/scanner.py",
-        "trading-agent/synthesis.py",
         "trading-agent/correlations.py",
         "trading-agent/geometry.py",
-        "artifacts/api-server/src/app.ts",
-        "artifacts/api-server/src/routes/trading.ts",
-        "artifacts/api-server/src/routes/index.ts",
-        "artifacts/trading-dashboard/src/App.tsx",
-        "artifacts/trading-dashboard/src/index.css",
+        "trading-agent/synthesis.py",
+        "trading-agent/agent.py",
+        "trading-agent/dashboard.py",
     ]
 
-    files = []
-    for rel in SOURCE_FILES:
+    SEP = "=" * 80
+    chunks = ["JIM BOT — Python Source\n" + SEP + "\n"]
+
+    total_lines = 0
+    for rel in PYTHON_FILES:
         abs_path = os.path.join(project_root, rel)
         if not os.path.exists(abs_path):
             continue
         try:
             with open(abs_path, encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            files.append({
-                "path":    rel,
-                "lines":   len(content.splitlines()),
-                "size_kb": round(os.path.getsize(abs_path) / 1024, 1),
-                "content": content,
-            })
+            n = len(content.splitlines())
+            total_lines += n
+            chunks.append(f"\n{SEP}\nFILE: {rel}  ({n} lines)\n{SEP}\n\n{content}\n")
         except Exception as e:
-            files.append({"path": rel, "error": str(e)})
+            chunks.append(f"\n{SEP}\nFILE: {rel}  — ERROR: {e}\n{SEP}\n")
 
-    return jsonify({
-        "total_files": len(files),
-        "total_lines": sum(f.get("lines", 0) for f in files),
-        "files": files,
-    })
+    chunks.append(f"\n{SEP}\nTotal: {len(PYTHON_FILES)} files, {total_lines} lines\n{SEP}\n")
+    return Response("".join(chunks), mimetype="text/plain; charset=utf-8")
 
 def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
     init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)

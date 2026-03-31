@@ -194,4 +194,16 @@ router.get("/analysis", async (_req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/analysis`, {}));
 });
 
+router.get("/source", async (_req, res) => {
+  try {
+    const r = await fetch(`${FLASK_BASE}/source`);
+    const text = await r.text();
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.send(text);
+  } catch (e) {
+    res.status(503).type("text/plain").send("Source unavailable — trading agent not running.");
+  }
+});
+
 export default router;
