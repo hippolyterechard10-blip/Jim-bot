@@ -268,6 +268,43 @@ class TradingAgent:
         normalized = alpaca_symbol.replace("/", "")
         return any(normalized == s.replace("/", "") for s in config.CRYPTO_SYMBOLS)
 
+    def _build_entry_snapshot(self, symbol, indicators, patterns, session_ctx,
+                               synth, decision, current_price, base_score=None):
+        """Capture full entry context as a dict for post-trade analysis."""
+        try:
+            ind = indicators or {}
+            pat = patterns   or {}
+            s   = synth      or {}
+            d   = decision   or {}
+            sess = session_ctx.get("session") if isinstance(session_ctx, dict) else session_ctx
+            return {
+                "rsi":           ind.get("rsi"),
+                "macd_bullish":  ind.get("macd_bullish"),
+                "volume_ratio":  ind.get("volume_ratio"),
+                "atr_pct":       ind.get("atr_pct"),
+                "bb_pct":        ind.get("bb_pct"),
+                "momentum_5":    ind.get("momentum_5"),
+                "above_sma20":   ind.get("above_sma20"),
+                "change_pct":    ind.get("change_pct"),
+                "patterns":      pat.get("patterns", []),
+                "base_score":    base_score,
+                "final_score":   s.get("final_score"),
+                "score_breakdown": s.get("score_breakdown"),
+                "regime":        s.get("regime") or self.regime._cache.get("regime", "unknown"),
+                "support":       s.get("support"),
+                "resistance":    s.get("resistance"),
+                "risk_reward":   s.get("risk_reward"),
+                "stop_pct":      s.get("stop_pct"),
+                "target_pct":    s.get("target_pct"),
+                "session":       sess,
+                "confidence":    d.get("confidence"),
+                "strategy_used": d.get("strategy_used"),
+                "reasoning":     (d.get("reasoning") or "")[:500] or None,
+                "entry_price":   current_price,
+            }
+        except Exception:
+            return None
+
     # ── Two-speed loop helpers ─────────────────────────────────────────────────
 
     def _was_recently_analyzed(self, symbol: str, window_seconds: int = 180) -> bool:
@@ -636,6 +673,10 @@ class TradingAgent:
                             self._trail_pcts[symbol] = trail_pct
                             if order and self.memory:
                                 try:
+                                    entry_snap = self._build_entry_snapshot(
+                                        symbol, indicators, patterns, session_ctx,
+                                        synth, decision, current_price, base_score=score,
+                                    )
                                     self.memory.log_trade_open(
                                         trade_id=str(uuid.uuid4()),
                                         symbol=symbol,
@@ -648,6 +689,7 @@ class TradingAgent:
                                             "score": final_score,
                                             "regime": self.regime._cache.get("regime", "unknown"),
                                         },
+                                        entry_snapshot=entry_snap,
                                     )
                                 except Exception as me:
                                     logger.warning(f"[FAST] Memory log entry ({symbol}): {me}")
@@ -1459,6 +1501,10 @@ class TradingAgent:
                 try:
                     trade_id = str(uuid.uuid4())
                     alpaca_id = getattr(order, "id", None)
+                    entry_snap = self._build_entry_snapshot(
+                        symbol, data["indicators"], data["patterns"], session_ctx,
+                        data.get("synthesis"), None, current_price, base_score=opp_score_short,
+                    )
                     self.memory.log_trade_open(
                         trade_id=trade_id,
                         symbol=symbol,
@@ -1472,6 +1518,7 @@ class TradingAgent:
                             "score": opp_score_short,
                             "regime": self.regime._cache.get("regime", "unknown"),
                         },
+                        entry_snapshot=entry_snap,
                     )
                 except Exception as me:
                     logger.warning(f"Memory log short entry: {me}")

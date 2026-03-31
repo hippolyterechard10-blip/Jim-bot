@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS trades (
     hold_duration_min REAL,
     close_reason TEXT,
     market_context TEXT,
+    entry_snapshot TEXT,
+    exit_vs_target REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS agent_decisions (
@@ -69,6 +71,11 @@ class TradingMemory:
     def _init_db(self):
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            for col, ctype in [("entry_snapshot", "TEXT"), ("exit_vs_target", "REAL")]:
+                try:
+                    conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {ctype}")
+                except Exception:
+                    pass
 
     @contextmanager
     def _conn(self):
@@ -86,15 +93,16 @@ class TradingMemory:
 
     def log_trade_open(self, trade_id, symbol, side, qty, entry_price,
                        stop_loss=None, take_profit=None,
-                       alpaca_order_id=None, market_context=None):
+                       alpaca_order_id=None, market_context=None, entry_snapshot=None):
         try:
             with self._conn() as conn:
                 conn.execute(
-                    "INSERT INTO trades (trade_id,alpaca_order_id,symbol,side,qty,entry_price,stop_loss,take_profit,status,entry_at,market_context) VALUES (?,?,?,?,?,?,?,?,'open',?,?)",
+                    "INSERT INTO trades (trade_id,alpaca_order_id,symbol,side,qty,entry_price,stop_loss,take_profit,status,entry_at,market_context,entry_snapshot) VALUES (?,?,?,?,?,?,?,?,'open',?,?,?)",
                     (trade_id, alpaca_order_id, symbol, side, qty, entry_price,
                      stop_loss, take_profit,
                      datetime.now(timezone.utc).isoformat(),
-                     json.dumps(market_context) if market_context else None)
+                     json.dumps(market_context) if market_context else None,
+                     json.dumps(entry_snapshot) if entry_snapshot else None)
                 )
             return True
         except Exception as e:
@@ -105,7 +113,7 @@ class TradingMemory:
         try:
             with self._conn() as conn:
                 row = conn.execute(
-                    "SELECT entry_at, entry_price, qty, side FROM trades WHERE trade_id=?",
+                    "SELECT entry_at, entry_price, qty, side, take_profit FROM trades WHERE trade_id=?",
                     (trade_id,)
                 ).fetchone()
                 if not row:
@@ -118,10 +126,17 @@ class TradingMemory:
                     pnl = (exit_price - row["entry_price"]) * row["qty"] * m
                 if pnl_pct is None and row["entry_price"] > 0:
                     pnl_pct = (pnl / (row["entry_price"] * row["qty"])) * 100
+                take_profit_val = row["take_profit"]
+                exit_vs_target = None
+                if take_profit_val and take_profit_val > 0 and row["entry_price"] > 0:
+                    target_gain = (take_profit_val - row["entry_price"]) / row["entry_price"]
+                    actual_gain = (exit_price - row["entry_price"]) / row["entry_price"]
+                    exit_vs_target = round((actual_gain / target_gain) * 100, 1) if target_gain != 0 else None
                 conn.execute(
-                    "UPDATE trades SET exit_price=?,exit_at=?,hold_duration_min=?,close_reason=?,pnl=?,pnl_pct=?,status='closed' WHERE trade_id=?",
+                    "UPDATE trades SET exit_price=?,exit_at=?,hold_duration_min=?,close_reason=?,pnl=?,pnl_pct=?,exit_vs_target=?,status='closed' WHERE trade_id=?",
                     (exit_price, exit_at.isoformat(), duration, close_reason,
-                     round(pnl,4), round(pnl_pct,4) if pnl_pct else None, trade_id)
+                     round(pnl,4), round(pnl_pct,4) if pnl_pct else None,
+                     exit_vs_target, trade_id)
                 )
             return True
         except Exception as e:
