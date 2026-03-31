@@ -1148,6 +1148,15 @@ class TradingAgent:
             opp_score = synth["final_score"]
             data["opportunity_score"] = opp_score
 
+            # ── Gapper override: always reach Claude regardless of regime ───
+            if any(m.get("is_gapper") and m["symbol"] == symbol for m in cached_movers_list):
+                opp_score = max(opp_score, score_long_min + 1)
+                data["opportunity_score"] = opp_score
+                logger.info(
+                    f"🚨 GAPPER OVERRIDE: {symbol} score forced to {opp_score} "
+                    f"— bypassing regime threshold"
+                )
+
             # ── Earnings day: hard skip (stocks only) ──────────────────────
             sym_base = symbol  # stocks use bare ticker; crypto keeps "BTC/USD"
             ea = earnings_alerts_map.get(sym_base)
@@ -1373,6 +1382,9 @@ class TradingAgent:
 
                 elif action == "sell" and confidence >= min_confidence:
                     self.broker.close_position(symbol)
+                    self._high_water.pop(symbol, None)
+                    self._trail_pcts.pop(symbol, None)
+                    self._partial_taken.discard(symbol)
 
             except Exception as e:
                 logger.error(f"Error on {symbol}: {e}")
@@ -1403,10 +1415,13 @@ class TradingAgent:
             above_sma20  = ind.get("above_sma20", True)
             current_price = ind.get("current_price", 0)
 
-            # Technical gate
-            if not (rsi > config.SHORT_ENTRY_RSI_MIN
-                    and not macd_bullish
-                    and not above_sma20):
+            # Technical gate: 2 of 3 conditions required
+            short_signals = sum([
+                rsi > config.SHORT_ENTRY_RSI_MIN,
+                not macd_bullish,
+                not above_sma20,
+            ])
+            if short_signals < 2:
                 continue
 
             # Confidence gate: if Claude was called, require conf < threshold
