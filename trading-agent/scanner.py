@@ -203,7 +203,7 @@ class MarketScanner:
         now = datetime.now(timezone.utc)
         if self._news_cache["cached_at"]:
             age = (now - self._news_cache["cached_at"]).total_seconds()
-            if age < 600:
+            if age < 180:
                 return self._news_cache["headlines"]
         headlines = []
         for feed_url in NEWS_FEEDS:

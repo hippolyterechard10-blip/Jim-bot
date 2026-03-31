@@ -43,7 +43,7 @@ def get_market_session() -> str:
 def is_good_stock_window() -> bool:
     """True si on est dans une bonne fenêtre pour trader les stocks."""
     session = get_market_session()
-    return session in ["open", "power_hour"]
+    return session in ["pre_market", "open", "power_hour"]
 
 
 def is_crypto_good_hours() -> bool:

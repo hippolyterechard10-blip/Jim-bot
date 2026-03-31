@@ -87,8 +87,10 @@ class RiskManager:
 
     def check_max_positions(self):
         positions = self.broker.get_positions()
-        if len(positions) >= config.MAX_POSITIONS:
-            logger.warning(f"⚠️ Max positions reached: {len(positions)}")
+        regime_params = _regime_detector.get_params()
+        max_pos = regime_params.get("max_positions", config.MAX_POSITIONS)
+        if len(positions) >= max_pos:
+            logger.warning(f"⚠️ Max positions: {len(positions)}/{max_pos} ({regime_params['regime']} regime)")
             return False
         return True
 

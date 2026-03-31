@@ -9,7 +9,7 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 
 # Trading rules
-MAX_LEVERAGE = 3
+
 MAX_POSITION_PCT = 0.30
 GLOBAL_STOP_LOSS_PCT = 0.20
 TRADE_STOP_LOSS_PCT = 0.05

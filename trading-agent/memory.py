@@ -273,7 +273,7 @@ class TradingMemory:
 
     def get_context_for_agent(self, symbol=None):
         stats = self.compute_performance_stats(symbol)
-        recent = self.get_recent_trades(limit=5, symbol=symbol)
+        recent = self.get_recent_trades(limit=20, symbol=symbol)
         memory = self.get_all_memory()
         lines = ["=== AGENT MEMORY ==="]
         if stats.get("total_trades", 0) > 0:
