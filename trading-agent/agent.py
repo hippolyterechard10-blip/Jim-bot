@@ -49,6 +49,14 @@ class TradingAgent:
         self._low_water: dict = {}
         # Symbols for which partial profit has already been taken this session
         self._partial_taken: set = set()
+        if self.memory:
+            try:
+                saved = self.memory.get_memory("partial_taken_today", default=[])
+                today = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
+                saved_date = self.memory.get_memory("partial_taken_date", default="")
+                self._partial_taken = set(saved) if saved_date == today else set()
+            except:
+                pass
         # Score-based trailing stop % per symbol (set at entry, read during management)
         self._trail_pcts: dict = {}
         # Daily dedup: date string (YYYY-MM-DD ET) when cash liberation last fired
@@ -688,6 +696,12 @@ class TradingAgent:
                         )
                         order = self.broker.place_order(symbol, sell_qty, "sell")
                         self._partial_taken.add(symbol)
+                        if self.memory:
+                            try:
+                                self.memory.set_memory("partial_taken_today", list(self._partial_taken), "state")
+                                self.memory.set_memory("partial_taken_date", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d"), "state")
+                            except:
+                                pass
 
                         # ── Update SQLite: close old record, reopen with remaining qty ──
                         if self.memory:
@@ -1398,8 +1412,7 @@ class TradingAgent:
             short_candidates += 1
             qty, short_pct = self.risk.get_short_position_size(symbol, current_price)
             amount = qty * current_price
-            geo_sl = data.get("synthesis", {}).get("stop_loss")
-            sl     = geo_sl if geo_sl else self.risk.calculate_stop_loss(current_price, "sell")
+            sl = self.risk.calculate_stop_loss(current_price, "sell")
             opp_score_short = symbols_data[symbol]["opportunity_score"]
 
             logger.info(
