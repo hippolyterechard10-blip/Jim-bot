@@ -48,10 +48,10 @@ def is_good_stock_window() -> bool:
 
 def is_crypto_good_hours() -> bool:
     """
-    Crypto trade 24/7 mais évite 2h-6h UTC (volume mort).
+    Crypto trade 24/7. 2h-6h UTC still allowed at reduced size (40%).
+    BTC sustains $300-800M/hour even during these hours.
     """
-    hour_utc = datetime.now(timezone.utc).hour
-    return not (2 <= hour_utc < 6)
+    return True
 
 
 def get_session_context() -> dict:

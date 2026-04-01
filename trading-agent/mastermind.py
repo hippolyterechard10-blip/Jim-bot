@@ -286,8 +286,14 @@ class Mastermind:
             if self.geometric.has_capital():
                 candidates = self.geometric.flush_candidates()
                 logger.info(f"[MASTERMIND] 📐 Evaluating {len(candidates)} geo candidates this cycle")
+                # Night multiplier: 2h-6h UTC = 40% size (low liquidity window)
+                _hour_utc = dt.datetime.now(timezone.utc).hour
+                _night_mult = 0.4 if 2 <= _hour_utc < 6 else 1.0
+                _eff_modifier = round(self._size_modifier * _night_mult, 4)
+                if _night_mult < 1.0:
+                    logger.info(f"[MASTERMIND] 🌙 Night window (02-06 UTC) — size modifier {self._size_modifier:.2f} × 0.40 = {_eff_modifier:.2f}")
                 for symbol in candidates:
-                    self.geometric.evaluate(symbol, size_modifier=self._size_modifier)
+                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 
