@@ -409,10 +409,9 @@ class GeometricExpert:
                 try:
                     _stop_side = "sell" if side == "long" else "buy"
                     _sp = round(stop_price, 4) if is_crypto else round(stop_price, 2)
-                    _tif = "gtc" if is_crypto else "day"
                     _stop_ord = self.broker.api.submit_order(
                         symbol=symbol, qty=qty, side=_stop_side,
-                        type="stop", stop_price=_sp, time_in_force=_tif,
+                        type="stop", stop_price=_sp, time_in_force="gtc",
                     )
                     stop_order_id = getattr(_stop_ord, "id", None)
                     logger.info(f"[GEO] 🛑 Stop order placed: {symbol} stop=${_sp} id={stop_order_id}")
@@ -503,11 +502,10 @@ class GeometricExpert:
                                 new_stop_id = None
                                 try:
                                     _be = round(entry_price * (0.995 if _is_crypto else 0.997), 4 if _is_crypto else 2)
-                                    _tif = "gtc" if _is_crypto else "day"
                                     _stop_side = "sell" if side == "long" else "buy"
                                     _ord = self.broker.api.submit_order(
                                         symbol=symbol, qty=remaining, side=_stop_side,
-                                        type="stop", stop_price=_be, time_in_force=_tif,
+                                        type="stop", stop_price=_be, time_in_force="gtc",
                                     )
                                     new_stop_id = getattr(_ord, "id", None)
                                     logger.info(f"[GEO] 🛑 Breakeven stop placed for remaining {remaining} {symbol} @ ${_be} id={new_stop_id}")

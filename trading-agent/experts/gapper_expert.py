@@ -238,7 +238,7 @@ class GapperExpert:
             try:
                 _stop_ord = self.broker.api.submit_order(
                     symbol=symbol, qty=qty, side="sell",
-                    type="stop", stop_price=round(stop_price, 2), time_in_force="day",
+                    type="stop", stop_price=round(stop_price, 2), time_in_force="gtc",
                 )
                 stop_order_id = getattr(_stop_ord, "id", None)
                 logger.info(f"[GAPPER] 🛑 Stop order placed: {symbol} stop=${stop_price:.4f} id={stop_order_id}")
@@ -360,7 +360,7 @@ class GapperExpert:
                                 _be_stop = round(entry_price, 2)
                                 _be_ord = self.broker.api.submit_order(
                                     symbol=symbol, qty=remaining_qty, side="sell",
-                                    type="stop", stop_price=_be_stop, time_in_force="day",
+                                    type="stop", stop_price=_be_stop, time_in_force="gtc",
                                 )
                                 new_stop_id = getattr(_be_ord, "id", None)
                                 logger.info(f"[GAPPER] 🛑 Breakeven stop placed for remaining {remaining_qty} {symbol} @ ${_be_stop} id={new_stop_id}")
