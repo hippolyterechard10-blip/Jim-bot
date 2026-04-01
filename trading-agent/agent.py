@@ -1269,6 +1269,13 @@ class TradingAgent:
         # NOTE: Trailing stop management is handled exclusively by the fast loop (every 30s).
         # No trailing stop call here to avoid double-firing on simultaneous startup.
 
+        if getattr(config, 'TRADING_ENGINE', 'V1') == 'V2':
+            # V2 mode: position sync and reconciliation only — trading delegated to Mastermind experts
+            self._sync_orphan_positions()
+            self._reconcile_stale_positions()
+            logger.info("[SLOW] V2 mode — trade logic skipped, Mastermind handles entries")
+            return
+
         if not self.risk.can_trade():
             logger.warning("[SLOW] ⚠️ Trading paused by risk manager")
             return

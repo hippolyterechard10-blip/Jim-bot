@@ -1441,11 +1441,11 @@ function ExpertCard({ name, icon, data }: { name: string; icon: string; data: Ex
   );
 }
 
-function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis, experts }: {
+function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis, experts = {} }: {
   trades: Trade[]; decisions: Decision[];
   stats: StatsResponse | null; positions: Position[]; portfolioValue: number;
   account: AccountResponse | null; analysis: AnalysisData | null;
-  experts: ExpertsResponse;
+  experts?: ExpertsResponse;
 }) {
   const totalReturn    = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
   const grossPnl       = portfolioValue - INITIAL_CAPITAL;
