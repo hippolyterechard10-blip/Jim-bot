@@ -124,8 +124,15 @@ router.get("/positions", async (_req, res) => {
       return;
     }
     const raw = (await r.json()) as Record<string, string>[];
+    const normSym = (s: string): string => {
+      if (!s.includes("/")) {
+        if (s.endsWith("USDT")) return s.slice(0, -4) + "/USDT";
+        if (s.endsWith("USD") && s.length > 3) return s.slice(0, -3) + "/USD";
+      }
+      return s;
+    };
     const positions = raw.map(p => ({
-      symbol:          p.symbol,
+      symbol:          normSym(p.symbol),
       side:            p.side,
       qty:             parseFloat(p.qty),
       entry_price:     parseFloat(p.avg_entry_price),
