@@ -172,18 +172,23 @@ class TradingAgent:
 
     def _sync_todays_orders(self):
         """
-        Startup reconciliation: fetch today's filled Alpaca orders and create
+        Startup reconciliation: fetch filled Alpaca orders since V2 epoch and create
         any missing DB records. Handles the crash-between-place_order-and-log case.
-        - Filled BUY with no DB record → create open record
+        - Filled BUY with no DB record → create open record (crash recovery)
         - Filled SELL with DB open match → create close record
-        - Filled SELL with no DB match → create synthetic open+close pair
+        - Filled SELL with no DB match → skip (pre-V2 / old-agent order)
         """
         if not self.memory:
             return
         try:
-            from datetime import date as _date
-            today_str = _date.today().isoformat() + "T00:00:00Z"
-            orders = self.broker.api.list_orders(status="filled", after=today_str, limit=100)
+            # Use V2 epoch so pre-V2 orders are never imported
+            conn_e = sqlite3.connect(self.memory.db_path, timeout=5)
+            epoch_row = conn_e.execute(
+                "SELECT value FROM agent_memory WHERE key='v2_epoch'"
+            ).fetchone()
+            conn_e.close()
+            after_ts = epoch_row[0] if epoch_row else (datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            orders = self.broker.api.list_orders(status="filled", after=after_ts, limit=100)
             if not orders:
                 return
 
@@ -281,22 +286,11 @@ class TradingAgent:
                             f"pnl={pnl:+.4f}"
                         )
                     else:
-                        # No DB open record: create synthetic open+close pair
-                        # Use fill_price as both entry and exit (unknown entry)
-                        new_id = str(uuid.uuid4())
-                        c.execute(
-                            """INSERT INTO trades
-                               (trade_id, alpaca_order_id, symbol, side, qty, entry_price,
-                                exit_price, pnl, pnl_pct, status, close_reason,
-                                entry_at, exit_at, hold_duration_min, market_context)
-                               VALUES (?,?,?,?,?,?,?,0,0,'closed','synced_close',?,?,0,?)""",
-                            (new_id, order_id, display_sym, "buy", fill_qty,
-                             fill_price, fill_price, filled_at, filled_at,
-                             json.dumps({"source": "order_sync_synthetic"}))
-                        )
-                        logger.info(
-                            f"[OrderSync] Synthetic close (no open match): {display_sym} "
-                            f"sell {fill_qty} @ {fill_price:.4f}"
+                        # No DB open record = order from a previous agent instance.
+                        # Skip — do not pollute the current agent's analytics.
+                        logger.debug(
+                            f"[OrderSync] Skipping sell with no DB match: {display_sym} "
+                            f"sell {fill_qty} @ {fill_price:.4f} (pre-V2 order)"
                         )
 
             conn.commit()

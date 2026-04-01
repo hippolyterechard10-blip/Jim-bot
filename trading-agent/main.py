@@ -77,6 +77,26 @@ def main():
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
+    # Store V2 epoch on first-ever startup (persists across restarts, never overwritten)
+    try:
+        import sqlite3 as _sq, datetime as _dt
+        _db = memory.db_path if hasattr(memory, "db_path") else "trading_memory.db"
+        with _sq.connect(_db) as _ec:
+            _existing = _ec.execute(
+                "SELECT value FROM agent_memory WHERE key='v2_epoch'"
+            ).fetchone()
+            if not _existing:
+                _now = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                _ec.execute(
+                    "INSERT INTO agent_memory (key,value,category,updated_at) VALUES (?,?,?,?)",
+                    ("v2_epoch", _now, "system", _now)
+                )
+                logger.info(f"📌 V2 epoch set: {_now} (first-time marker, orders before this are pre-V2)")
+            else:
+                logger.info(f"📌 V2 epoch loaded: {_existing[0]}")
+    except Exception as _ee:
+        logger.warning(f"V2 epoch init failed: {_ee}")
+
     # On startup: sync today's filled Alpaca orders into DB (handles crash recovery)
     logger.info("🔄 Syncing today's Alpaca orders with DB...")
     agent._sync_todays_orders()
