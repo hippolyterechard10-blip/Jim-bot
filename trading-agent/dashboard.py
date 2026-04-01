@@ -474,6 +474,47 @@ def source_file(filename):
     except Exception:
         return "File not found", 404
 
+@app.route("/api/experts/stats")
+def api_experts_stats():
+    """Returns independent P&L and capital for each expert."""
+    if not _memory:
+        return jsonify({})
+    try:
+        import json
+        all_trades = _memory.get_recent_trades(limit=200)
+        result = {}
+        for source in ["gapper", "geometric"]:
+            trades = []
+            for t in all_trades:
+                ctx = t.get("market_context") or {}
+                if isinstance(ctx, str):
+                    try: ctx = json.loads(ctx)
+                    except: ctx = {}
+                if ctx.get("strategy_source") == source:
+                    trades.append(t)
+
+            closed  = [t for t in trades if t.get("status") == "closed"
+                       and t.get("close_reason") not in ("partial_profit_remainder",)]
+            pnls    = [t.get("pnl") or 0 for t in closed]
+            wins    = [p for p in pnls if p > 0]
+            losses  = [p for p in pnls if p < 0]
+            total_pnl = sum(pnls)
+            capital_now = 500.0 + total_pnl
+
+            result[source] = {
+                "total_trades":  len(closed),
+                "total_pnl":     round(total_pnl, 4),
+                "win_rate":      round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
+                "capital_start": 500.0,
+                "capital_now":   round(capital_now, 2),
+                "capital_return": round((capital_now - 500) / 500 * 100, 2),
+                "open_trades":   len([t for t in trades if t.get("status") == "open"]),
+            }
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"api_experts_stats error: {e}")
+        return jsonify({"error": str(e)})
+
 def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
     init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
     def run():
