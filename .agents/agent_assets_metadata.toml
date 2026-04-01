@@ -12,3 +12,9 @@ id = "yaZO8uudJIWI3wvdrw5GD"
 uri = "file://jim_bot_export.txt"
 type = "text"
 title = "Jim Bot — Full Source Export"
+
+[[outputs]]
+id = "kLyEljESrB6l9RP43LVij"
+uri = "file://jimbot_source_20260401.zip"
+type = "unspecified"
+title = "Jim Bot — Code source complet (1 avril 2026)"

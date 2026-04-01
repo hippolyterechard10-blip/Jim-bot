@@ -59,6 +59,16 @@ interface AccountResponse {
   live_equity?: number; live_unrealized?: number;
   positions_live?: PositionLive[];
 }
+interface ExpertStats {
+  total_trades: number; total_pnl: number; win_rate: number;
+  avg_win: number; avg_loss: number;
+  capital_start: number; capital_now: number; capital_return: number;
+  open_trades: number; live_unrealized: number;
+}
+interface ExpertsResponse {
+  gapper?: ExpertStats;
+  geometric?: ExpertStats;
+}
 interface ClosedTodayItem {
   symbol: string; pnl: number; trade_count: number;
   qty_sold: number; last_exit: string; reasons: string;
@@ -1356,10 +1366,86 @@ function MonthlyBarChart({ trades }: { trades: Trade[] }) {
   );
 }
 
-function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis }: {
+function ExpertCard({ name, icon, data }: { name: string; icon: string; data: ExpertStats | undefined }) {
+  if (!data) return (
+    <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/40 flex items-center justify-center text-slate-600 text-xs">
+      {icon} {name} — aucune donnée
+    </div>
+  );
+  const capPos = data.capital_now >= data.capital_start;
+  const retPos = data.capital_return >= 0;
+  const pnlPos = data.total_pnl >= 0;
+  const unrPos = data.live_unrealized >= 0;
+  return (
+    <div className={`rounded-xl border overflow-hidden ${capPos ? "border-emerald-700/40 bg-emerald-950/20" : "border-red-700/40 bg-red-950/10"}`}>
+      {/* Header */}
+      <div className={`px-4 py-3 flex items-center justify-between border-b ${capPos ? "border-emerald-800/30 bg-emerald-900/20" : "border-red-800/20 bg-red-900/10"}`}>
+        <span className="text-sm font-bold text-slate-200">{icon} {name}</span>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${capPos ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>
+          {retPos ? "+" : ""}{data.capital_return.toFixed(2)}%
+        </span>
+      </div>
+      {/* Capital row */}
+      <div className="px-4 py-3 border-b border-slate-700/20">
+        <div className="flex items-end justify-between">
+          <div>
+            <div className="text-[9px] uppercase text-slate-600 mb-0.5">Capital alloué</div>
+            <div className={`text-xl font-bold font-mono ${capPos ? "text-emerald-400" : "text-red-400"}`}>
+              ${data.capital_now.toFixed(2)}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[9px] uppercase text-slate-600 mb-0.5">Départ</div>
+            <div className="text-xs font-mono text-slate-500">${data.capital_start.toFixed(0)}</div>
+          </div>
+        </div>
+        {/* Capital progress bar */}
+        <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+          <div
+            className={`h-1 rounded-full transition-all ${capPos ? "bg-emerald-500" : "bg-red-500"}`}
+            style={{ width: `${Math.min(100, Math.max(0, (data.capital_now / Math.max(data.capital_start, data.capital_now)) * 100))}%` }}
+          />
+        </div>
+      </div>
+      {/* Stats grid */}
+      <div className="grid grid-cols-3 divide-x divide-slate-700/20">
+        <div className="px-3 py-2.5 text-center">
+          <div className="text-[9px] uppercase text-slate-600">P&L fermé</div>
+          <div className={`text-sm font-bold font-mono ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+            {pnlPos ? "+" : ""}{data.total_pnl.toFixed(2)}
+          </div>
+        </div>
+        <div className="px-3 py-2.5 text-center">
+          <div className="text-[9px] uppercase text-slate-600">Win rate</div>
+          <div className={`text-sm font-bold ${data.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
+            {data.win_rate.toFixed(0)}%
+          </div>
+          <div className="text-[9px] text-slate-600">{data.total_trades} trades</div>
+        </div>
+        <div className="px-3 py-2.5 text-center">
+          <div className="text-[9px] uppercase text-slate-600">Unrealized</div>
+          <div className={`text-sm font-bold font-mono ${unrPos ? "text-emerald-400" : data.live_unrealized < 0 ? "text-red-400" : "text-slate-400"}`}>
+            {data.live_unrealized !== 0 ? (unrPos ? "+" : "") + data.live_unrealized.toFixed(2) : "—"}
+          </div>
+          {data.open_trades > 0 && <div className="text-[9px] text-slate-600">{data.open_trades} open</div>}
+        </div>
+      </div>
+      {/* Avg win/loss */}
+      {(data.avg_win !== 0 || data.avg_loss !== 0) && (
+        <div className="px-4 py-2 border-t border-slate-700/20 flex gap-4 text-[10px]">
+          <span className="text-slate-600">Avg win: <span className="text-emerald-400 font-mono">+${data.avg_win.toFixed(2)}</span></span>
+          <span className="text-slate-600">Avg loss: <span className="text-red-400 font-mono">${data.avg_loss.toFixed(2)}</span></span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis, experts }: {
   trades: Trade[]; decisions: Decision[];
   stats: StatsResponse | null; positions: Position[]; portfolioValue: number;
   account: AccountResponse | null; analysis: AnalysisData | null;
+  experts: ExpertsResponse;
 }) {
   const totalReturn    = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
   const grossPnl       = portfolioValue - INITIAL_CAPITAL;
@@ -1496,6 +1582,18 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         </div>
       )}
 
+      {/* Experts Pillar section */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">🧠 Mastermind V2 — Experts</span>
+          <span className="text-[10px] text-slate-600">capital 50% / 50% · se capitalise sur leur P&L</span>
+        </div>
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <ExpertCard name="Gapper" icon="🚀" data={experts.gapper} />
+          <ExpertCard name="Geometric" icon="📐" data={experts.geometric} />
+        </div>
+      </div>
+
       {/* Daily P&L chart */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
@@ -1571,12 +1669,13 @@ export default function App() {
   const [closedToday,  setClosedToday]  = useState<ClosedTodayItem[]>([]);
   const [closedPeriod, setClosedPeriod] = useState<ClosedPeriod>("today");
   const [analysis,     setAnalysis]     = useState<AnalysisData | null>(null);
+  const [experts,      setExperts]      = useState<ExpertsResponse>({});
   const [lastRefresh,  setLastRefresh]  = useState<Date>(new Date());
   const [error,        setError]        = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes, anlRes] = await Promise.all([
+      const [sRes, dRes, pRes, mRes, senRes, regRes, stRes, ppRes, stopsRes, accRes, anlRes, expRes] = await Promise.all([
         fetch(`${BASE}/api/status`),
         fetch(`${BASE}/api/decisions`),
         fetch(`${BASE}/api/positions`),
@@ -1588,6 +1687,7 @@ export default function App() {
         fetch(`${BASE}/api/stops`),
         fetch(`${BASE}/api/account`),
         fetch(`${BASE}/api/analysis`),
+        fetch(`${BASE}/api/experts/stats`),
       ]);
       if (sRes.ok)     { const d = await sRes.json() as Status;   setStatus(d); }
       if (dRes.ok)     { const d = await dRes.json();             setDecisions(d.decisions ?? []); }
@@ -1600,6 +1700,7 @@ export default function App() {
       if (stopsRes.ok) { const d = await stopsRes.json(); setStops(d.stops ?? {}); }
       if (accRes.ok)   { const d = await accRes.json() as AccountResponse; if (d.portfolio_value > 0) setAccount(d); }
       if (anlRes.ok)   { const d = await anlRes.json(); if (d.total_trades !== undefined) setAnalysis(d as AnalysisData); }
+      if (expRes.ok)   { const d = await expRes.json() as ExpertsResponse; setExperts(d); }
       setError(false);
     } catch { setError(true); }
     setLastRefresh(new Date());
@@ -1649,7 +1750,7 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} />}
+        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} experts={experts} />}
         {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
         {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} />}

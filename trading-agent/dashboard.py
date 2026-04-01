@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
+import config
 from memory import TradingMemory
 from analyzer import TradeAnalyzer
 
@@ -521,12 +522,27 @@ def source_file(filename):
 
 @app.route("/api/experts/stats")
 def api_experts_stats():
-    """Returns independent P&L and capital for each expert."""
+    """Returns independent P&L and capital for each expert.
+    capital_start = 50% of current account equity (dynamic allocation).
+    capital_now   = capital_start + all closed P&L attributed to that expert.
+    """
     if not _memory:
         return jsonify({})
     try:
         import json
-        all_trades = _memory.get_recent_trades(limit=200)
+
+        # Dynamic 50% split of current equity
+        total_equity = config.INITIAL_CAPITAL
+        if _agent:
+            try:
+                acct = _agent.broker.get_account()
+                if acct:
+                    total_equity = float(acct.equity)
+            except Exception:
+                pass
+        capital_start = round(total_equity / 2, 2)
+
+        all_trades = _memory.get_recent_trades(limit=500)
         result = {}
         for source in ["gapper", "geometric"]:
             trades = []
@@ -538,22 +554,44 @@ def api_experts_stats():
                 if ctx.get("strategy_source") == source:
                     trades.append(t)
 
-            closed  = [t for t in trades if t.get("status") == "closed"
-                       and t.get("close_reason") not in ("partial_profit_remainder",)]
-            pnls    = [t.get("pnl") or 0 for t in closed]
-            wins    = [p for p in pnls if p > 0]
-            losses  = [p for p in pnls if p < 0]
+            closed = [t for t in trades if t.get("status") == "closed"
+                      and t.get("close_reason") not in ("partial_profit_remainder",)]
+            pnls   = [t.get("pnl") or 0 for t in closed]
+            wins   = [p for p in pnls if p > 0]
+            losses = [p for p in pnls if p < 0]
             total_pnl = sum(pnls)
-            capital_now = 500.0 + total_pnl
+            capital_now = capital_start + total_pnl
+
+            open_trades = [t for t in trades if t.get("status") == "open"]
+            # Live unrealized for open expert positions
+            live_unrealized = 0.0
+            if _agent:
+                for ot in open_trades:
+                    sym = ot.get("symbol", "")
+                    qty = float(ot.get("qty") or 0)
+                    entry = float(ot.get("entry_price") or 0)
+                    if not sym or not qty or not entry:
+                        continue
+                    try:
+                        lp = _agent.broker.get_live_price(sym) if "/" in sym else None
+                        if lp:
+                            side_m = 1.0 if ot.get("side") == "buy" else -1.0
+                            live_unrealized += (lp - entry) * qty * side_m
+                    except Exception:
+                        pass
 
             result[source] = {
-                "total_trades":  len(closed),
-                "total_pnl":     round(total_pnl, 4),
-                "win_rate":      round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
-                "capital_start": 500.0,
-                "capital_now":   round(capital_now, 2),
-                "capital_return": round((capital_now - 500) / 500 * 100, 2),
-                "open_trades":   len([t for t in trades if t.get("status") == "open"]),
+                "total_trades":    len(closed),
+                "total_pnl":       round(total_pnl, 4),
+                "win_rate":        round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
+                "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
+                "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
+                "capital_start":   capital_start,
+                "capital_now":     round(capital_now, 2),
+                "capital_return":  round((capital_now - capital_start) / capital_start * 100, 2)
+                                   if capital_start > 0 else 0,
+                "open_trades":     len(open_trades),
+                "live_unrealized": round(live_unrealized, 4),
             }
         return jsonify(result)
     except Exception as e:
