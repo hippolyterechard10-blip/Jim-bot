@@ -80,6 +80,24 @@ def main():
     # On startup: sync today's filled Alpaca orders into DB (handles crash recovery)
     logger.info("🔄 Syncing today's Alpaca orders with DB...")
     agent._sync_todays_orders()
+    # Deduplicate synced_close records (prevent restart-loop duplicates)
+    try:
+        import sqlite3 as _sqlite3
+        _db_path = memory.db_path if hasattr(memory, "db_path") else "trading_memory.db"
+        with _sqlite3.connect(_db_path) as _c:
+            _deleted = _c.execute("""
+                DELETE FROM trades
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM trades
+                    WHERE close_reason = 'synced_close'
+                    GROUP BY alpaca_order_id
+                )
+                AND close_reason = 'synced_close'
+            """).rowcount
+            if _deleted:
+                logger.info(f"🧹 Dedup: {_deleted} synced_close doublon(s) supprimé(s)")
+    except Exception as _e:
+        logger.warning(f"Dedup synced_close failed: {_e}")
     # Also mark any DB-open records that no longer exist in Alpaca as closed
     agent._reconcile_stale_positions()
 
