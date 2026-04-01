@@ -8,6 +8,8 @@ Agent.py is untouched.
 import logging
 import datetime as dt
 from datetime import timezone
+import sqlite3
+import json
 import pytz
 import config
 from experts.gapper_expert import GapperExpert
@@ -47,6 +49,109 @@ class Mastermind:
             f"Geo=${config.STRATEGY_CAPITAL['geometric']:.2f} | "
             f"Total=${sum(config.STRATEGY_CAPITAL.values()):.2f}"
         )
+        self._place_missing_stops()
+
+    # ── Retroactive stop placement ─────────────────────────────────────────
+
+    def _place_missing_stops(self):
+        """
+        One-shot at startup: find open geo trades with a stop_loss but no
+        alpaca_stop_order_id and place a stop_limit sell order for each.
+        Crypto uses stop_limit (Alpaca rejects plain stop orders for crypto).
+        """
+        if not self.memory or not self.broker:
+            return
+        try:
+            open_trades = self.memory.get_open_trades()
+            alpaca_positions = {
+                p.symbol.replace("/", "").upper(): p
+                for p in (self.broker.get_positions() or [])
+            }
+
+            for trade in open_trades:
+                ctx = trade.get("market_context") or {}
+                if isinstance(ctx, str):
+                    try:
+                        ctx = json.loads(ctx)
+                    except Exception:
+                        ctx = {}
+
+                # Only geo trades with a stop_loss and no existing stop order
+                if ctx.get("strategy_source") != "geometric":
+                    continue
+                stop_price = trade.get("stop_loss")
+                if not stop_price or stop_price <= 0:
+                    continue
+                if ctx.get("alpaca_stop_order_id"):
+                    continue
+
+                symbol = trade["symbol"]
+                is_crypto = "/" in symbol
+
+                # Use live qty from Alpaca position (most accurate)
+                sym_key = symbol.replace("/", "").upper()
+                alpaca_pos = alpaca_positions.get(sym_key)
+                if not alpaca_pos:
+                    logger.warning(f"[MASTERMIND] ⚠️ No Alpaca position for {symbol}, skipping retroactive stop")
+                    continue
+                live_qty = abs(float(alpaca_pos.qty))
+
+                # Decimal precision by price magnitude (matches geometric_expert logic)
+                if is_crypto:
+                    if stop_price < 0.001:
+                        _dp = 10
+                    elif stop_price < 0.1:
+                        _dp = 8
+                    elif stop_price < 1.0:
+                        _dp = 6
+                    else:
+                        _dp = 4
+                else:
+                    _dp = 2
+
+                _sp  = round(stop_price, _dp)
+                _lmt = round(stop_price * 0.995, _dp)  # 0.5% below for guaranteed fill
+
+                try:
+                    if is_crypto:
+                        order = self.broker.api.submit_order(
+                            symbol=symbol,
+                            qty=live_qty,
+                            side="sell",
+                            type="stop_limit",
+                            stop_price=_sp,
+                            limit_price=_lmt,
+                            time_in_force="gtc",
+                        )
+                    else:
+                        order = self.broker.api.submit_order(
+                            symbol=symbol,
+                            qty=live_qty,
+                            side="sell",
+                            type="stop",
+                            stop_price=_sp,
+                            time_in_force="gtc",
+                        )
+
+                    stop_order_id = getattr(order, "id", None)
+                    logger.info(
+                        f"[MASTERMIND] 🛡️ Retroactive stop placed for {symbol} at {_sp} "
+                        f"(limit={_lmt}) qty={live_qty} id={stop_order_id}"
+                    )
+
+                    # Persist the stop order ID back into market_context
+                    ctx["alpaca_stop_order_id"] = stop_order_id
+                    with sqlite3.connect(self.memory.db_path, timeout=15) as _conn:
+                        _conn.execute(
+                            "UPDATE trades SET market_context=? WHERE trade_id=?",
+                            (json.dumps(ctx), trade["trade_id"]),
+                        )
+
+                except Exception as _oe:
+                    logger.error(f"[MASTERMIND] ❌ Retroactive stop failed for {symbol}: {_oe}")
+
+        except Exception as e:
+            logger.error(f"[MASTERMIND] _place_missing_stops error: {e}")
 
     # ── Daily reset ────────────────────────────────────────────────────────
 
