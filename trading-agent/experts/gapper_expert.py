@@ -62,6 +62,14 @@ class GapperExpert:
             return
 
         symbol = candidate.get("symbol", "")
+
+        # Guard: block double-entry — skip if an open trade already exists for this symbol
+        if self.memory:
+            open_syms = {t.get("symbol") for t in self.memory.get_open_trades()}
+            if symbol in open_syms:
+                logger.debug(f"[GAPPER] {symbol} — already have open position, skip")
+                return
+
         change_pct = candidate.get("change_pct", 0)
         float_shares = candidate.get("float_shares")
 
