@@ -133,6 +133,7 @@ def main():
                 )
 
             agent.run_cycle(skip_symbols=skip_symbols)
+            mastermind.run()
             analyzer.run_pending_analyses()
 
             anomalies = analyzer.detect_performance_anomalies()
