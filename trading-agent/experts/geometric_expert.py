@@ -484,6 +484,60 @@ class GeometricExpert:
                 stop_order_id = ctx_data.get("alpaca_stop_order_id")
                 _is_crypto = "/" in symbol
 
+                # ── Thesis invalidation: level broken ─────────────────────────────────
+                # "The level holds or it doesn't." Exit if the 5-min close bar has moved
+                # THROUGH the entry level, but only after 15-min minimum hold and only if
+                # the trade has not already moved more than 50% toward the target (in which
+                # case the trailing stop manages it).
+                _level = ctx_data.get("level")
+                _entry_at_str = match.get("entry_at") or match.get("created_at")
+                if _level and _entry_at_str and not partial_taken:
+                    try:
+                        from datetime import datetime, timezone as _tz
+                        _entry_dt = datetime.fromisoformat(str(_entry_at_str).replace("Z", "+00:00"))
+                        _hold_min = (datetime.now(_tz.utc) - _entry_dt).total_seconds() / 60
+                    except Exception:
+                        _hold_min = 99  # can't parse → assume old enough
+
+                    if _hold_min >= 15:
+                        # Skip if already past 50% of target distance (trade is working)
+                        _target_dist = abs(target_mid - entry_price) if target_mid else None
+                        _unrealized = abs(current_price - entry_price)
+                        _toward_target = (
+                            (side == "long" and current_price > entry_price) or
+                            (side == "short" and current_price < entry_price)
+                        )
+                        _well_in_profit = (
+                            _target_dist and _toward_target and
+                            _unrealized > _target_dist * 0.50
+                        )
+
+                        if not _well_in_profit:
+                            # Fetch the latest 5-min bar close for confirmation
+                            _bars5 = self.broker.get_bars(symbol, "5Min", limit=2)
+                            if _bars5 is not None and not _bars5.empty:
+                                _close5 = float(_bars5["close"].iloc[-1])
+                                _broken = (
+                                    (side == "long" and _close5 < _level) or
+                                    (side == "short" and _close5 > _level)
+                                )
+                                if _broken:
+                                    _dir = "below support" if side == "long" else "above resistance"
+                                    logger.info(
+                                        f"[GEO] 🔴 LEVEL BROKEN: {symbol} closed ${_close5:.4f} "
+                                        f"{_dir} ${_level:.4f} — thesis invalid, exiting"
+                                    )
+                                    self._cancel_stop_order(stop_order_id, symbol)
+                                    self.broker.close_position(symbol)
+                                    if self.memory:
+                                        _pnl = (current_price - entry_price) * qty * (
+                                            1 if side == "long" else -1)
+                                        self.memory.log_trade_close(
+                                            match["trade_id"], current_price,
+                                            "level_broken", pnl=_pnl
+                                        )
+                                    continue
+
                 # Partial at midpoint target → sell 50%, cancel old stop, re-place at breakeven
                 if target_mid and not partial_taken:
                     if (side == "long" and current_price >= target_mid) or \
