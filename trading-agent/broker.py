@@ -59,8 +59,8 @@ class AlpacaBroker:
             )
             if stop_loss and take_profit and "/" not in symbol:  # stocks only — crypto stops managed in memory
                 order_params["order_class"] = "bracket"
-                order_params["stop_loss"] = {"stop_price": round(stop_loss, 4)}
-                order_params["take_profit"] = {"limit_price": round(take_profit, 4)}
+                order_params["stop_loss"] = {"stop_price": round(stop_loss, 2)}
+                order_params["take_profit"] = {"limit_price": round(take_profit, 2)}
             order = self.api.submit_order(**order_params)
             logger.info(f"✅ Order: {side} {qty} {symbol} | stop={stop_loss} target={take_profit}")
             return order

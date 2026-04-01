@@ -662,6 +662,17 @@ class TradingAgent:
                                 if stop_pct < trail_pct:
                                     trail_pct = stop_pct
                             amount = qty * current_price
+                            # ── Buying power guard ───────────────────────────────
+                            try:
+                                bp = float(self.broker.api.get_account().buying_power)
+                                if amount > bp * 0.95:
+                                    logger.warning(
+                                        f"[FAST] ⚠️ Skip {symbol}: need ${amount:.2f} "
+                                        f"but only ${bp:.2f} buying power available"
+                                    )
+                                    return
+                            except Exception:
+                                pass
                             rr_str = f" | R:R={synth.get('risk_reward', 0):.1f}x" if synth.get("risk_reward") else ""
                             tp_str = f" | target=${geo_tp:.4f}" if geo_tp else ""
                             logger.info(
@@ -1411,6 +1422,18 @@ class TradingAgent:
                             trail_pct               = geo_stop_pct / 100
                             self._trail_pcts[symbol] = trail_pct
 
+                    # ── Buying power guard ──────────────────────────────────
+                    try:
+                        bp = float(self.broker.api.get_account().buying_power)
+                        if amount > bp * 0.95:
+                            logger.warning(
+                                f"⚠️ Skip {symbol}: need ${amount:.2f} "
+                                f"but only ${bp:.2f} buying power available"
+                            )
+                            continue
+                    except Exception:
+                        pass
+
                     rr_str = f" | R:R={synth.get('risk_reward', 0):.1f}x" if synth.get("risk_reward") else ""
                     tp_str = f" | target=${geo_tp:.4f}" if geo_tp else ""
                     logger.info(
@@ -1434,6 +1457,9 @@ class TradingAgent:
                 logger.error(f"Error on {symbol}: {e}")
 
         # ── SHORT SELLING PASS ─────────────────────────────────────────────────
+        if not getattr(config, "ALLOW_SHORTS", False):
+            return  # Shorts disabled — Alpaca account not configured for shorting
+
         # Separate pass over ALL scanned symbols (incl. pre-filtered ones).
         # Short only stocks/ETFs — Alpaca spot does NOT support crypto shorts.
         # Entry conditions: RSI > 70 AND MACD bearish AND price below SMA20
