@@ -75,15 +75,19 @@ interface ClosedTodayItem {
   symbol: string; pnl: number; trade_count: number;
   qty_sold: number; last_exit: string; reasons: string;
 }
+interface GeoContext {
+  confluence: number | null; structure: string | null;
+  rsi_divergence: boolean | null; atr: number | null;
+  target_midpoint: number | null; patterns: string[]; level: number | null;
+}
 interface IndividualTrade {
   trade_id: string; symbol: string; side: string; qty: number;
   entry_price: number | null; exit_price: number | null;
   pnl: number | null; pnl_pct: number | null; hold_min: number | null;
   close_reason: string | null; entry_at: string; exit_at: string;
   exit_vs_target: number | null;
-  score: number | null; regime: string | null; session: string | null;
-  patterns: string[]; rr: number | null; confidence: number | null;
   strategy_source: string | null;
+  geo_context: GeoContext | null;
 }
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
@@ -443,6 +447,8 @@ function AnalysisPage() {
   const [loading,      setLoading]      = useState(true);
   const [gapBreakdown, setGapBreakdown] = useState<AnalysisData | null>(null);
   const [geoBreakdown, setGeoBreakdown] = useState<AnalysisData | null>(null);
+  const [gapTodayTrades,  setGapTodayTrades]  = useState<IndividualTrade[]>([]);
+  const [geoRecentTrades, setGeoRecentTrades] = useState<IndividualTrade[]>([]);
 
   // Filtered data — re-fetches when expert tab changes
   useEffect(() => {
@@ -470,6 +476,24 @@ function AnalysisPage() {
     }).catch(() => {});
   }, []);
 
+  // Individual trades for expert panels — polls every 30s
+  useEffect(() => {
+    const refresh = () => {
+      Promise.all([
+        fetch(`${BASE}/api/trades/individual?period=today&limit=50`).then(r => r.json()),
+        fetch(`${BASE}/api/trades/individual?period=week&limit=50`).then(r => r.json()),
+      ]).then(([td, wd]) => {
+        const today = (td.trades || []) as IndividualTrade[];
+        const week  = (wd.trades  || []) as IndividualTrade[];
+        setGapTodayTrades(today.filter(t => t.strategy_source === "gapper"));
+        setGeoRecentTrades(week.filter(t => t.strategy_source === "geometric"));
+      }).catch(() => {});
+    };
+    refresh();
+    const id = setInterval(refresh, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   const accentLabel = expert === "gap"
     ? <span className="text-amber-400 font-semibold">🚀 Gap — Stocks</span>
     : expert === "geo"
@@ -480,102 +504,221 @@ function AnalysisPage() {
   const fmtHold = (min: number) =>
     min >= 60 ? `${(min / 60).toFixed(1)}h` : `${min.toFixed(0)}m`;
 
-  // ── Expert Breakdown card — always visible ─────────────────────────────────
+  // ── Expert Breakdown — always visible ─────────────────────────────────────
   const ExpertBreakdownSection = () => {
-    const hasAny = gapBreakdown || geoBreakdown;
+    const hasAny = gapBreakdown || geoBreakdown || gapTodayTrades.length > 0 || geoRecentTrades.length > 0;
     if (!hasAny) return null;
 
-    const ExpertCol = ({
-      label, accent, d,
-    }: { label: string; accent: string; d: AnalysisData | null }) => {
-      if (!d) return (
-        <div className="flex-1 min-w-0 p-4 border border-slate-700/50 rounded-xl bg-slate-800/60">
-          <div className={`text-xs font-bold uppercase tracking-widest mb-3`} style={{ color: accent }}>{label}</div>
-          <div className="text-slate-600 text-xs text-center py-6">Aucun trade</div>
-        </div>
-      );
+    const fmtP = (p: number | null) => p != null ? `$${p.toFixed(2)}` : "—";
 
-      const topReasons = [...d.by_reason]
+    const ExitBars = ({ d }: { d: AnalysisData }) => {
+      const top = [...d.by_reason]
         .filter(r => r.reason !== "partial_profit_remainder")
         .sort((a, b) => b.trades - a.trades)
         .slice(0, 3);
-
-      const avgPnl = d.total_trades > 0 ? d.total_pnl / d.total_trades : 0;
-
+      if (!top.length) return null;
       return (
-        <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3"
-          style={{ borderColor: `${accent}33` }}>
-          {/* Header */}
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-widest" style={{ color: accent }}>{label}</span>
-            <span className="text-[10px] text-slate-500">{d.total_trades} trades</span>
-          </div>
-          {/* 4 key metrics */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-slate-900/60 rounded-lg p-2.5">
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Win Rate</div>
-              <div className={`text-lg font-bold font-mono ${d.win_rate >= 50 ? "text-emerald-400" : "text-red-400"}`}>
-                {d.win_rate.toFixed(1)}%
+        <div>
+          <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Top exits</div>
+          {top.map(r => {
+            const pct = Math.round(r.trades / d.total_trades * 100);
+            return (
+              <div key={r.reason} className="flex items-center gap-2 mb-1">
+                <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${r.pnl >= 0 ? "bg-emerald-500/60" : "bg-red-500/60"}`} style={{ width: `${pct}%` }} />
+                </div>
+                <span className="text-[9px] text-slate-400 w-28 truncate shrink-0">{(r.reason || "—").replace(/_/g, " ")}</span>
+                <span className="text-[9px] font-mono text-slate-500 w-7 text-right shrink-0">{pct}%</span>
               </div>
-              <div className="text-[9px] text-slate-600">{d.winning_trades}W / {d.losing_trades}L</div>
-            </div>
-            <div className="bg-slate-900/60 rounded-lg p-2.5">
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg P&amp;L</div>
-              <div className={`text-lg font-bold font-mono ${avgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(4)}
-              </div>
-              <div className="text-[9px] text-slate-600">par trade</div>
-            </div>
-            <div className="bg-slate-900/60 rounded-lg p-2.5">
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Hold</div>
-              <div className="text-lg font-bold font-mono text-sky-400">{fmtHold(d.avg_hold_min)}</div>
-              <div className="text-[9px] text-slate-600">durée moyenne</div>
-            </div>
-            <div className="bg-slate-900/60 rounded-lg p-2.5">
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Profit Factor</div>
-              <div className={`text-lg font-bold font-mono ${d.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"}`}>
-                {d.profit_factor === 999 ? "∞" : d.profit_factor.toFixed(2)}
-              </div>
-              <div className="text-[9px] text-slate-600">brut W/L</div>
-            </div>
-          </div>
-          {/* Top exit reasons */}
-          {topReasons.length > 0 && (
-            <div>
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Top sorties</div>
-              <div className="space-y-1">
-                {topReasons.map(r => {
-                  const pct = Math.round(r.trades / d.total_trades * 100);
-                  const isPos = r.pnl >= 0;
-                  return (
-                    <div key={r.reason} className="flex items-center gap-2">
-                      <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${isPos ? "bg-emerald-500/60" : "bg-red-500/60"}`}
-                          style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-[9px] text-slate-400 w-32 truncate shrink-0">
-                        {(r.reason || "—").replace(/_/g, " ")}
-                      </span>
-                      <span className="text-[9px] font-mono text-slate-500 w-8 text-right shrink-0">{pct}%</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+            );
+          })}
         </div>
       );
     };
+
+    const StatGrid = ({ d }: { d: AnalysisData }) => {
+      const avg = d.total_trades > 0 ? d.total_pnl / d.total_trades : 0;
+      return (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="bg-slate-900/60 rounded-lg p-2.5">
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Win Rate</div>
+            <div className={`text-base font-bold font-mono ${d.win_rate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{d.win_rate.toFixed(1)}%</div>
+            <div className="text-[9px] text-slate-600">{d.winning_trades}W / {d.losing_trades}L</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-2.5">
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg P&amp;L</div>
+            <div className={`text-base font-bold font-mono ${avg >= 0 ? "text-emerald-400" : "text-red-400"}`}>{avg >= 0 ? "+" : ""}${avg.toFixed(4)}</div>
+            <div className="text-[9px] text-slate-600">per trade</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-2.5">
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Hold</div>
+            <div className="text-base font-bold font-mono text-sky-400">{fmtHold(d.avg_hold_min)}</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-2.5">
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Profit Factor</div>
+            <div className={`text-base font-bold font-mono ${d.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"}`}>
+              {d.profit_factor === 999 ? "∞" : d.profit_factor.toFixed(2)}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Gap Expert panel ───────────────────────────────────────────────────
+    const GapPanel = () => (
+      <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3" style={{ borderColor: "#f59e0b33" }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold uppercase tracking-widest text-amber-400">🚀 Gap Expert — Stocks</span>
+          {gapBreakdown && <span className="text-[10px] text-slate-500">{gapBreakdown.total_trades} total</span>}
+        </div>
+
+        {/* Daily quota dots */}
+        <div className="bg-slate-900/60 rounded-lg p-3 flex items-center gap-3">
+          <span className="text-xl font-bold font-mono text-white">
+            {gapTodayTrades.length}<span className="text-slate-500 text-sm">/3</span>
+          </span>
+          <div className="flex gap-1.5">
+            {[0, 1, 2].map(i => (
+              <div key={i} className={`w-3.5 h-3.5 rounded-full transition-all ${
+                i < gapTodayTrades.length
+                  ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]"
+                  : "bg-slate-600"
+              }`} />
+            ))}
+          </div>
+          <span className="text-[10px] text-slate-500">trades today</span>
+          {gapTodayTrades.length >= 3 && (
+            <span className="text-[10px] font-bold text-amber-400 ml-auto">QUOTA REACHED</span>
+          )}
+        </div>
+
+        {/* Aggregated stats */}
+        {gapBreakdown && <StatGrid d={gapBreakdown} />}
+
+        {/* Today's trade log */}
+        {gapTodayTrades.length > 0 && (
+          <div>
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Today's trades</div>
+            <div className="space-y-1">
+              {gapTodayTrades.map(t => {
+                const isPos = (t.pnl ?? 0) >= 0;
+                return (
+                  <div key={t.trade_id} className="flex items-center gap-2 py-1.5 px-2 bg-slate-900/40 rounded-lg">
+                    <span className="text-[9px] text-slate-500 font-mono w-10 shrink-0">{t.exit_at ? fmtTime(t.exit_at) : "—"}</span>
+                    <span className="text-xs font-bold text-white shrink-0">{t.symbol}</span>
+                    <span className="text-[9px] text-slate-500 font-mono truncate flex-1">
+                      {fmtP(t.entry_price)} → {fmtP(t.exit_price)}
+                      <span className="text-slate-700 mx-1">·</span>{fmtHold(t.hold_min ?? 0)}
+                      <span className="text-slate-700 mx-1">·</span>{(t.close_reason || "—").replace(/_/g, " ")}
+                    </span>
+                    <span className={`text-xs font-bold font-mono shrink-0 ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                      {isPos ? "+" : ""}${t.pnl != null ? Math.abs(t.pnl).toFixed(4) : "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {gapBreakdown && <ExitBars d={gapBreakdown} />}
+      </div>
+    );
+
+    // ── Geo Expert panel ───────────────────────────────────────────────────
+    const GeoPanel = () => (
+      <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3" style={{ borderColor: "#a78bfa33" }}>
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold uppercase tracking-widest text-violet-400">📐 Geo Expert</span>
+          {geoBreakdown && <span className="text-[10px] text-slate-500">{geoBreakdown.total_trades} trades</span>}
+        </div>
+
+        {geoBreakdown && <StatGrid d={geoBreakdown} />}
+
+        {/* Detailed trade cards */}
+        {geoRecentTrades.length > 0 && (
+          <div>
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Recent trades</div>
+            <div className="space-y-2">
+              {geoRecentTrades.slice(0, 5).map(t => {
+                const gc = t.geo_context;
+                const isPos = (t.pnl ?? 0) >= 0;
+                const isLong = t.side === "buy" || t.side === "long";
+                return (
+                  <div key={t.trade_id} className="bg-slate-900/60 rounded-lg p-2.5 space-y-1.5">
+                    {/* Symbol + side + P&L */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-bold text-white">{t.symbol.replace("/USD", "")}</span>
+                        <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${isLong ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>
+                          {isLong ? "↑L" : "↓S"}
+                        </span>
+                      </div>
+                      <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                        {isPos ? "+" : ""}${t.pnl != null ? t.pnl.toFixed(4) : "—"}
+                      </span>
+                    </div>
+                    {/* Entry → exit, hold, reason */}
+                    <div className="text-[10px] text-slate-400 font-mono">
+                      {fmtP(t.entry_price)} → {fmtP(t.exit_price)}
+                      <span className="text-slate-600 mx-1">·</span>{fmtHold(t.hold_min ?? 0)}
+                      <span className="text-slate-600 mx-1">·</span>
+                      <span className="font-sans text-slate-500">{(t.close_reason || "—").replace(/_/g, " ")}</span>
+                    </div>
+                    {/* geo_context badges */}
+                    {gc && (
+                      <div className="flex flex-wrap gap-1">
+                        {gc.confluence != null && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
+                            gc.confluence >= 5 ? "bg-emerald-500/20 text-emerald-400"
+                            : gc.confluence >= 3 ? "bg-sky-500/20 text-sky-400"
+                            : "bg-slate-700 text-slate-400"}`}>
+                            Conf {gc.confluence}/5
+                          </span>
+                        )}
+                        {gc.structure && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
+                            gc.structure === "uptrend" ? "bg-emerald-500/20 text-emerald-400"
+                            : gc.structure === "downtrend" ? "bg-red-500/20 text-red-400"
+                            : "bg-slate-700/80 text-slate-400"}`}>
+                            {gc.structure}
+                          </span>
+                        )}
+                        {gc.rsi_divergence && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-400 font-semibold">
+                            RSI div ✓
+                          </span>
+                        )}
+                        {gc.patterns.map((p: string) => (
+                          <span key={p} className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-semibold">{p}</span>
+                        ))}
+                        {gc.atr != null && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-mono">
+                            ATR {gc.atr.toFixed(4)}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {geoBreakdown && <ExitBars d={geoBreakdown} />}
+      </div>
+    );
 
     return (
       <div className="bg-slate-800/30 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700/50">
           <span className="text-sm font-bold text-white">Expert Breakdown</span>
-          <span className="text-[10px] text-slate-500 ml-2">Gap vs Geo — statistiques séparées</span>
+          <span className="text-[10px] text-slate-500 ml-2">Gap vs Geo — independent stats</span>
         </div>
         <div className="p-4 flex flex-col sm:flex-row gap-3">
-          <ExpertCol label="🚀 Gap Expert — Stocks" accent="#f59e0b" d={gapBreakdown} />
-          <ExpertCol label="📐 Geo Expert — Crypto" accent="#a78bfa" d={geoBreakdown} />
+          <GapPanel />
+          <GeoPanel />
         </div>
       </div>
     );
@@ -1109,13 +1252,9 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                           <td className="px-3 py-2 text-xs text-slate-400">{fmtHoldMin(t.hold_min)}</td>
                           <td className="px-3 py-2"><ReasonBadge reasons={t.close_reason ?? ""} /></td>
                           <td className="px-3 py-2 text-[10px] text-slate-500 whitespace-nowrap">
-                            {t.exit_vs_target != null && (
-                              <span className={`mr-1.5 font-semibold ${t.exit_vs_target >= 100 ? "text-emerald-400" : t.exit_vs_target >= 50 ? "text-sky-400" : "text-red-400"}`}>
-                                {t.exit_vs_target}%obj
-                              </span>
-                            )}
-                            {t.score != null && <span className="mr-1.5">{Math.round(t.score)}/100</span>}
-                            {t.regime && <span className="opacity-50">{t.regime}</span>}
+                            {t.exit_vs_target != null
+                              ? <span className={`font-semibold ${t.exit_vs_target >= 100 ? "text-emerald-400" : t.exit_vs_target >= 50 ? "text-sky-400" : "text-red-400"}`}>{t.exit_vs_target}%&nbsp;obj</span>
+                              : <span className="text-slate-700">—</span>}
                           </td>
                           <td className="px-3 py-2 text-[10px] text-slate-600 whitespace-nowrap">
                             {t.exit_at ? (closedPeriod === "today" ? fmtTime(t.exit_at) : fmtDateTime(t.exit_at)) : "—"}

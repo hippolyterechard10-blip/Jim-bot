@@ -301,6 +301,24 @@ def api_trades_individual():
                     snap = json.loads(r["entry_snapshot"])
                 except Exception:
                     snap = {}
+            mc = {}
+            if r["market_context"]:
+                try:
+                    mc = json.loads(r["market_context"])
+                except Exception:
+                    mc = {}
+            geo_ctx = None
+            if mc.get("strategy_source") == "geometric":
+                raw_atr = mc.get("atr")
+                geo_ctx = {
+                    "confluence":     mc.get("confluence"),
+                    "structure":      mc.get("structure"),
+                    "rsi_divergence": mc.get("rsi_divergence"),
+                    "atr":            round(float(raw_atr), 6) if raw_atr is not None else None,
+                    "target_midpoint": mc.get("target_midpoint"),
+                    "patterns":       mc.get("patterns") or [],
+                    "level":          mc.get("level"),
+                }
             trades.append({
                 "trade_id":       r["trade_id"],
                 "symbol":         r["symbol"],
@@ -315,13 +333,8 @@ def api_trades_individual():
                 "entry_at":       r["entry_at"],
                 "exit_at":        r["exit_at"],
                 "exit_vs_target": r["exit_vs_target"],
-                "score":          snap.get("final_score") or snap.get("base_score"),
-                "regime":         snap.get("regime"),
-                "session":        snap.get("session"),
-                "patterns":       snap.get("patterns") or [],
-                "rr":             snap.get("risk_reward"),
-                "confidence":     snap.get("confidence"),
-                "strategy_source": (json.loads(r["market_context"]).get("strategy_source") if r["market_context"] else None),
+                "strategy_source": mc.get("strategy_source"),
+                "geo_context":     geo_ctx,
             })
         return jsonify({"trades": trades, "period": period})
     except Exception as e:
