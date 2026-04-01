@@ -204,3 +204,102 @@ class GapperExpert:
             return None
         except Exception:
             return None
+
+    def manage_open_positions(self):
+        """Called from fast loop to manage partial profit and trailing stop for gapper positions."""
+        try:
+            import json
+            import pytz
+            from datetime import datetime, time as dtime
+
+            positions = self.broker.get_positions()
+            open_trades = self.memory.get_open_trades()
+
+            for pos in (positions or []):
+                # Find matching gapper trade
+                match = None
+                ctx_data = {}
+                for t in open_trades:
+                    ctx = t.get("market_context") or {}
+                    if isinstance(ctx, str):
+                        try: ctx = json.loads(ctx)
+                        except: ctx = {}
+                    if (ctx.get("strategy_source") == "gapper"
+                            and t.get("symbol") == pos.symbol
+                            and t.get("status") == "open"):
+                        match = t
+                        ctx_data = ctx
+                        break
+
+                if not match:
+                    continue
+
+                current_price = float(pos.current_price)
+                entry_price = float(match.get("entry_price", current_price))
+                qty = float(pos.qty)
+                gain_pct = (current_price - entry_price) / entry_price * 100
+
+                symbol = pos.symbol
+                target_pct = ctx_data.get("target_pct", 10.0)
+                partial_taken = ctx_data.get("partial_taken", False)
+
+                # Check time limit (10:45 ET) — force exit
+                ET = pytz.timezone("America/New_York")
+                now_et = datetime.now(ET)
+                if now_et.weekday() < 5 and now_et.time() >= dtime(10, 45):
+                    logger.info(f"[GAPPER] ⏰ Time limit 10:45 ET — closing {symbol}")
+                    self.broker.close_position(symbol)
+                    if self.memory:
+                        pnl = (current_price - entry_price) * qty
+                        self.memory.log_trade_close(match["trade_id"], current_price, "time_limit", pnl=pnl)
+                    return
+
+                # Partial profit at +10% → sell 50%, move stop to breakeven
+                if gain_pct >= target_pct and not partial_taken:
+                    sell_qty = max(1, int(qty * 0.50))
+                    logger.info(
+                        f"[GAPPER] 💰 PARTIAL PROFIT: {symbol} +{gain_pct:.1f}% "
+                        f"→ selling 50%, stop→breakeven"
+                    )
+                    self.broker.place_order(symbol, sell_qty, "sell")
+                    if self.memory:
+                        ctx_data["partial_taken"] = True
+                        ctx_data["breakeven_stop"] = entry_price
+                        self.memory.log_trade_close(
+                            match["trade_id"], current_price, "partial_profit",
+                            pnl=(current_price - entry_price) * sell_qty
+                        )
+                        remaining_qty = qty - sell_qty
+                        if remaining_qty > 0:
+                            self.memory.log_trade_open(
+                                trade_id=str(__import__("uuid").uuid4()),
+                                symbol=symbol,
+                                side="buy",
+                                qty=remaining_qty,
+                                entry_price=entry_price,
+                                stop_loss=entry_price,  # breakeven
+                                market_context={**ctx_data, "partial_taken": True}
+                            )
+                    return
+
+                # Trailing stop -15% from highest price (after partial)
+                if partial_taken:
+                    high_water = ctx_data.get("high_water", current_price)
+                    new_high = max(high_water, current_price)
+                    ctx_data["high_water"] = new_high
+                    trailing_stop = new_high * 0.85  # -15%
+
+                    if current_price <= trailing_stop:
+                        logger.info(
+                            f"[GAPPER] 🔴 TRAILING STOP: {symbol} "
+                            f"${current_price:.4f} <= ${trailing_stop:.4f}"
+                        )
+                        self.broker.close_position(symbol)
+                        if self.memory:
+                            pnl = (current_price - entry_price) * qty
+                            self.memory.log_trade_close(
+                                match["trade_id"], current_price, "trailing_stop", pnl=pnl
+                            )
+
+        except Exception as e:
+            logger.error(f"[GAPPER] manage_open_positions error: {e}")
