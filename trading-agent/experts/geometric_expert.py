@@ -170,7 +170,10 @@ class GeometricExpert:
             dist_to_support    = (current_price - nearest_support) / current_price
             dist_to_resistance = (nearest_resistance - current_price) / current_price
 
-            logger.info(f"[GEO] SR levels: support={sr.get('nearest_support', 0):.2f} resistance={sr.get('nearest_resistance', 0):.2f} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f}")
+            _is_crypto_here = "/" in symbol
+            _sr_decimals = 10 if nearest_support < 0.001 else (8 if nearest_support < 0.1 else (4 if nearest_support < 10 else 2))
+            _spfmt = f".{_sr_decimals}f"
+            logger.info(f"[GEO] SR levels: support={nearest_support:{_spfmt}} resistance={nearest_resistance:{_spfmt}} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f}")
             logger.info(f"[GEO] {symbol} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f} (threshold 0.015)")
 
             if dist_to_support <= 0.015:
@@ -366,18 +369,43 @@ class GeometricExpert:
             # ATR on 1-min bars produces 5%+ wide stops; instead anchor to the level itself.
             atr = self.geometry.calculate_atr(highs_1m, lows_1m, closes_1m, period=14)
             is_crypto = "/" in symbol
+            # Determine decimal precision for stop — micro-priced crypto needs more places
+            if is_crypto:
+                if level < 0.001:
+                    _stop_decimals = 10
+                elif level < 0.1:
+                    _stop_decimals = 8
+                elif level < 1.0:
+                    _stop_decimals = 6
+                else:
+                    _stop_decimals = 4
+            else:
+                _stop_decimals = 2
+
             if side == "long":
                 # 0.5% below level for crypto, 0.3% below for stocks
-                stop_price   = round(level * 0.995, 4) if is_crypto else round(level * 0.997, 4)
-                target_price = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, 6)
+                stop_price = round(level * 0.995, _stop_decimals) if is_crypto else round(level * 0.997, _stop_decimals)
+                # Target must be at least 2× risk above entry; use resistance as ceiling
+                _min_target = round(current_price + 2.0 * abs(current_price - stop_price), _stop_decimals + 2)
+                _res_target = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
+                target_price = max(_min_target, _res_target)
             else:
                 # 0.5% above level for crypto, 0.3% above for stocks
-                stop_price   = round(level * 1.005, 4) if is_crypto else round(level * 1.003, 4)
-                target_price = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, 6)
+                stop_price = round(level * 1.005, _stop_decimals) if is_crypto else round(level * 1.003, _stop_decimals)
+                # Target must be at least 2× risk below entry; use support as floor
+                _min_target = round(current_price - 2.0 * abs(stop_price - current_price), _stop_decimals + 2)
+                _sup_target = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
+                target_price = min(_min_target, _sup_target)
 
             # R:R check — minimum 1:2
             risk   = abs(current_price - stop_price)
             reward = abs(target_price - current_price)
+            _pfmt = f".{_stop_decimals}f"
+            logger.info(
+                f"[GEO] {symbol} — stop={stop_price:{_pfmt}} "
+                f"({abs(1 - stop_price/level)*100:.2f}% from level) "
+                f"risk={risk:{_pfmt}} reward={reward:{_pfmt}} RR={reward/risk:.1f}x"
+            )
             if risk <= 0 or reward / risk < 2.0:
                 rr_val = round(reward / risk, 1) if risk > 0 else 0
                 logger.info(f"[GEO] {symbol} — R:R too low ({rr_val}x), skip")
@@ -476,19 +504,24 @@ class GeometricExpert:
             )
 
             if order and self.memory:
-                # Place a real Alpaca stop order immediately after entry
+                # Place a real Alpaca stop order for stocks; crypto doesn't support stop orders
+                # — the watchdog handles software-based stops for crypto positions.
                 stop_order_id = None
-                try:
-                    _stop_side = "sell" if side == "long" else "buy"
-                    _sp = round(stop_price, 4) if is_crypto else round(stop_price, 2)
-                    _stop_ord = self.broker.api.submit_order(
-                        symbol=symbol, qty=qty, side=_stop_side,
-                        type="stop", stop_price=_sp, time_in_force="gtc",
-                    )
-                    stop_order_id = getattr(_stop_ord, "id", None)
-                    logger.info(f"[GEO] 🛑 Stop order placed: {symbol} stop=${_sp} id={stop_order_id}")
-                except Exception as _se:
-                    logger.error(f"[GEO] stop order error for {symbol}: {_se}")
+                if not is_crypto:
+                    try:
+                        _stop_side = "sell" if side == "long" else "buy"
+                        _sp = round(stop_price, 2)
+                        _stop_ord = self.broker.api.submit_order(
+                            symbol=symbol, qty=qty, side=_stop_side,
+                            type="stop", stop_price=_sp, time_in_force="gtc",
+                        )
+                        stop_order_id = getattr(_stop_ord, "id", None)
+                        logger.info(f"[GEO] 🛑 Stop order placed: {symbol} stop=${_sp} id={stop_order_id}")
+                    except Exception as _se:
+                        logger.error(f"[GEO] stop order error for {symbol}: {_se}")
+                else:
+                    _sp = round(stop_price, _stop_decimals)
+                    logger.info(f"[GEO] 🛑 Crypto stop monitored by watchdog: {symbol} stop={_sp:{_pfmt}}")
 
                 self.memory.log_trade_open(
                     trade_id=str(uuid.uuid4()),
