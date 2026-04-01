@@ -302,6 +302,33 @@ class Mastermind:
         except Exception as e:
             logger.error(f"[MASTERMIND] position management error: {e}")
 
+        # Track gapper outcomes for day trader rules
+        try:
+            if self.memory:
+                import json
+                today_closes = [t for t in self.memory.get_recent_trades(limit=10)
+                               if t.get("status") == "closed"
+                               and t.get("close_reason") in ("time_limit", "trailing_stop", "hard_stop_loss")]
+                for t in today_closes:
+                    ctx = t.get("market_context") or {}
+                    if isinstance(ctx, str):
+                        try: ctx = json.loads(ctx)
+                        except: ctx = {}
+                    if ctx.get("strategy_source") == "gapper" and not ctx.get("outcome_recorded"):
+                        won = (t.get("pnl") or 0) > 0
+                        self.record_gapper_outcome(won)
+                        # Mark as recorded to avoid double counting — update SQLite
+                        import sqlite3
+                        if hasattr(self.memory, 'db_path'):
+                            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+                            new_ctx = {**ctx, "outcome_recorded": True}
+                            conn.execute("UPDATE trades SET market_context=? WHERE trade_id=?",
+                                        (json.dumps(new_ctx), t["trade_id"]))
+                            conn.commit()
+                            conn.close()
+        except Exception as e:
+            logger.error(f"[MASTERMIND] outcome tracking error: {e}")
+
     def run(self):
         """Called every 5min from main.py slow loop."""
         if self._is_paused():
