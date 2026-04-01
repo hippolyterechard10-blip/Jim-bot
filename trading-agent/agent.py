@@ -99,6 +99,12 @@ class TradingAgent:
                     f"🔄 SYNC orphan: {display_symbol} {side} qty={qty:.6g} "
                     f"entry=${entry_price:.4f} — writing to SQLite"
                 )
+                # Infer strategy source: crypto is always geometric; stocks default to geometric
+                _is_crypto = "/" in display_symbol or any(
+                    display_symbol.replace("/", "").upper() == c.replace("/", "").upper()
+                    for c in config.CRYPTO_SYMBOLS
+                )
+                _orphan_strategy = "geometric" if _is_crypto else "geometric"
                 self.memory.log_trade_open(
                     trade_id=trade_id,
                     symbol=display_symbol,
@@ -106,8 +112,12 @@ class TradingAgent:
                     qty=qty,
                     entry_price=entry_price,
                     alpaca_order_id=f"orphan_{sym_normalized}",
-                    market_context={"source": "alpaca_sync",
-                                    "synced_at": datetime.now(timezone.utc).isoformat()},
+                    market_context={
+                        "source": "alpaca_sync",
+                        "strategy_source": _orphan_strategy,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                        "orphan": True,
+                    },
                 )
                 synced += 1
             if synced:
