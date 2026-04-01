@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone, time as dtime
@@ -168,6 +169,140 @@ class TradingAgent:
             conn.close()
         except Exception as e:
             logger.error(f"_reconcile_stale_positions error: {e}")
+
+    def _sync_todays_orders(self):
+        """
+        Startup reconciliation: fetch today's filled Alpaca orders and create
+        any missing DB records. Handles the crash-between-place_order-and-log case.
+        - Filled BUY with no DB record → create open record
+        - Filled SELL with DB open match → create close record
+        - Filled SELL with no DB match → create synthetic open+close pair
+        """
+        if not self.memory:
+            return
+        try:
+            from datetime import date as _date
+            today_str = _date.today().isoformat() + "T00:00:00Z"
+            orders = self.broker.api.list_orders(status="filled", after=today_str, limit=100)
+            if not orders:
+                return
+
+            # Normalise symbol to our display format (e.g. "LINKUSD" → "LINK/USD")
+            def _display(sym):
+                for c in config.CRYPTO_SYMBOLS:
+                    if c.replace("/", "").upper() == sym.replace("/", "").upper():
+                        return c
+                return sym
+
+            conn = sqlite3.connect(self.memory.db_path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+
+            # Process in chronological order
+            for o in sorted(orders, key=lambda x: x.filled_at or x.submitted_at):
+                display_sym  = _display(o.symbol)
+                fill_price   = float(getattr(o, "filled_avg_price", 0) or 0)
+                fill_qty     = float(getattr(o, "filled_qty", 0) or 0)
+                filled_at    = str(o.filled_at)[:19] if o.filled_at else str(o.submitted_at)[:19]
+                order_id     = o.id
+
+                if not fill_price or not fill_qty:
+                    continue
+
+                if o.side == "buy":
+                    # Check if a DB record already covers this order
+                    c.execute(
+                        "SELECT trade_id FROM trades WHERE alpaca_order_id=?", (order_id,)
+                    )
+                    if c.fetchone():
+                        continue
+                    # Also check by symbol+qty+date to avoid near-duplicates
+                    day = filled_at[:10]
+                    c.execute(
+                        "SELECT trade_id FROM trades WHERE symbol=? AND ABS(qty-?)<=0.1 AND entry_at LIKE ?",
+                        (display_sym, fill_qty, day + "%")
+                    )
+                    if c.fetchone():
+                        continue
+                    # Also skip if an open record for this symbol already exists with
+                    # qty close to the Alpaca live position (the orphan sync already covers it)
+                    c.execute(
+                        "SELECT trade_id, qty FROM trades WHERE symbol=? AND status='open'",
+                        (display_sym,)
+                    )
+                    existing_opens = c.fetchall()
+                    total_open_qty = sum(r["qty"] for r in existing_opens)
+                    # If existing open records already cover more qty than this order → skip
+                    if total_open_qty >= fill_qty * 0.9:
+                        continue
+                    new_id = str(uuid.uuid4())
+                    c.execute(
+                        """INSERT INTO trades
+                           (trade_id, alpaca_order_id, symbol, side, qty, entry_price, status, entry_at, market_context)
+                           VALUES (?,?,?,?,?,?,'open',?,?)""",
+                        (new_id, order_id, display_sym, "buy", fill_qty, fill_price,
+                         filled_at, json.dumps({"source": "order_sync"}))
+                    )
+                    logger.info(f"[OrderSync] Created missing open: {display_sym} buy {fill_qty} @ {fill_price:.4f}")
+
+                elif o.side == "sell":
+                    # Check if close already logged for this sell order
+                    c.execute(
+                        "SELECT trade_id FROM trades WHERE alpaca_order_id=? AND status='closed'",
+                        (order_id,)
+                    )
+                    if c.fetchone():
+                        continue
+                    # Find oldest open DB record for this symbol to close
+                    c.execute(
+                        "SELECT trade_id, entry_price, qty, entry_at FROM trades "
+                        "WHERE symbol=? AND status='open' ORDER BY entry_at ASC LIMIT 1",
+                        (display_sym,)
+                    )
+                    match = c.fetchone()
+                    if match:
+                        ep     = match["entry_price"] or fill_price
+                        pnl    = round((fill_price - ep) * fill_qty, 4)
+                        pnl_pct = round((fill_price - ep) / ep * 100, 4) if ep else 0
+                        try:
+                            entry_dt = datetime.fromisoformat(match["entry_at"])
+                            exit_dt  = datetime.fromisoformat(filled_at)
+                            hold_min = (exit_dt - entry_dt).total_seconds() / 60
+                        except Exception:
+                            hold_min = None
+                        c.execute(
+                            """UPDATE trades SET status='closed', exit_price=?, exit_at=?,
+                               pnl=?, pnl_pct=?, close_reason='synced_close',
+                               hold_duration_min=? WHERE trade_id=?""",
+                            (fill_price, filled_at, pnl, pnl_pct, hold_min, match["trade_id"])
+                        )
+                        logger.info(
+                            f"[OrderSync] Synced close: {display_sym} sell {fill_qty} @ {fill_price:.4f} "
+                            f"pnl={pnl:+.4f}"
+                        )
+                    else:
+                        # No DB open record: create synthetic open+close pair
+                        # Use fill_price as both entry and exit (unknown entry)
+                        new_id = str(uuid.uuid4())
+                        c.execute(
+                            """INSERT INTO trades
+                               (trade_id, alpaca_order_id, symbol, side, qty, entry_price,
+                                exit_price, pnl, pnl_pct, status, close_reason,
+                                entry_at, exit_at, hold_duration_min, market_context)
+                               VALUES (?,?,?,?,?,?,?,0,0,'closed','synced_close',?,?,0,?)""",
+                            (new_id, order_id, display_sym, "buy", fill_qty,
+                             fill_price, fill_price, filled_at, filled_at,
+                             json.dumps({"source": "order_sync_synthetic"}))
+                        )
+                        logger.info(
+                            f"[OrderSync] Synthetic close (no open match): {display_sym} "
+                            f"sell {fill_qty} @ {fill_price:.4f}"
+                        )
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"_sync_todays_orders error: {e}")
 
     def _pre_market_cash_liberation(self):
         """

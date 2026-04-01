@@ -65,6 +65,12 @@ def main():
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
+    # On startup: sync today's filled Alpaca orders into DB (handles crash recovery)
+    logger.info("🔄 Syncing today's Alpaca orders with DB...")
+    agent._sync_todays_orders()
+    # Also mark any DB-open records that no longer exist in Alpaca as closed
+    agent._reconcile_stale_positions()
+
     start_dashboard(memory, analyzer, scanner=agent.scanner, regime=agent.regime, agent=agent, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)
 
