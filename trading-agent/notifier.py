@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import smtplib
@@ -6,6 +7,7 @@ from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
+import config
 from memory import TradingMemory
 from analyzer import TradeAnalyzer
 
@@ -85,95 +87,158 @@ class TradingNotifier:
         logger.info("✅ TradingNotifier ready")
 
     def send_daily_summary(self):
-        import json
-        stats = self.memory.compute_performance_stats()
-        recent = self.memory.get_recent_trades(limit=10)
-        today = datetime.now(timezone.utc).date()
-        daily = [t for t in recent if t.get("entry_at") and datetime.fromisoformat(t["entry_at"]).date()==today]
-        daily_pnl = sum(t.get("pnl") or 0 for t in daily if t.get("pnl") is not None)
-        pnl = stats.get("total_pnl",0) or 0
-        analyses = self.memory.get_analyses(limit=3)
-        lessons = []
-        for a in analyses:
-            if a.get("lessons"):
-                try:
-                    ls = json.loads(a["lessons"]) if isinstance(a["lessons"],str) else a["lessons"]
-                    lessons.extend(ls[:2])
-                except: pass
-        anomalies = self.analyzer.detect_performance_anomalies()
+        stats      = self.memory.compute_performance_stats()
+        today_utc  = datetime.now(timezone.utc).date()
+        recent     = self.memory.get_recent_trades(limit=30)
+
+        # ── Today's closed trades (exclude bookkeeping partials) ────────────────
+        def _is_today(t):
+            try:
+                return datetime.fromisoformat(t["entry_at"]).replace(tzinfo=timezone.utc).date() == today_utc
+            except Exception:
+                return False
+
+        daily      = [t for t in recent if t.get("entry_at") and _is_today(t)]
+        real_daily = [t for t in daily  if t.get("close_reason") != "partial_profit_remainder"]
+        daily_pnl  = sum(t.get("pnl") or 0 for t in real_daily if t.get("pnl") is not None)
+        pnl        = stats.get("total_pnl", 0) or 0
+
+        # ── Helper: parse strategy_source from market_context ──────────────────
+        def _src(t):
+            mc = t.get("market_context")
+            if isinstance(mc, str):
+                try: mc = json.loads(mc)
+                except: mc = {}
+            return (mc or {}).get("strategy_source", "")
+
+        # ── Per-expert capital breakdown ────────────────────────────────────────
+        def _expert_stats(source_key):
+            base       = config.STRATEGY_CAPITAL.get(source_key, 500.0)
+            all_trades = self.memory.get_recent_trades(limit=500)
+            src_closed = [
+                t for t in all_trades
+                if t.get("status") == "closed"
+                and t.get("close_reason") != "partial_profit_remainder"
+                and _src(t) == source_key
+            ]
+            src_pnl = sum(t.get("pnl") or 0 for t in src_closed if t.get("pnl") is not None)
+            wins    = sum(1 for t in src_closed if (t.get("pnl") or 0) > 0)
+            wr      = round(wins / len(src_closed) * 100, 1) if src_closed else 0.0
+            return base, src_pnl, len(src_closed), wr
+
+        gap_base, gap_pnl, gap_n, gap_wr = _expert_stats("gapper")
+        geo_base, geo_pnl, geo_n, geo_wr = _expert_stats("geometric")
+        gap_now = gap_base + gap_pnl
+        geo_now = geo_base + geo_pnl
+        gap_ret = (gap_pnl / gap_base * 100) if gap_base else 0.0
+        geo_ret = (geo_pnl / geo_base * 100) if geo_base else 0.0
+
+        # ── Alerts ──────────────────────────────────────────────────────────────
+        anomalies  = self.analyzer.detect_performance_anomalies()
         alert_html = ""
         if anomalies:
             alert_html = f'<div class="alert"><strong>⚠ ALERTES</strong><br><br>{"<br>".join(anomalies)}</div>'
-        real_daily = [t for t in daily if t.get("close_reason") != "partial_profit_remainder"]
+
+        # ── Trade cards (V2 fields only) ────────────────────────────────────────
+        def _hold_dur(t):
+            try:
+                ea = t.get("entry_at"); xa = t.get("exit_at")
+                if not ea or not xa:
+                    return "—"
+                entry_dt = datetime.fromisoformat(ea).replace(tzinfo=timezone.utc)
+                exit_dt  = datetime.fromisoformat(xa).replace(tzinfo=timezone.utc)
+                mins = int((exit_dt - entry_dt).total_seconds() / 60)
+                if mins < 60:
+                    return f"{mins}m"
+                elif mins < 1440:
+                    return f"{mins // 60}h{mins % 60:02d}m"
+                else:
+                    return f"{mins // 1440}d{(mins % 1440) // 60}h"
+            except Exception:
+                return "—"
+
         cards = ""
         for t in real_daily[:8]:
-            p = t.get("pnl")
+            p   = t.get("pnl")
             cls = _pcolor(p)
-            snap = {}
-            raw_snap = t.get("entry_snapshot")
-            if raw_snap:
-                try:
-                    snap = json.loads(raw_snap) if isinstance(raw_snap, str) else (raw_snap or {})
-                except Exception:
-                    snap = {}
-            strategy  = snap.get("strategy_used") or "—"
-            score_val = snap.get("final_score") or snap.get("base_score")
-            score_str = str(int(score_val)) + "/100" if score_val is not None else "—"
-            session   = snap.get("session") or "—"
-            regime    = snap.get("regime")  or "—"
-            conf      = snap.get("confidence")
-            conf_str  = str(int(conf * 100)) + "%" if conf else "—"
-            vol       = snap.get("volume_ratio")
-            vol_str   = str(round(vol, 1)) + "x" if vol else "—"
-            pats      = snap.get("patterns") or []
-            pats_str  = ", ".join(pats) if pats else "—"
-            rr        = snap.get("risk_reward")
-            rr_str    = str(round(rr, 1)) + "x" if rr else "—"
-            exit_reason = t.get("close_reason") or "—"
-            evs = t.get("exit_vs_target")
-            if evs is not None:
-                evs_cls = "pos" if evs >= 100 else ("neu" if evs >= 50 else "neg")
-                evs_str = '<span class="' + evs_cls + '">' + str(evs) + "% obj.</span>"
+
+            src    = _src(t)
+            if src == "gapper":
+                tag, tag_col = "GAP", "#f59e0b"
+            elif src == "geometric":
+                tag, tag_col = "GEO", "#4fc3f7"
             else:
-                evs_str = "—"
+                tag, tag_col = "—",  "#6b7280"
+
+            ep   = t.get("entry_price")
+            xp   = t.get("exit_price")
+            if ep and xp:
+                price_str = f"${ep:.4f} → ${xp:.4f}"
+            elif ep:
+                price_str = f"${ep:.4f} → open"
+            else:
+                price_str = "—"
+
+            dur         = _hold_dur(t)
+            exit_reason = (t.get("close_reason") or "—").replace("_", " ")
+
             cards += (
-                '<div style="border:1px solid #1a2030;border-radius:4px;padding:10px 12px;margin-bottom:8px;background:#0d1117">'
-                '<div style="display:flex;justify-content:space-between;margin-bottom:5px">'
-                "<span><strong>" + t["symbol"] + "</strong> " + t["side"].upper() + "</span>"
-                '<span class="' + cls + '">' + _fpnl(p) + " | " + exit_reason + " | " + evs_str + "</span>"
-                "</div>"
-                '<div style="font-size:9px;color:#4a5568;display:flex;flex-wrap:wrap;gap:8px">'
-                "<span>Strat: "   + strategy  + "</span>"
-                "<span>Score: "   + score_str + "</span>"
-                "<span>Session: " + session   + "</span>"
-                "<span>Regime: "  + regime    + "</span>"
-                "<span>Conf: "    + conf_str  + "</span>"
-                "<span>Vol: "     + vol_str   + "</span>"
-                "<span>Patterns: "+ pats_str  + "</span>"
-                "<span>R:R: "     + rr_str    + "</span>"
-                "</div>"
-                "</div>"
+                f'<div style="border:1px solid #1a2030;border-radius:4px;padding:10px 12px;margin-bottom:8px;background:#0d1117">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+                f'<div style="display:flex;align-items:center;gap:8px">'
+                f'<span style="font-size:9px;font-weight:700;background:{tag_col}22;color:{tag_col};border:1px solid {tag_col}44;border-radius:3px;padding:1px 6px;letter-spacing:.06em">{tag}</span>'
+                f'<strong style="font-size:13px">{t["symbol"]}</strong>'
+                f'<span style="color:#6b7280;font-size:11px">{t.get("side","").upper()}</span>'
+                f'</div>'
+                f'<span class="{cls}" style="font-size:14px;font-weight:700">{_fpnl(p)}</span>'
+                f'</div>'
+                f'<div style="font-size:9px;color:#4a5568;display:flex;flex-wrap:wrap;gap:12px">'
+                f'<span>Prix: <span style="color:#8892a4">{price_str}</span></span>'
+                f'<span>Durée: <span style="color:#8892a4">{dur}</span></span>'
+                f'<span>Sortie: <span style="color:#8892a4">{exit_reason}</span></span>'
+                f'</div>'
+                f'</div>'
             )
+
         if not cards:
             cards = '<p style="color:#4a5568;text-align:center;font-size:11px">Aucun trade aujourd\'hui</p>'
-        lessons_html = "".join(f'<div class="lesson">{l}</div>' for l in lessons[:5])
+
+        # ── Email body ──────────────────────────────────────────────────────────
+        def _ret_str(ret):
+            return f'{"+" if ret >= 0 else ""}{ret:.1f}%'
+
         content = f"""{alert_html}
 <div class="st">Aujourd'hui</div>
 <div class="krow">
 <div class="k"><div class="kl">P&L aujourd'hui</div><div class="kv {_pcolor(daily_pnl)}">{_fpnl(daily_pnl)}</div></div>
-<div class="k"><div class="kl">Trades</div><div class="kv neu">{len(daily)}</div></div>
+<div class="k"><div class="kl">Trades</div><div class="kv neu">{len(real_daily)}</div></div>
+</div>
+<div class="st">Experts Capital</div>
+<div class="krow">
+<div class="k" style="border-color:#f59e0b55">
+  <div class="kl" style="color:#f59e0b">&#9650; GAP Expert</div>
+  <div class="kv {_pcolor(gap_pnl)}">${gap_now:.2f}</div>
+  <div style="font-size:9px;color:#4a5568;margin-top:3px">{_ret_str(gap_ret)} &nbsp;|&nbsp; {gap_n} trades &nbsp;|&nbsp; {gap_wr:.0f}% WR</div>
+</div>
+<div class="k" style="border-color:#4fc3f755">
+  <div class="kl" style="color:#4fc3f7">&#9670; GEO Expert</div>
+  <div class="kv {_pcolor(geo_pnl)}">${geo_now:.2f}</div>
+  <div style="font-size:9px;color:#4a5568;margin-top:3px">{_ret_str(geo_ret)} &nbsp;|&nbsp; {geo_n} trades &nbsp;|&nbsp; {geo_wr:.0f}% WR</div>
+</div>
 </div>
 <div class="st">Global</div>
 <div class="krow">
 <div class="k"><div class="kl">P&L Total</div><div class="kv {_pcolor(pnl)}">{_fpnl(pnl)}</div></div>
-<div class="k"><div class="kl">Win Rate</div><div class="kv neu">{stats.get('win_rate',0):.1f}%</div></div>
-<div class="k"><div class="kl">Trades</div><div class="kv">{stats.get('total_trades',0)}</div></div>
-<div class="k"><div class="kl">Drawdown</div><div class="kv neg">-${stats.get('max_drawdown',0):.2f}</div></div>
+<div class="k"><div class="kl">Win Rate</div><div class="kv neu">{stats.get('win_rate', 0):.1f}%</div></div>
+<div class="k"><div class="kl">Trades Total</div><div class="kv">{stats.get('total_trades', 0)}</div></div>
+<div class="k"><div class="kl">Drawdown</div><div class="kv neg">-${stats.get('max_drawdown', 0):.2f}</div></div>
 </div>
 <div class="st">Trades du jour</div>
-{cards}
-{f'<div class="st">Leçons récentes</div>{lessons_html}' if lessons_html else ''}"""
-        return _send(f"[Trading Agent] Résumé {today.strftime('%d/%m/%Y')} — {_fpnl(daily_pnl)}", _html("Résumé quotidien", content))
+{cards}"""
+        return _send(
+            f"[Trading Agent] Résumé {today_utc.strftime('%d/%m/%Y')} — {_fpnl(daily_pnl)}",
+            _html("Résumé quotidien", content)
+        )
 
     def send_stop_loss_alert(self, current_capital, initial_capital=1000.0):
         loss = initial_capital - current_capital
