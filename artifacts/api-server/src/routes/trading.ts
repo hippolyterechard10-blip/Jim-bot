@@ -207,6 +207,10 @@ router.get("/trades/individual", async (req, res) => {
   ));
 });
 
+router.get("/trades/open", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/trades/open`, []));
+});
+
 router.get("/analysis", async (req, res) => {
   const expert = (req.query.expert as string) || "all";
   res.json(await proxyFlask(`${FLASK_BASE}/api/analysis?expert=${expert}`, {}));
