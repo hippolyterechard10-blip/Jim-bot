@@ -290,8 +290,12 @@ class Mastermind:
         if self._is_paused():
             return
         self._detect_gappers()
-        self.gapper.manage_open_positions()
-        self.geometric.manage_open_positions()
+        # Manage open expert positions
+        try:
+            self.gapper.manage_open_positions()
+            self.geometric.manage_open_positions()
+        except Exception as e:
+            logger.error(f"[MASTERMIND] position management error: {e}")
 
     def run(self):
         """Called every 5min from main.py slow loop."""
