@@ -62,6 +62,18 @@ def main():
     broker   = AlpacaBroker()
     risk     = RiskManager(broker)
     agent    = TradingAgent(broker, risk, memory)
+
+    from mastermind import Mastermind
+    mastermind = Mastermind(
+        broker=broker,
+        memory=memory,
+        scanner=agent.scanner,
+        regime=agent.regime,
+        geometry=agent.geometry,
+        correlations=agent.correlations,
+        agent=agent,
+    )
+
     analyzer = TradeAnalyzer(memory)
     notifier = TradingNotifier(memory, analyzer)
 
