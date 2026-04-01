@@ -40,8 +40,8 @@ class Mastermind:
 
         logger.info("✅ Mastermind V2 initialized")
         logger.info(
-            f"💰 CAPITAL SPLIT: Gapper=${config.STRATEGY_CAPITAL['gapper']:.2f} | "
-            f"Geometric=${config.STRATEGY_CAPITAL['geometric']:.2f} | "
+            f"💰 CAPITAL SPLIT: Gap=${config.STRATEGY_CAPITAL['gapper']:.2f} | "
+            f"Geo=${config.STRATEGY_CAPITAL['geometric']:.2f} | "
             f"Total=${sum(config.STRATEGY_CAPITAL.values()):.2f}"
         )
 
@@ -63,7 +63,7 @@ class Mastermind:
         else:
             self._gapper_consecutive_losses += 1
         logger.info(
-            f"[MASTERMIND] Gapper outcome: {'WIN' if won else 'LOSS'} | "
+            f"[MASTERMIND] Gap outcome: {'WIN' if won else 'LOSS'} | "
             f"today={self._gapper_trades_today} | consec_losses={self._gapper_consecutive_losses}"
         )
 
@@ -196,10 +196,10 @@ class Mastermind:
 
     def _can_gapper_trade(self) -> bool:
         if self._gapper_trades_today >= config.GAPPER_MAX_TRADES_PER_DAY:
-            logger.info(f"[MASTERMIND] Gapper: max {config.GAPPER_MAX_TRADES_PER_DAY} trades/day reached")
+            logger.info(f"[MASTERMIND] Gap: max {config.GAPPER_MAX_TRADES_PER_DAY} trades/day reached")
             return False
         if self._gapper_consecutive_losses >= config.GAPPER_MAX_CONSECUTIVE_LOSSES:
-            logger.info(f"[MASTERMIND] Gapper: {config.GAPPER_MAX_CONSECUTIVE_LOSSES} consecutive losses — stopped")
+            logger.info(f"[MASTERMIND] Gap: {config.GAPPER_MAX_CONSECUTIVE_LOSSES} consecutive losses — stopped")
             return False
         now_et = dt.datetime.now(ET)
         if now_et.weekday() >= 5:
@@ -310,8 +310,8 @@ class Mastermind:
         self._detect_geometric()
         logger.info(
             f"[MASTERMIND] ✅ Cycle | "
-            f"Gapper: {self._gapper_trades_today}/{config.GAPPER_MAX_TRADES_PER_DAY} trades "
+            f"Gap: {self._gapper_trades_today}/{config.GAPPER_MAX_TRADES_PER_DAY} trades "
             f"| consec_losses={self._gapper_consecutive_losses} "
-            f"| Gapper capital=${self.gapper.get_available_capital():.0f} "
+            f"| Gap capital=${self.gapper.get_available_capital():.0f} "
             f"| Geo capital=${self.geometric.get_available_capital():.0f}"
         )

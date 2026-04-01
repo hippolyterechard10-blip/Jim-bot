@@ -1589,8 +1589,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
           <span className="text-[10px] text-slate-600">capital 50% / 50% · se capitalise sur leur P&L</span>
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <ExpertCard name="Gapper" icon="🚀" data={experts.gapper} />
-          <ExpertCard name="Geometric" icon="📐" data={experts.geometric} />
+          <ExpertCard name="Gap" icon="🚀" data={experts.gapper} />
+          <ExpertCard name="Geo" icon="📐" data={experts.geometric} />
         </div>
       </div>
 
