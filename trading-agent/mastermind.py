@@ -194,9 +194,11 @@ class Mastermind:
             info = yf.Ticker(candidate["symbol"]).info
             candidate["float_shares"] = info.get("floatShares")
             candidate["short_interest"] = info.get("shortPercentOfFloat")
+            candidate["short_pct"] = info.get("shortPercentOfFloat") or 0.0
         except Exception:
             candidate["float_shares"] = None
             candidate["short_interest"] = None
+            candidate["short_pct"] = 0.0
 
     # ── Day trader rules ───────────────────────────────────────────────────
 

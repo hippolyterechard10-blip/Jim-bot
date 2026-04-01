@@ -182,8 +182,50 @@ class GapperExpert:
         if from_memory == "loss":
             size_pct *= 0.5
 
-        # Calculate position size (apply calendar event reduction if active)
-        capital_to_use = min(available, config.STRATEGY_CAPITAL["gapper"] * min(size_pct, 0.40))
+        # ── TIER 2 scoring (all Tier 1 filters passed)
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+        short_pct = candidate.get("short_pct", 0.0)
+        candle_pct = (first_candle_high - first_candle_low) / first_candle_low if first_candle_low > 0 else 0.0
+
+        tier2_score = 0
+        tier2_log = []
+
+        if volume_ratio >= 100:
+            tier2_score += 2
+            tier2_log.append(f"vol={volume_ratio:.0f}x(+2)")
+        elif volume_ratio >= 10:
+            tier2_score += 1
+            tier2_log.append(f"vol={volume_ratio:.0f}x(+1)")
+        else:
+            tier2_log.append(f"vol={volume_ratio:.1f}x(+0)")
+
+        if float_shares is not None and float_shares < 1_000_000:
+            tier2_score += 2
+            tier2_log.append("float<1M(+2)")
+        elif float_shares is not None and float_shares < 5_000_000:
+            tier2_score += 1
+            tier2_log.append(f"float<5M(+1)")
+        else:
+            _fstr = "N/A" if float_shares is None else f"{float_shares/1e6:.1f}M"
+            tier2_log.append(f"float={_fstr}(+0)")
+
+        if short_pct >= 0.20:
+            tier2_score += 1
+            tier2_log.append(f"short={short_pct*100:.0f}%(+1)")
+        else:
+            tier2_log.append(f"short={short_pct*100:.0f}%(+0)")
+
+        if candle_pct >= 0.05:
+            tier2_score += 1
+            tier2_log.append(f"candle={candle_pct*100:.1f}%(+1)")
+        else:
+            tier2_log.append(f"candle={candle_pct*100:.1f}%(+0)")
+
+        logger.info(f"[GAPPER] Tier2={tier2_score} [{' | '.join(tier2_log)}] {symbol}")
+
+        # Calculate position size with Tier 2 multiplier (apply calendar event reduction if active)
+        size_multiplier = 1.5 if tier2_score >= 4 else 1.2 if tier2_score >= 2 else 1.0
+        capital_to_use = min(available, config.STRATEGY_CAPITAL["gapper"] * min(size_pct * size_multiplier, 0.35))
         capital_to_use *= size_modifier
         if size_modifier < 1.0:
             logger.info(f"[GAPPER] 📅 Calendar modifier ×{size_modifier:.2f} → capital=${capital_to_use:.0f}")
@@ -263,6 +305,10 @@ class GapperExpert:
                     "target_partial": round(current_price * 1.10, 4),
                     "target_pct": 10.0,
                     "alpaca_stop_order_id": stop_order_id,
+                    "tier2_score": tier2_score,
+                    "volume_ratio": round(volume_ratio, 1),
+                    "short_pct": round(short_pct, 3),
+                    "candle_pct": round(candle_pct if first_candle_low > 0 else 0, 4),
                 }
             )
 
