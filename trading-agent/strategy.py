@@ -41,9 +41,11 @@ def get_market_session() -> str:
 
 
 def is_good_stock_window() -> bool:
-    """True si on est dans une bonne fenêtre pour trader les stocks."""
+    """True during regular market hours only (9:30–16:00 ET).
+    Pre-market is excluded — Alpaca v1 SDK bars are unreliable before 9:30 ET.
+    Crypto uses is_crypto_good_hours() independently."""
     session = get_market_session()
-    return session in ["pre_market", "open", "power_hour"]
+    return session in ["open", "power_hour"]
 
 
 def is_crypto_good_hours() -> bool:
