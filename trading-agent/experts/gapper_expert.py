@@ -68,7 +68,7 @@ class GapperExpert:
     def has_capital(self) -> bool:
         return self.get_available_capital() >= 50.0
 
-    def evaluate(self, candidate: dict):
+    def evaluate(self, candidate: dict, size_modifier: float = 1.0):
         import pytz
         from datetime import datetime, timezone
         import uuid
@@ -172,8 +172,11 @@ class GapperExpert:
         if from_memory == "loss":
             size_pct *= 0.5
 
-        # Calculate position size
+        # Calculate position size (apply calendar event reduction if active)
         capital_to_use = min(available, config.STRATEGY_CAPITAL["gapper"] * min(size_pct, 0.40))
+        capital_to_use *= size_modifier
+        if size_modifier < 1.0:
+            logger.info(f"[GAPPER] 📅 Calendar modifier ×{size_modifier:.2f} → capital=${capital_to_use:.0f}")
         qty = max(1, int(capital_to_use / current_price))
 
         if qty * current_price < 20:

@@ -38,6 +38,9 @@ class Mastermind:
         self._gapper_consecutive_losses: int = 0
         self._last_reset_date: str = ""
 
+        # Calendar-driven size modifier (refreshed every 5min)
+        self._size_modifier: float = 1.0
+
         logger.info("✅ Mastermind V2 initialized")
         logger.info(
             f"💰 CAPITAL SPLIT: Gap=${config.STRATEGY_CAPITAL['gapper']:.2f} | "
@@ -155,6 +158,9 @@ class Mastermind:
 
     def _circuit_breaker_slow(self):
         """Slow checks — called every 5min."""
+        # Calendar size modifier — refresh every slow cycle
+        self._size_modifier = self._check_calendar_size_modifier()
+
         # Earnings day check — log symbols to skip
         try:
             earnings = self.scanner.get_earnings_alerts()
@@ -259,7 +265,7 @@ class Mastermind:
                 )
 
                 if self._can_gapper_trade() and self.gapper.has_capital():
-                    self.gapper.evaluate(candidate)
+                    self.gapper.evaluate(candidate, size_modifier=self._size_modifier)
 
         except Exception as e:
             logger.error(f"[MASTERMIND] Gapper detection error: {e}")
@@ -279,7 +285,7 @@ class Mastermind:
             # Execute top candidates
             if self.geometric.has_capital():
                 for symbol in self.geometric.flush_candidates()[:5]:
-                    self.geometric.evaluate(symbol)
+                    self.geometric.evaluate(symbol, size_modifier=self._size_modifier)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 

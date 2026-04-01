@@ -76,7 +76,7 @@ class GeometricExpert:
         if confluence_score >= 4: return 0.90
         return 0.80
 
-    def evaluate(self, symbol: str):
+    def evaluate(self, symbol: str, size_modifier: float = 1.0):
         import uuid
         from strategy import compute_indicators, is_good_stock_window, is_crypto_good_hours
 
@@ -281,6 +281,10 @@ class GeometricExpert:
             position_pct   = 0.28  # 28% of pool per position
             capital_to_use = min(available, config.STRATEGY_CAPITAL["geometric"] * position_pct)
             capital_to_use = min(capital_to_use, max_capital - self.get_deployed_capital())
+            # Apply calendar event size reduction if active
+            capital_to_use *= size_modifier
+            if size_modifier < 1.0:
+                logger.info(f"[GEO] 📅 Calendar modifier ×{size_modifier:.2f} → capital=${capital_to_use:.0f}")
 
             if capital_to_use < 30:
                 logger.info(f"[GEO] {symbol} — capital deployment limit reached")
