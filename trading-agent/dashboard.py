@@ -600,6 +600,26 @@ header{display:flex;justify-content:space-between;align-items:center;padding:16p
   <div class="stat-card"><div class="stat-label">Max Drawdown</div><div class="stat-value neg" id="kpi-dd">—</div></div>
   <div class="stat-card"><div class="stat-label">Positions Open</div><div class="stat-value neu" id="kpi-open">—</div></div>
 </div>
+<div class="experts-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-bottom:1px">
+  <div style="background:var(--surface);padding:20px">
+    <div class="panel-title">🚀 Gapper Expert</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div><div class="stat-label">Capital</div><div class="stat-value pos" id="gap-capital">—</div></div>
+      <div><div class="stat-label">Return</div><div class="stat-value pos" id="gap-return">—</div></div>
+      <div><div class="stat-label">Trades</div><div class="stat-value neu" id="gap-trades">—</div></div>
+      <div><div class="stat-label">Win Rate</div><div class="stat-value neu" id="gap-wr">—</div></div>
+    </div>
+  </div>
+  <div style="background:var(--surface);padding:20px">
+    <div class="panel-title">📐 Geometric Expert</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div><div class="stat-label">Capital</div><div class="stat-value pos" id="geo-capital">—</div></div>
+      <div><div class="stat-label">Return</div><div class="stat-value pos" id="geo-return">—</div></div>
+      <div><div class="stat-label">Trades</div><div class="stat-value neu" id="geo-trades">—</div></div>
+      <div><div class="stat-label">Win Rate</div><div class="stat-value neu" id="geo-wr">—</div></div>
+    </div>
+  </div>
+</div>
 <div class="main">
   <div class="panel panel-half">
     <div class="panel-title">Positions ouvertes</div>
@@ -637,6 +657,22 @@ function fmtDur(m){if(!m)return'—';const n=Math.round(m);return n<60?n+'min':M
 async function fetchJSON(url){try{const r=await fetch(url);return await r.json()}catch(e){return null}}
 function updateClock(){document.getElementById('clock').textContent=new Date().toUTCString().split(' ')[4]+' UTC'}
 setInterval(updateClock,1000);updateClock();
+async function updateExpertsStats(){
+  const d=await fetchJSON('/api/experts/stats');
+  if(!d)return;
+  const g=d.gapper||{};const geo=d.geometric||{};
+  const fmtCap=v=>'$'+(v||500).toFixed(2);
+  const fmtRet=v=>{const n=(v||0);const s=n>=0?'+':'';return s+n.toFixed(2)+'%'};
+  const fmtWr=v=>(v||0).toFixed(1)+'%';
+  document.getElementById('gap-capital').textContent=fmtCap(g.capital_now);
+  const gr=document.getElementById('gap-return');gr.textContent=fmtRet(g.capital_return);gr.className='stat-value '+(g.capital_return>=0?'pos':'neg');
+  document.getElementById('gap-trades').textContent=(g.total_trades||0)+(g.open_trades?` (${g.open_trades} open)`:'');
+  document.getElementById('gap-wr').textContent=fmtWr(g.win_rate);
+  document.getElementById('geo-capital').textContent=fmtCap(geo.capital_now);
+  const rr=document.getElementById('geo-return');rr.textContent=fmtRet(geo.capital_return);rr.className='stat-value '+(geo.capital_return>=0?'pos':'neg');
+  document.getElementById('geo-trades').textContent=(geo.total_trades||0)+(geo.open_trades?` (${geo.open_trades} open)`:'');
+  document.getElementById('geo-wr').textContent=fmtWr(geo.win_rate);
+}
 async function updateStats(){
   const s=await fetchJSON('/api/stats');
   if(!s||s.total_trades===0)return;
@@ -697,7 +733,7 @@ async function updateAnalyses(){
   }).join('');
 }
 async function refreshAll(){
-  await Promise.all([updateStats(),updateOpenTrades(),updateTradesHistory(),updateDecisions(),updateAnalyses()]);
+  await Promise.all([updateStats(),updateExpertsStats(),updateOpenTrades(),updateTradesHistory(),updateDecisions(),updateAnalyses()]);
   const bar=document.getElementById('refresh-progress');
   bar.style.transition='none';bar.style.width='0%';
   requestAnimationFrame(()=>{bar.style.transition=`width ${REFRESH}ms linear`;bar.style.width='100%'});
