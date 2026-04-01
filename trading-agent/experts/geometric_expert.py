@@ -88,6 +88,16 @@ class GeometricExpert:
         if is_crypto and not is_crypto_good_hours():
             return
 
+        # Double-entry guard — block re-entry on already-open geometric position
+        open_syms = {
+            t["symbol"]
+            for t in self.memory.get_open_trades()
+            if (t.get("market_context") or {}).get("strategy_source") == "geometric"
+        }
+        if symbol in open_syms:
+            logger.debug(f"[GEO GUARD] {symbol} already open → skip")
+            return
+
         # Get bars — 1-min for entry, 1-hour for structure
         bars_1m = self.broker.get_bars(symbol, "1Min", limit=50)
         if bars_1m is None or bars_1m.empty or len(bars_1m) < 20:
