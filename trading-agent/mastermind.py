@@ -235,6 +235,14 @@ class Mastermind:
             else:
                 # Market hours: use top movers, filter for real gappers
                 movers = self.scanner.get_top_movers(top_n=10)
+                for m in movers:
+                    chg = m.get("change_pct", 0)
+                    vol = m.get("volume_ratio", 0)
+                    verdict = "PASS" if chg >= 20 and vol >= 3 else "FAIL"
+                    logger.info(
+                        f"[MASTERMIND] Mover: {m.get('symbol','')} "
+                        f"change={chg:.1f}% vol={vol:.1f}x — {verdict}"
+                    )
                 candidates = [
                     m for m in movers
                     if m.get("change_pct", 0) >= 20 and m.get("volume_ratio", 0) >= 3
