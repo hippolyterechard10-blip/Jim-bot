@@ -1,0 +1,85 @@
+def manage_open_positions(self):
+    """Manage trailing stop for geometric positions."""
+    try:
+        positions = self.broker.get_positions()
+        open_trades = self.memory.get_open_trades()
+
+        for pos in (positions or []):
+            match = None
+            ctx_data = {}
+            for t in open_trades:
+                ctx = t.get("market_context") or {}
+                if isinstance(ctx, str):
+                    import json
+                    try: ctx = json.loads(ctx)
+                    except: ctx = {}
+                if (ctx.get("strategy_source") == "geometric"
+                        and t.get("symbol") == pos.symbol
+                        and t.get("status") == "open"):
+                    match = t
+                    ctx_data = ctx
+                    break
+
+            if not match:
+                continue
+
+            current_price = float(pos.current_price)
+            entry_price   = float(match.get("entry_price", current_price))
+            qty           = float(pos.qty)
+            side          = ctx_data.get("side", "long")
+            target_mid    = ctx_data.get("target_midpoint")
+            partial_taken = ctx_data.get("partial_taken", False)
+            symbol        = pos.symbol
+
+            if side == "long":
+                gain_pct = (current_price - entry_price) / entry_price * 100
+            else:
+                gain_pct = (entry_price - current_price) / entry_price * 100
+
+            # Partial at midpoint target → sell 50%
+            if target_mid and not partial_taken:
+                if (side == "long" and current_price >= target_mid) or \
+                   (side == "short" and current_price <= target_mid):
+                    sell_qty = max(1, int(abs(qty) * 0.50)) if "/" not in symbol else round(abs(qty) * 0.50, 6)
+                    logger.info(f"[GEO] 💰 PARTIAL: {symbol} reached midpoint target ${target_mid:.4f}")
+                    self.broker.place_order(symbol, sell_qty, "sell" if side == "long" else "buy")
+                    if self.memory:
+                        pnl = (current_price - entry_price) * sell_qty * (1 if side == "long" else -1)
+                        self.memory.log_trade_close(match["trade_id"], current_price, "partial_geo", pnl=pnl)
+                        remaining = abs(qty) - sell_qty
+                        if remaining > 0:
+                            import uuid, json
+                            self.memory.log_trade_open(
+                                trade_id=str(uuid.uuid4()),
+                                symbol=symbol, side=match.get("side"),
+                                qty=remaining, entry_price=entry_price,
+                                market_context={**ctx_data, "partial_taken": True}
+                            )
+
+            # Trailing stop -1% from best price (after partial)
+            if partial_taken:
+                if side == "long":
+                    best = ctx_data.get("high_water", current_price)
+                    new_best = max(best, current_price)
+                    ctx_data["high_water"] = new_best
+                    trail_stop = new_best * 0.99
+                    if current_price <= trail_stop:
+                        logger.info(f"[GEO] 🔴 TRAIL STOP (long): {symbol} ${current_price:.4f}")
+                        self.broker.close_position(symbol)
+                        if self.memory:
+                            pnl = (current_price - entry_price) * qty
+                            self.memory.log_trade_close(match["trade_id"], current_price, "geo_trailing_stop", pnl=pnl)
+                else:
+                    best = ctx_data.get("low_water", current_price)
+                    new_best = min(best, current_price)
+                    ctx_data["low_water"] = new_best
+                    trail_stop = new_best * 1.01
+                    if current_price >= trail_stop:
+                        logger.info(f"[GEO] 🔴 TRAIL STOP (short): {symbol} ${current_price:.4f}")
+                        self.broker.close_position(symbol)
+                        if self.memory:
+                            pnl = (entry_price - current_price) * abs(qty)
+                            self.memory.log_trade_close(match["trade_id"], current_price, "geo_trailing_stop", pnl=pnl)
+
+    except Exception as e:
+        logger.error(f"[GEO] manage_open_positions error: {e}")
