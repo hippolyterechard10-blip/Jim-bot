@@ -89,6 +89,11 @@ interface IndividualTrade {
   strategy_source: string | null;
   geo_context: GeoContext | null;
 }
+interface TradeDetail extends IndividualTrade {
+  stop_loss: number | null;
+  take_profit: number | null;
+  analysis: { outcome: string | null; text: string | null; lessons: string | null; mistakes: string | null } | null;
+}
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
 type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
@@ -971,6 +976,150 @@ function AnalysisPage() {
   );
 }
 
+// ── TRADE DETAIL MODAL ────────────────────────────────────────────────────────
+const CLOSE_REASON_LABELS: Record<string, string> = {
+  position_reconciled: "Stop Hit (reconciled)",
+  synced_close:        "Synced Close",
+  time_limit:          "Time Limit (10:45 ET)",
+  trailing_stop:       "Trailing Stop",
+  hard_stop_loss:      "Hard Stop Loss",
+  manual_close:        "Manual Close",
+  partial_profit_remainder: "Partial Profit",
+};
+
+function TradeDetailModal({ tradeId, onClose }: { tradeId: string; onClose: () => void }) {
+  const [d, setD] = useState<TradeDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`${BASE}/api/trades/${tradeId}`)
+      .then(r => r.json())
+      .then(data => { setD(data as TradeDetail); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [tradeId]);
+
+  const isPos   = (d?.pnl ?? 0) >= 0;
+  const isLong  = d?.side === "buy" || d?.side === "long";
+  const outcome = d?.analysis?.outcome ?? (d?.pnl === 0 ? "breakeven" : isPos ? "win" : "loss");
+  const outcomeColor = outcome === "win" ? "text-emerald-400" : outcome === "loss" ? "text-red-400" : "text-yellow-400";
+  const reasonLabel = (d?.close_reason ?? "").split(",").map(r => CLOSE_REASON_LABELS[r.trim()] ?? r.trim()).join(" + ");
+
+  function fmtPrice(v: number | null | undefined, dp = 6) {
+    if (v == null) return "—";
+    return "$" + v.toFixed(dp);
+  }
+  const dp = d?.entry_price != null ? (d.entry_price < 0.001 ? 8 : d.entry_price < 1 ? 6 : 4) : 4;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700/60">
+          <div className="flex items-center gap-3">
+            <span className="text-xl font-bold text-white">{d?.symbol ?? "—"}</span>
+            {d && <span className={`text-xs font-bold px-2 py-0.5 rounded ${isLong ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{isLong ? "↑ LONG" : "↓ SHORT"}</span>}
+            {d?.strategy_source === "gapper"   && <span className="text-xs font-bold px-2 py-0.5 rounded bg-orange-500/15 text-orange-400">Gap</span>}
+            {d?.strategy_source === "geometric" && <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Geo</span>}
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-white text-lg leading-none">✕</button>
+        </div>
+
+        {loading ? (
+          <div className="p-8 text-center text-slate-500 text-sm">Loading...</div>
+        ) : !d ? (
+          <div className="p-8 text-center text-slate-500 text-sm">Trade not found</div>
+        ) : (
+          <div className="p-5 space-y-4">
+            {/* P&L summary */}
+            <div className="flex items-center gap-4">
+              <div className={`text-3xl font-bold font-mono ${isPos ? "text-emerald-400" : d.pnl === 0 ? "text-yellow-400" : "text-red-400"}`}>
+                {d.pnl != null ? ((isPos ? "+" : d.pnl === 0 ? "" : "-") + "$" + Math.abs(d.pnl).toFixed(4)) : "—"}
+              </div>
+              {d.pnl_pct != null && <div className={`text-sm ${isPos ? "text-emerald-500" : "text-red-500"}`}>({d.pnl_pct >= 0 ? "+" : ""}{d.pnl_pct.toFixed(3)}%)</div>}
+              <span className={`ml-auto text-xs font-bold uppercase px-2 py-0.5 rounded ${outcomeColor} border border-current/30`}>{outcome}</span>
+            </div>
+
+            {/* Price levels */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-slate-800/60 rounded-lg p-3">
+                <div className="text-[10px] uppercase text-slate-500 mb-1">Entry</div>
+                <div className="text-sm font-mono text-white">{fmtPrice(d.entry_price, dp)}</div>
+                <div className="text-[10px] text-slate-600 mt-0.5">{d.entry_at ? fmtDateTime(d.entry_at) : "—"}</div>
+              </div>
+              <div className="bg-slate-800/60 rounded-lg p-3">
+                <div className="text-[10px] uppercase text-slate-500 mb-1">Exit</div>
+                <div className={`text-sm font-mono ${isPos ? "text-emerald-400" : d.pnl === 0 ? "text-yellow-400" : "text-red-400"}`}>{fmtPrice(d.exit_price, dp)}</div>
+                <div className="text-[10px] text-slate-600 mt-0.5">{d.exit_at ? fmtDateTime(d.exit_at) : "—"}</div>
+              </div>
+              <div className="bg-red-900/20 border border-red-800/30 rounded-lg p-3">
+                <div className="text-[10px] uppercase text-red-500/70 mb-1">Stop Loss</div>
+                <div className="text-sm font-mono text-red-400">{fmtPrice(d.stop_loss, dp)}</div>
+              </div>
+              <div className="bg-emerald-900/20 border border-emerald-800/30 rounded-lg p-3">
+                <div className="text-[10px] uppercase text-emerald-500/70 mb-1">Target</div>
+                <div className="text-sm font-mono text-emerald-400">{fmtPrice(d.take_profit ?? d.geo_context?.target_midpoint, dp)}</div>
+                {d.exit_vs_target != null && <div className="text-[10px] text-slate-500 mt-0.5">Reached {d.exit_vs_target}% of objective</div>}
+              </div>
+            </div>
+
+            {/* Hold + close reason */}
+            <div className="flex gap-3 text-sm">
+              <div className="bg-slate-800/60 rounded-lg p-3 flex-1">
+                <div className="text-[10px] uppercase text-slate-500 mb-1">Hold Duration</div>
+                <div className="text-white font-mono">{fmtHoldMin(d.hold_min)}</div>
+              </div>
+              <div className="bg-slate-800/60 rounded-lg p-3 flex-1">
+                <div className="text-[10px] uppercase text-slate-500 mb-1">Exit Reason</div>
+                <div className="text-yellow-300 text-xs font-medium">{reasonLabel || "—"}</div>
+              </div>
+            </div>
+
+            {/* Geo context */}
+            {d.geo_context && (
+              <div className="bg-slate-800/40 rounded-xl p-3 space-y-2">
+                <div className="text-[10px] uppercase text-slate-500 font-semibold tracking-wider">Setup Analysis</div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                  <div className="flex justify-between"><span className="text-slate-500">Structure</span><span className="text-white capitalize">{d.geo_context.structure ?? "—"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Confluence</span><span className="text-white">{d.geo_context.confluence ?? "—"}/10</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">RSI Divergence</span><span className={d.geo_context.rsi_divergence ? "text-emerald-400" : "text-slate-500"}>{d.geo_context.rsi_divergence ? "Yes ✓" : "No"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">ATR</span><span className="text-white font-mono">{d.geo_context.atr != null ? d.geo_context.atr.toFixed(6) : "—"}</span></div>
+                  {d.geo_context.level != null && <div className="flex justify-between"><span className="text-slate-500">S/R Level</span><span className="text-white font-mono">{fmtPrice(d.geo_context.level, dp)}</span></div>}
+                  {d.geo_context.patterns?.length > 0 && <div className="flex justify-between"><span className="text-slate-500">Patterns</span><span className="text-sky-400">{d.geo_context.patterns.join(", ")}</span></div>}
+                </div>
+              </div>
+            )}
+
+            {/* AI Analysis */}
+            {d.analysis?.text ? (
+              <div className="bg-slate-800/40 rounded-xl p-3 space-y-3">
+                <div className="text-[10px] uppercase text-slate-500 font-semibold tracking-wider">AI Analysis</div>
+                <p className="text-xs text-slate-300 leading-relaxed">{d.analysis.text}</p>
+                {d.analysis.lessons && (
+                  <div>
+                    <div className="text-[10px] text-emerald-500/70 font-semibold mb-1">Lessons</div>
+                    <p className="text-xs text-slate-400 leading-relaxed">{d.analysis.lessons}</p>
+                  </div>
+                )}
+                {d.analysis.mistakes && (
+                  <div>
+                    <div className="text-[10px] text-red-500/70 font-semibold mb-1">Mistakes / Issues</div>
+                    <p className="text-xs text-slate-400 leading-relaxed">{d.analysis.mistakes}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-slate-800/30 rounded-xl p-3 text-center text-xs text-slate-600">
+                No AI analysis available for this trade yet
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── TRADES PAGE ───────────────────────────────────────────────────────────────
 function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday, closedPeriod, setClosedPeriod, experts = {} }: {
   positions: Position[]; decisions: Decision[];
@@ -994,6 +1143,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
   const [tradeView,        setTradeView]        = useState<"grouped" | "individual">("individual");
   const [closedIndividual, setClosedIndividual] = useState<IndividualTrade[]>([]);
   const [expertFilter,     setExpertFilter]     = useState<ExpertFilter>("all");
+  const [selectedTradeId,  setSelectedTradeId]  = useState<string | null>(null);
   const [openDbTrades,     setOpenDbTrades]     = useState<OpenDbTrade[]>([]);
 
   useEffect(() => {
@@ -1041,6 +1191,8 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
   const indLosses   = filteredIndividual.filter(t => (t.pnl ?? 0) < 0).length;
 
   return (
+    <>
+    {selectedTradeId && <TradeDetailModal tradeId={selectedTradeId} onClose={() => setSelectedTradeId(null)} />}
     <div className="p-4 sm:p-6 space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-bold text-white">Open Positions</h2>
@@ -1220,7 +1372,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                       const isPos   = (t.pnl ?? 0) >= 0;
                       const isLong  = t.side === "buy" || t.side === "long";
                       return (
-                        <tr key={t.trade_id} className={`border-l-2 ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
+                        <tr key={t.trade_id} onClick={() => setSelectedTradeId(t.trade_id)} className={`border-l-2 cursor-pointer hover:bg-slate-700/30 transition-colors ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
                           <td className="px-3 py-2">
                             <span className="font-bold text-white text-sm">{t.symbol.replace("/USD","")}</span>
                             <span className={`ml-1.5 text-[10px] font-bold ${isLong ? "text-emerald-500" : "text-red-500"}`}>
@@ -1312,6 +1464,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
         )}
       </div>
     </div>
+    </>
   );
 }
 

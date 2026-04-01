@@ -220,6 +220,11 @@ router.get("/experts/stats", async (_req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/experts/stats`, {}));
 });
 
+router.get("/trades/:trade_id", async (req, res) => {
+  const trade_id = req.params.trade_id;
+  res.json(await proxyFlask(`${FLASK_BASE}/api/trades/${trade_id}`, { error: "not found" }));
+});
+
 router.get("/source", async (_req, res) => {
   try {
     const r = await fetch(`${FLASK_BASE}/source`);

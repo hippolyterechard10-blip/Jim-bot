@@ -276,7 +276,6 @@ def api_trades_individual():
                        entry_snapshot, exit_vs_target, market_context
                 FROM trades
                 WHERE status = 'closed'
-                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
                   AND exit_at >= ?
                 ORDER BY exit_at DESC LIMIT ?
             """, (since, limit))
@@ -288,7 +287,6 @@ def api_trades_individual():
                        entry_snapshot, exit_vs_target, market_context
                 FROM trades
                 WHERE status = 'closed'
-                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
                 ORDER BY exit_at DESC LIMIT ?
             """, (limit,))
         rows = c.fetchall()
@@ -340,6 +338,73 @@ def api_trades_individual():
     except Exception as e:
         logger.error(f"api_trades_individual error: {e}")
         return jsonify({"trades": [], "error": str(e)})
+
+@app.route("/api/trades/<trade_id>")
+def api_trade_detail(trade_id):
+    if not _memory:
+        return jsonify({"error": "not ready"}), 503
+    try:
+        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        trade = conn.execute("""
+            SELECT trade_id, symbol, side, qty, entry_price, exit_price,
+                   pnl, pnl_pct, hold_duration_min, close_reason,
+                   entry_at, exit_at, stop_loss, take_profit,
+                   exit_vs_target, market_context
+            FROM trades WHERE trade_id = ?
+        """, (trade_id,)).fetchone()
+        if not trade:
+            conn.close()
+            return jsonify({"error": "not found"}), 404
+        analysis = conn.execute("""
+            SELECT outcome, pnl, analysis, lessons, mistakes
+            FROM trade_analyses WHERE trade_id = ?
+            ORDER BY rowid DESC LIMIT 1
+        """, (trade_id,)).fetchone()
+        conn.close()
+        mc = {}
+        try: mc = json.loads(trade["market_context"] or "{}")
+        except: pass
+        geo = None
+        if mc.get("strategy_source") == "geometric":
+            geo = {
+                "confluence":      mc.get("confluence"),
+                "structure":       mc.get("structure"),
+                "rsi_divergence":  mc.get("rsi_divergence"),
+                "atr":             mc.get("atr"),
+                "target_midpoint": mc.get("target_midpoint"),
+                "patterns":        mc.get("patterns") or [],
+                "level":           mc.get("level"),
+                "side":            mc.get("side"),
+            }
+        return jsonify({
+            "trade_id":        trade["trade_id"],
+            "symbol":          trade["symbol"],
+            "side":            trade["side"],
+            "qty":             trade["qty"],
+            "entry_price":     trade["entry_price"],
+            "exit_price":      trade["exit_price"],
+            "pnl":             trade["pnl"],
+            "pnl_pct":         trade["pnl_pct"],
+            "hold_min":        trade["hold_duration_min"],
+            "close_reason":    trade["close_reason"],
+            "entry_at":        trade["entry_at"],
+            "exit_at":         trade["exit_at"],
+            "stop_loss":       trade["stop_loss"],
+            "take_profit":     trade["take_profit"],
+            "exit_vs_target":  trade["exit_vs_target"],
+            "strategy_source": mc.get("strategy_source"),
+            "geo_context":     geo,
+            "analysis": {
+                "outcome":  analysis["outcome"],
+                "text":     analysis["analysis"],
+                "lessons":  analysis["lessons"],
+                "mistakes": analysis["mistakes"],
+            } if analysis else None,
+        })
+    except Exception as e:
+        logger.error(f"api_trade_detail error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/analysis")
 def api_analysis():
