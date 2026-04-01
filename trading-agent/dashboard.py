@@ -46,7 +46,15 @@ def api_recent_trades():
 @app.route("/api/decisions/recent")
 def api_recent_decisions():
     if not _memory: return jsonify([])
-    return jsonify(_memory.get_recent_decisions(limit=15))
+    decisions = _memory.get_recent_decisions(limit=15)
+    for d in decisions:
+        md = d.get("market_data")
+        try:
+            ctx = json.loads(md) if isinstance(md, str) else (md or {})
+            d["strategy_source"] = ctx.get("strategy_source")
+        except Exception:
+            d["strategy_source"] = None
+    return jsonify(decisions)
 
 @app.route("/api/analyses/recent")
 def api_recent_analyses():
@@ -265,12 +273,12 @@ def api_analysis():
         conn = sqlite3.connect(_memory.db_path, timeout=10)
         c    = conn.cursor()
 
-        # ── Expert filter (gap = stocks, geo = crypto with /) ──────────
+        # ── Expert filter — based on strategy_source in market_context ──
         expert = request.args.get("expert", "all").lower()
         if expert == "gap":
-            ef = "AND symbol NOT LIKE '%/%'"
+            ef = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
         elif expert == "geo":
-            ef = "AND symbol LIKE '%/%'"
+            ef = "AND json_extract(market_context, '$.strategy_source') = 'geometric'"
         else:
             ef = ""
 

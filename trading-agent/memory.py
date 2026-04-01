@@ -77,6 +77,39 @@ class TradingMemory:
                 except Exception:
                     pass
 
+    def backfill_strategy_source(self) -> int:
+        """One-time migration: set strategy_source on trades that don't have it yet.
+        Uses symbol type as proxy ONLY for historical alpaca_sync'd data where
+        crypto=geometric and stock=gapper is accurate. Future native trades will
+        have strategy_source set at log_trade_open time."""
+        updated = 0
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT trade_id, symbol, market_context FROM trades "
+                    "WHERE json_extract(market_context,'$.strategy_source') IS NULL"
+                ).fetchall()
+                for row in rows:
+                    trade_id = row["trade_id"]
+                    symbol   = row["symbol"] or ""
+                    mc_raw   = row["market_context"]
+                    try:
+                        ctx = json.loads(mc_raw) if mc_raw else {}
+                    except Exception:
+                        ctx = {}
+                    inferred = "geometric" if "/" in symbol else "gapper"
+                    ctx["strategy_source"] = inferred
+                    conn.execute(
+                        "UPDATE trades SET market_context=? WHERE trade_id=?",
+                        (json.dumps(ctx), trade_id)
+                    )
+                    updated += 1
+            if updated:
+                logger.info(f"[MEMORY] 🔧 Backfilled strategy_source on {updated} trades")
+        except Exception as e:
+            logger.error(f"backfill_strategy_source error: {e}")
+        return updated
+
     @contextmanager
     def _conn(self):
         conn = sqlite3.connect(self.db_path, timeout=30)

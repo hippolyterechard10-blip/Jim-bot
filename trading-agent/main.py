@@ -100,6 +100,8 @@ def main():
         logger.warning(f"Dedup synced_close failed: {_e}")
     # Also mark any DB-open records that no longer exist in Alpaca as closed
     agent._reconcile_stale_positions()
+    # Backfill strategy_source on historical trades that don't have it yet
+    memory.backfill_strategy_source()
 
     start_dashboard(memory, analyzer, scanner=agent.scanner, regime=agent.regime, agent=agent, port=5000)
     notifier.start_scheduler(daily_hour_utc=20)

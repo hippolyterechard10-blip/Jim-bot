@@ -29,6 +29,7 @@ interface Trade {
 interface Decision {
   symbol: string; decision: string; confidence: number;
   reasoning: string; market_data?: string; decided_at: string;
+  strategy_source?: string | null;
 }
 interface Status {
   agent: string; timestamp: string; db_connected: boolean;
@@ -1251,11 +1252,9 @@ function SignalsPage({ decisions }: { decisions: Decision[] }) {
   const [expertFilter, setExpertFilter] = useState<ExpertFilter>("all");
   const [showAll,      setShowAll]      = useState(false);
 
-  const isCrypto = (sym: string) => sym.includes("/");
-
   const byExpert = expertFilter === "all" ? decisions
-    : expertFilter === "gap" ? decisions.filter(d => !isCrypto(d.symbol))
-    : decisions.filter(d => isCrypto(d.symbol));
+    : expertFilter === "gap" ? decisions.filter(d => d.strategy_source === "gapper")
+    : decisions.filter(d => d.strategy_source === "geometric");
 
   const latestBySymbol: Record<string, Decision> = {};
   byExpert.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
@@ -1269,7 +1268,7 @@ function SignalsPage({ decisions }: { decisions: Decision[] }) {
       <div className="flex items-center gap-3 flex-wrap">
         <ExpertPills value={expertFilter} onChange={setExpertFilter} />
         <span className="text-[10px] text-slate-600">
-          {expertFilter === "gap" ? "Stocks · sans /" : expertFilter === "geo" ? "Crypto · avec /" : "Tous les experts"}
+          {expertFilter === "gap" ? "strategy_source: gapper" : expertFilter === "geo" ? "strategy_source: geometric" : "Tous les experts"}
         </span>
       </div>
 
