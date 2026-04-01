@@ -1366,75 +1366,108 @@ function MonthlyBarChart({ trades }: { trades: Trade[] }) {
   );
 }
 
-function ExpertCard({ name, icon, data }: { name: string; icon: string; data: ExpertStats | undefined }) {
+function ExpertCard({ name, icon, data, tagline, accent }: {
+  name: string; icon: string; data: ExpertStats | undefined;
+  tagline: string; accent: "amber" | "violet";
+}) {
+  const C = accent === "amber"
+    ? { border: "border-amber-700/40", bg: "bg-amber-950/20", hdr: "bg-amber-900/20 border-amber-800/30",
+        text: "text-amber-400", bar: "bg-amber-500", pill: "bg-amber-500/20 text-amber-400", dot: "bg-amber-400" }
+    : { border: "border-violet-700/40", bg: "bg-violet-950/20", hdr: "bg-violet-900/20 border-violet-800/30",
+        text: "text-violet-400", bar: "bg-violet-500", pill: "bg-violet-500/20 text-violet-400", dot: "bg-violet-400" };
+
   if (!data) return (
-    <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/40 flex items-center justify-center text-slate-600 text-xs">
-      {icon} {name} — aucune donnée
+    <div className={`rounded-xl border ${C.border} bg-slate-800/40 flex flex-col items-center justify-center gap-2 py-10`}>
+      <span className="text-3xl">{icon}</span>
+      <span className={`text-sm font-bold ${C.text}`}>{name}</span>
+      <span className="text-[10px] text-slate-600">{tagline}</span>
+      <span className="text-[10px] text-slate-700 mt-1">En attente de données…</span>
     </div>
   );
+
   const capPos = data.capital_now >= data.capital_start;
   const retPos = data.capital_return >= 0;
   const pnlPos = data.total_pnl >= 0;
   const unrPos = data.live_unrealized >= 0;
+  const rr     = data.avg_win !== 0 && data.avg_loss !== 0
+    ? (data.avg_win / Math.abs(data.avg_loss)).toFixed(2) + "x" : "—";
+  const barW   = Math.min(100, Math.max(2, (data.capital_now / Math.max(data.capital_start, data.capital_now, 1)) * 100));
+
   return (
-    <div className={`rounded-xl border overflow-hidden ${capPos ? "border-emerald-700/40 bg-emerald-950/20" : "border-red-700/40 bg-red-950/10"}`}>
-      {/* Header */}
-      <div className={`px-4 py-3 flex items-center justify-between border-b ${capPos ? "border-emerald-800/30 bg-emerald-900/20" : "border-red-800/20 bg-red-900/10"}`}>
-        <span className="text-sm font-bold text-slate-200">{icon} {name}</span>
-        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${capPos ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>
-          {retPos ? "+" : ""}{data.capital_return.toFixed(2)}%
-        </span>
-      </div>
-      {/* Capital row */}
-      <div className="px-4 py-3 border-b border-slate-700/20">
-        <div className="flex items-end justify-between">
+    <div className={`rounded-xl border ${C.border} ${C.bg} overflow-hidden flex flex-col`}>
+      {/* ── Header */}
+      <div className={`px-4 py-3 border-b ${C.hdr} flex items-center justify-between`}>
+        <div className="flex items-center gap-2.5">
+          <span className="text-xl">{icon}</span>
           <div>
-            <div className="text-[9px] uppercase text-slate-600 mb-0.5">Capital alloué</div>
-            <div className={`text-xl font-bold font-mono ${capPos ? "text-emerald-400" : "text-red-400"}`}>
+            <div className={`text-sm font-bold ${C.text}`}>{name}</div>
+            <div className="text-[9px] text-slate-600 leading-none mt-0.5">{tagline}</div>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className={`text-lg font-bold font-mono ${retPos ? "text-emerald-400" : "text-red-400"}`}>
+            {retPos ? "+" : ""}{data.capital_return.toFixed(2)}%
+          </div>
+          <div className="text-[9px] text-slate-600">retour capital</div>
+        </div>
+      </div>
+
+      {/* ── Capital */}
+      <div className="px-4 pt-3 pb-3 border-b border-slate-700/20">
+        <div className="flex items-end justify-between mb-2">
+          <div>
+            <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-0.5">Capital actuel</div>
+            <div className={`text-2xl font-bold font-mono ${capPos ? "text-emerald-400" : "text-red-400"}`}>
               ${data.capital_now.toFixed(2)}
             </div>
           </div>
-          <div className="text-right">
-            <div className="text-[9px] uppercase text-slate-600 mb-0.5">Départ</div>
-            <div className="text-xs font-mono text-slate-500">${data.capital_start.toFixed(0)}</div>
+          <div className="text-right space-y-0.5">
+            <div>
+              <span className="text-[9px] text-slate-600">Départ </span>
+              <span className="text-xs font-mono text-slate-400">${data.capital_start.toFixed(0)}</span>
+            </div>
+            <div>
+              <span className="text-[9px] text-slate-600">Réalisé </span>
+              <span className={`text-xs font-mono font-semibold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+                {pnlPos ? "+" : ""}${data.total_pnl.toFixed(2)}
+              </span>
+            </div>
           </div>
         </div>
-        {/* Capital progress bar */}
-        <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
-          <div
-            className={`h-1 rounded-full transition-all ${capPos ? "bg-emerald-500" : "bg-red-500"}`}
-            style={{ width: `${Math.min(100, Math.max(0, (data.capital_now / Math.max(data.capital_start, data.capital_now)) * 100))}%` }}
-          />
+        <div className="h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full transition-all ${capPos ? C.bar : "bg-red-500"}`} style={{ width: `${barW}%` }} />
         </div>
       </div>
-      {/* Stats grid */}
-      <div className="grid grid-cols-3 divide-x divide-slate-700/20">
-        <div className="px-3 py-2.5 text-center">
-          <div className="text-[9px] uppercase text-slate-600">P&L fermé</div>
-          <div className={`text-sm font-bold font-mono ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
-            {pnlPos ? "+" : ""}{data.total_pnl.toFixed(2)}
-          </div>
-        </div>
-        <div className="px-3 py-2.5 text-center">
-          <div className="text-[9px] uppercase text-slate-600">Win rate</div>
-          <div className={`text-sm font-bold ${data.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
+
+      {/* ── 3-col stats */}
+      <div className="grid grid-cols-3 divide-x divide-slate-700/20 flex-1">
+        <div className="px-3 py-3 text-center">
+          <div className="text-[9px] uppercase text-slate-600 mb-1">Win rate</div>
+          <div className={`text-base font-bold ${data.win_rate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>
             {data.win_rate.toFixed(0)}%
           </div>
-          <div className="text-[9px] text-slate-600">{data.total_trades} trades</div>
+          <div className="text-[9px] text-slate-600 mt-0.5">{data.total_trades} trades</div>
         </div>
-        <div className="px-3 py-2.5 text-center">
-          <div className="text-[9px] uppercase text-slate-600">Unrealized</div>
-          <div className={`text-sm font-bold font-mono ${unrPos ? "text-emerald-400" : data.live_unrealized < 0 ? "text-red-400" : "text-slate-400"}`}>
+        <div className="px-3 py-3 text-center">
+          <div className="text-[9px] uppercase text-slate-600 mb-1">Unrealized</div>
+          <div className={`text-base font-bold font-mono ${data.live_unrealized > 0 ? "text-emerald-400" : data.live_unrealized < 0 ? "text-red-400" : "text-slate-500"}`}>
             {data.live_unrealized !== 0 ? (unrPos ? "+" : "") + data.live_unrealized.toFixed(2) : "—"}
           </div>
-          {data.open_trades > 0 && <div className="text-[9px] text-slate-600">{data.open_trades} open</div>}
+          <div className="text-[9px] text-slate-600 mt-0.5">{data.open_trades > 0 ? `${data.open_trades} pos` : "flat"}</div>
+        </div>
+        <div className="px-3 py-3 text-center">
+          <div className="text-[9px] uppercase text-slate-600 mb-1">R:R</div>
+          <div className="text-base font-bold font-mono text-slate-300">{rr}</div>
+          <div className="text-[9px] text-slate-600 mt-0.5">avg win/loss</div>
         </div>
       </div>
-      {/* Avg win/loss */}
+
+      {/* ── Footer avg */}
       {(data.avg_win !== 0 || data.avg_loss !== 0) && (
-        <div className="px-4 py-2 border-t border-slate-700/20 flex gap-4 text-[10px]">
-          <span className="text-slate-600">Avg win: <span className="text-emerald-400 font-mono">+${data.avg_win.toFixed(2)}</span></span>
-          <span className="text-slate-600">Avg loss: <span className="text-red-400 font-mono">${data.avg_loss.toFixed(2)}</span></span>
+        <div className="px-4 py-2 border-t border-slate-700/20 flex items-center justify-between text-[10px] bg-slate-900/20">
+          <span className="text-slate-600">Avg win <span className="text-emerald-400 font-mono font-semibold">+${data.avg_win.toFixed(3)}</span></span>
+          <span className="text-slate-700">·</span>
+          <span className="text-slate-600">Avg loss <span className="text-red-400 font-mono font-semibold">${data.avg_loss.toFixed(3)}</span></span>
         </div>
       )}
     </div>
@@ -1489,9 +1522,125 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
     },
   ];
 
+  const gapCap  = experts.gapper?.capital_now   ?? 0;
+  const geoCap  = experts.geometric?.capital_now ?? 0;
+  const totalCap = gapCap + geoCap;
+
   return (
     <div className="p-4 sm:p-6 space-y-5">
-      {/* KPI row */}
+
+      {/* ── HERO: Two Expert Accounts ───────────────────────────── */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h2 className="text-sm font-bold text-slate-200">🧠 Mastermind V2</h2>
+            <p className="text-[10px] text-slate-600 mt-0.5">Deux comptes indépendants · capital qui compound séparément</p>
+          </div>
+          {totalCap > 0 && (
+            <div className="text-right">
+              <div className="text-[9px] text-slate-600 uppercase tracking-wider">Total</div>
+              <div className={`text-base font-bold font-mono ${totalCap >= INITIAL_CAPITAL ? "text-emerald-400" : "text-red-400"}`}>
+                ${totalCap.toFixed(2)}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <ExpertCard
+            name="Gap" icon="🚀" data={experts.gapper}
+            tagline="Stocks gappers · 9h35–10h45 ET · max 3 trades/j"
+            accent="amber"
+          />
+          <ExpertCard
+            name="Geo" icon="📐" data={experts.geometric}
+            tagline="Crypto · RSI divergence · patterns 24/7"
+            accent="violet"
+          />
+        </div>
+      </div>
+
+      {/* ── Portfolio strip ─────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Portefeuille ⚡</div>
+          <div className={`text-base font-bold font-mono ${portfolioValue >= INITIAL_CAPITAL ? "text-emerald-400" : "text-red-400"}`}>
+            ${portfolioValue.toFixed(0)}
+          </div>
+          <div className={`text-[9px] mt-0.5 ${totalReturn >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+            {totalReturn >= 0 ? "+" : ""}{totalReturn.toFixed(2)}%
+          </div>
+        </div>
+        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Unrealized ⚡</div>
+          <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            {fmtPnl(unrealizedTotal)}
+          </div>
+          <div className="text-[9px] text-slate-600 mt-0.5">{positions.length} pos ouvertes</div>
+        </div>
+        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Cash dispo</div>
+          <div className="text-base font-bold font-mono text-slate-300">
+            ${account ? account.cash.toFixed(0) : "—"}
+          </div>
+          <div className="text-[9px] text-slate-600 mt-0.5">{allocatedPct.toFixed(1)}% déployé</div>
+        </div>
+        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Win rate global</div>
+          <div className={`text-base font-bold ${stats && stats.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
+            {stats ? stats.win_rate.toFixed(1) + "%" : "—"}
+          </div>
+          <div className="text-[9px] text-slate-600 mt-0.5">
+            {analysis ? `${analysis.winning_trades}W / ${analysis.losing_trades}L` : "tous trades"}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Live positions (if any) ──────────────────────────────── */}
+      {account?.positions_live && account.positions_live.length > 0 && (
+        <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 overflow-hidden">
+          <div className="px-4 py-2 border-b border-slate-700/30 flex items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Positions ouvertes — Live</span>
+            <span className="text-[9px] text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">⚡ notre feed vs Alpaca</span>
+          </div>
+          <div className="divide-y divide-slate-700/20">
+            {account.positions_live.map(pos => {
+              const diff    = pos.live_price - pos.alpaca_mark;
+              const diffPct = (diff / pos.alpaca_mark) * 100;
+              const pnlPos  = pos.unrealized >= 0;
+              return (
+                <div key={pos.symbol} className="px-4 py-2.5 flex items-center gap-3 text-xs">
+                  <span className="font-bold text-slate-200 w-20">{pos.symbol}</span>
+                  <div className="flex-1 grid grid-cols-3 gap-3 text-center">
+                    <div>
+                      <div className="text-[9px] text-slate-600">Live</div>
+                      <div className="font-mono font-semibold text-sky-400">${pos.live_price.toFixed(4)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-600">Alpaca</div>
+                      <div className={`font-mono text-slate-400 ${Math.abs(diffPct) > 0.5 ? "line-through opacity-50" : ""}`}>
+                        ${pos.alpaca_mark.toFixed(4)}
+                      </div>
+                      {Math.abs(diffPct) > 0.1 && (
+                        <div className={`text-[9px] ${diffPct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                          {diffPct >= 0 ? "+" : ""}{diffPct.toFixed(2)}% lag
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-slate-600">Unrealized</div>
+                      <div className={`font-mono font-semibold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+                        {pnlPos ? "+" : ""}{pos.unrealized.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── KPI row ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {kpis.map(k => (
           <div key={k.label} className="bg-slate-800 rounded-xl p-4 border border-slate-700/50">
@@ -1502,99 +1651,7 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         ))}
       </div>
 
-      {/* Portfolio Snapshot strip */}
-      {(positions.length > 0 || account) && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-              <div className="text-[10px] uppercase text-slate-600 mb-1">Unrealized ⚡</div>
-              <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {fmtPnl(unrealizedTotal)}
-              </div>
-              {account?.live_unrealized !== undefined && (
-                <div className="text-[9px] text-slate-600 mt-0.5">live feed</div>
-              )}
-            </div>
-            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-              <div className="text-[10px] uppercase text-slate-600 mb-1">Cash</div>
-              <div className="text-base font-bold font-mono text-slate-300">
-                ${account ? account.cash.toFixed(0) : "—"}
-              </div>
-            </div>
-            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-              <div className="text-[10px] uppercase text-slate-600 mb-1">Allocated</div>
-              <div className="text-base font-bold font-mono text-slate-300">
-                {allocatedPct.toFixed(1)}%
-              </div>
-            </div>
-            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-              <div className="text-[10px] uppercase text-slate-600 mb-1">Positions</div>
-              <div className="text-base font-bold font-mono text-slate-300">
-                {positions.length} open
-              </div>
-            </div>
-          </div>
-
-          {/* Live positions detail — shows live price vs Alpaca stale mark */}
-          {account?.positions_live && account.positions_live.length > 0 && (
-            <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 overflow-hidden">
-              <div className="px-4 py-2 border-b border-slate-700/30 flex items-center gap-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Open Positions — Live Mark</span>
-                <span className="text-[9px] text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">⚡ notre feed vs Alpaca</span>
-              </div>
-              <div className="divide-y divide-slate-700/20">
-                {account.positions_live.map(pos => {
-                  const diff = pos.live_price - pos.alpaca_mark;
-                  const diffPct = (diff / pos.alpaca_mark) * 100;
-                  const pnlPos = pos.unrealized >= 0;
-                  return (
-                    <div key={pos.symbol} className="px-4 py-2.5 flex items-center gap-3 text-xs">
-                      <span className="font-bold text-slate-200 w-20">{pos.symbol}</span>
-                      <div className="flex-1 grid grid-cols-3 gap-3 text-center">
-                        <div>
-                          <div className="text-[9px] text-slate-600">Live price</div>
-                          <div className="font-mono font-semibold text-sky-400">${pos.live_price.toFixed(4)}</div>
-                        </div>
-                        <div>
-                          <div className="text-[9px] text-slate-600">Alpaca mark</div>
-                          <div className={`font-mono text-slate-400 ${Math.abs(diffPct) > 0.5 ? "line-through opacity-50" : ""}`}>
-                            ${pos.alpaca_mark.toFixed(4)}
-                          </div>
-                          {Math.abs(diffPct) > 0.1 && (
-                            <div className={`text-[9px] ${diffPct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                              {diffPct >= 0 ? "+" : ""}{diffPct.toFixed(2)}% lag
-                            </div>
-                          )}
-                        </div>
-                        <div>
-                          <div className="text-[9px] text-slate-600">Unrealized</div>
-                          <div className={`font-mono font-semibold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
-                            {pnlPos ? "+" : ""}{pos.unrealized.toFixed(2)}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Experts Pillar section */}
-      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">🧠 Mastermind V2 — Experts</span>
-          <span className="text-[10px] text-slate-600">capital 50% / 50% · se capitalise sur leur P&L</span>
-        </div>
-        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <ExpertCard name="Gap" icon="🚀" data={experts.gapper} />
-          <ExpertCard name="Geo" icon="📐" data={experts.geometric} />
-        </div>
-      </div>
-
-      {/* Daily P&L chart */}
+      {/* ── Daily P&L ───────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
           <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Daily P&L</span>
@@ -1605,7 +1662,7 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         </div>
       </div>
 
-      {/* Monthly P&L chart */}
+      {/* ── Monthly P&L ─────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
           <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Monthly P&L</span>
@@ -1616,33 +1673,30 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         </div>
       </div>
 
-      {/* Costs */}
+      {/* ── Costs ───────────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700">
-          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">💸 Monthly Costs — {now.toLocaleString("default", { month: "long", year: "numeric" })}</span>
+          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">💸 Coûts — {now.toLocaleString("default", { month: "long", year: "numeric" })}</span>
         </div>
         <div className="p-4 space-y-2 max-w-sm">
-          {/* Alpaca gross P&L */}
           <div className="flex justify-between text-xs border-b border-slate-700 pb-2 mb-1">
             <span className="text-slate-400">Gross P&L (Alpaca)</span>
             <span className={`font-mono font-bold ${grossPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
               {grossPnl >= 0 ? "+" : "-"}${Math.abs(grossPnl).toFixed(2)}
             </span>
           </div>
-          {/* Costs */}
           {[
             ["Replit Core", `-$${REPLIT_MONTHLY_COST.toFixed(2)}`, "text-red-400"],
             [`Claude API (${mDecisions.length} calls × $0.003)`, `-$${claudeCost.toFixed(3)}`, "text-red-400"],
-            ["Total Costs", `-$${totalCost.toFixed(2)}`, "text-red-400 font-bold"],
+            ["Total Coûts", `-$${totalCost.toFixed(2)}`, "text-red-400 font-bold"],
           ].map(([label, value, cls]) => (
             <div key={label as string} className={`flex justify-between text-xs ${cls as string}`}>
               <span className="text-slate-400">{label as string}</span>
               <span className="font-mono">{value as string}</span>
             </div>
           ))}
-          {/* Net result */}
           <div className="flex justify-between text-sm border-t border-slate-700 pt-2 mt-1">
-            <span className="text-slate-300 font-semibold">Net P&L (after costs)</span>
+            <span className="text-slate-300 font-semibold">Net P&L (après coûts)</span>
             <span className={`font-mono font-bold text-base ${netPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
               {netPnl >= 0 ? "+" : "-"}${Math.abs(netPnl).toFixed(2)}
             </span>
