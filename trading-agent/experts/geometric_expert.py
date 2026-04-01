@@ -86,7 +86,7 @@ class GeometricExpert:
         if confluence_score >= 4: return 0.90
         return 0.80
 
-    def evaluate(self, symbol: str, size_modifier: float = 1.0):
+    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown"):
         import uuid
         from strategy import compute_indicators, is_good_stock_window, is_crypto_good_hours
 
@@ -325,15 +325,53 @@ class GeometricExpert:
                 tier3 += 1
                 logger.info(f"[GEO] {symbol} — ranging market, optimal for geo (+1)")
 
-            # ── Total score + threshold
+            # ── Total score
             total_score = tier1 + tier2 + tier3
             logger.info(
                 f"[GEO] {symbol} — Score {total_score:.1f} "
                 f"(T1={tier1} T2={tier2:.1f} T3={tier3}) side={side}"
             )
 
-            if total_score < 4:
-                logger.info(f"[GEO] {symbol} — score {total_score:.1f} < 4, skip")
+            # ── Regime-aware parameters ───────────────────────────────────────
+            _regime = (regime or "unknown").lower()
+            if _regime == "bull":
+                _threshold        = 4 if side == "long" else 6
+                _regime_size_mult = 1.2 if side == "long" else 0.7
+                _stop_pct         = 0.005
+            elif _regime == "choppy":
+                _threshold        = 4
+                _regime_size_mult = 1.0
+                _stop_pct         = 0.005
+            elif _regime == "bear":
+                _threshold        = 6 if side == "long" else 3
+                _regime_size_mult = 0.7 if side == "long" else 1.2
+                _stop_pct         = 0.003
+            elif _regime == "panic":
+                if side == "long":
+                    logger.info(f"[GEO] {symbol} — regime=PANIC → no longs, skip")
+                    return
+                _threshold        = 7
+                _regime_size_mult = 0.5
+                _stop_pct         = 0.005
+            else:  # unknown / default
+                _threshold        = 4
+                _regime_size_mult = 1.0
+                _stop_pct         = 0.005 if is_crypto else 0.003
+
+            # Exceptional setup: score ≥ 8 restores normal size (keep tight stop for BEAR)
+            if total_score >= 8:
+                _regime_size_mult = 1.0
+
+            logger.info(
+                f"[GEO] {symbol} — regime={_regime} side={side} → "
+                f"size_mult={_regime_size_mult:.1f}x stop_pct={_stop_pct:.3f} threshold={_threshold}"
+            )
+
+            if total_score < _threshold:
+                logger.info(
+                    f"[GEO] {symbol} — score {total_score:.1f} < threshold {_threshold} "
+                    f"(regime={_regime}), skip"
+                )
                 return
 
             requires_candle = total_score < 6
@@ -383,15 +421,13 @@ class GeometricExpert:
                 _stop_decimals = 2
 
             if side == "long":
-                # 0.5% below level for crypto, 0.3% below for stocks
-                stop_price = round(level * 0.995, _stop_decimals) if is_crypto else round(level * 0.997, _stop_decimals)
+                stop_price = round(level * (1.0 - _stop_pct), _stop_decimals)
                 # Target must be at least 2× risk above entry; use resistance as ceiling
                 _min_target = round(current_price + 2.0 * abs(current_price - stop_price), _stop_decimals + 2)
                 _res_target = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
                 target_price = max(_min_target, _res_target)
             else:
-                # 0.5% above level for crypto, 0.3% above for stocks
-                stop_price = round(level * 1.005, _stop_decimals) if is_crypto else round(level * 1.003, _stop_decimals)
+                stop_price = round(level * (1.0 + _stop_pct), _stop_decimals)
                 # Target must be at least 2× risk below entry; use support as floor
                 _min_target = round(current_price - 2.0 * abs(stop_price - current_price), _stop_decimals + 2)
                 _sup_target = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
@@ -457,8 +493,12 @@ class GeometricExpert:
             capital_to_use = min(capital_to_use, max_capital - self.get_deployed_capital())
             # Apply calendar event size reduction if active
             capital_to_use *= size_modifier
-            if size_modifier < 1.0:
-                logger.info(f"[GEO] 📅 Calendar modifier ×{size_modifier:.2f} → capital=${capital_to_use:.0f}")
+            if size_modifier != 1.0:
+                logger.info(f"[GEO] 📅 Calendar modifier ×{size_modifier:.2f}")
+            # Apply regime size multiplier
+            capital_to_use *= _regime_size_mult
+            if _regime_size_mult != 1.0:
+                logger.info(f"[GEO] 📊 Regime multiplier ×{_regime_size_mult:.2f} → capital=${capital_to_use:.0f}")
 
             if capital_to_use < 30:
                 logger.info(f"[GEO] {symbol} — capital deployment limit reached")
@@ -546,6 +586,9 @@ class GeometricExpert:
                         "rsi_divergence": bool(rsi_divergence),
                         "patterns": list(detected_names),
                         "alpaca_stop_order_id": stop_order_id,
+                        "regime": _regime,
+                        "regime_size_mult": _regime_size_mult,
+                        "stop_pct": _stop_pct,
                     }
                 )
 

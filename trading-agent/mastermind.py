@@ -428,8 +428,10 @@ class Mastermind:
                 _eff_modifier = round(self._size_modifier * _night_mult, 4)
                 if _night_mult < 1.0:
                     logger.info(f"[MASTERMIND] 🌙 Night window (02-06 UTC) — size modifier {self._size_modifier:.2f} × 0.40 = {_eff_modifier:.2f}")
+                _regime_str = self.regime.detect_regime()
+                logger.info(f"[MASTERMIND] 📊 Regime for geo evaluation: {_regime_str.upper()}")
                 for symbol in candidates:
-                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier)
+                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 
