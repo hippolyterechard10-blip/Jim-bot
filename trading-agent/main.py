@@ -22,21 +22,21 @@ logger = logging.getLogger(__name__)
 WATCHDOG_INTERVAL_SECONDS = 60
 
 
-def _make_fast_thread(agent: TradingAgent) -> threading.Thread:
-    """Create (but do not start) a new fast loop daemon thread."""
+def _make_fast_thread(agent: TradingAgent, mastermind=None) -> threading.Thread:
     def _run():
         logger.info("[FAST] ⚡ Fast loop thread started — 30s tick")
         while True:
             try:
                 agent.fast_loop_tick()
+                if mastermind:
+                    mastermind.fast_tick()
             except Exception as e:
                 logger.error(f"[FAST] loop error: {e}")
             time.sleep(config.FAST_LOOP_INTERVAL_SECONDS)
-
     return threading.Thread(target=_run, daemon=True, name="FastLoop")
 
 
-def _run_watchdog(agent: TradingAgent, thread_ref: list):
+def _run_watchdog(agent: TradingAgent, thread_ref: list, mastermind=None):
     """
     Daemon thread — wakes every 60 seconds.
     Checks whether the fast loop thread is still alive.
@@ -49,7 +49,7 @@ def _run_watchdog(agent: TradingAgent, thread_ref: list):
             logger.info("[WATCHDOG] fast loop alive ✅")
         else:
             logger.warning("[WATCHDOG] fast loop dead — restarting 🔄")
-            new_thread = _make_fast_thread(agent)
+            new_thread = _make_fast_thread(agent, mastermind)
             new_thread.start()
             thread_ref[0] = new_thread
             logger.info("[WATCHDOG] fast loop restarted successfully ✅")
@@ -87,7 +87,7 @@ def main():
     notifier.start_scheduler(daily_hour_utc=20)
 
     # ── Start the fast loop ───────────────────────────────────────────────────
-    fast_thread = _make_fast_thread(agent)
+    fast_thread = _make_fast_thread(agent, mastermind)
     fast_thread.start()
 
     # thread_ref is a mutable list so the watchdog can swap in a replacement
@@ -96,7 +96,7 @@ def main():
     # ── Start the watchdog ────────────────────────────────────────────────────
     watchdog_thread = threading.Thread(
         target=_run_watchdog,
-        args=(agent, thread_ref),
+        args=(agent, thread_ref, mastermind),
         daemon=True,
         name="Watchdog",
     )
