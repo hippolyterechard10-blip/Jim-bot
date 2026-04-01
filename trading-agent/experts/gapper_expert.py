@@ -16,6 +16,7 @@ class GapperExpert:
         self.scanner = scanner
         self.regime = regime
         self._candidates = []
+        self._high_water: dict = {}
 
     def add_candidate(self, mover: dict):
         self._candidates.append(mover)
@@ -284,10 +285,11 @@ class GapperExpert:
 
                 # Trailing stop -15% from highest price (after partial)
                 if partial_taken:
-                    high_water = ctx_data.get("high_water", current_price)
-                    new_high = max(high_water, current_price)
-                    ctx_data["high_water"] = new_high
-                    trailing_stop = new_high * 0.85  # -15%
+                    # Use in-memory high_water (ctx_data version resets every tick from SQLite)
+                    if symbol not in self._high_water:
+                        self._high_water[symbol] = current_price
+                    self._high_water[symbol] = max(self._high_water[symbol], current_price)
+                    trailing_stop = self._high_water[symbol] * 0.85
 
                     if current_price <= trailing_stop:
                         logger.info(
