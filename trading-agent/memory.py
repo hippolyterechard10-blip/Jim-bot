@@ -1,9 +1,10 @@
 import sqlite3
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
 from typing import Optional
 from contextlib import contextmanager
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -78,26 +79,75 @@ class TradingMemory:
                     pass
 
     def backfill_strategy_source(self) -> int:
-        """One-time migration: set strategy_source on trades that don't have it yet.
-        Uses symbol type as proxy ONLY for historical alpaca_sync'd data where
-        crypto=geometric and stock=gapper is accurate. Future native trades will
-        have strategy_source set at log_trade_open time."""
+        """Set strategy_source on trades that don't have it yet, and correct
+        sync records that were previously mis-labelled by the old symbol-type proxy.
+
+        Rules
+        -----
+        Sync records (source in alpaca_sync / order_sync / order_sync_synthetic):
+          Use entry_at time to determine the expert — the only stock expert that
+          trades in a narrow window (9:35–10:45 ET Mon–Fri) is the Gapper Expert.
+          Outside that window every stock position belongs to the Geo Expert.
+          Crypto always → geometric.
+
+        Legacy records (no source field — true pre-V2 history):
+          Keep the old proxy: crypto → geometric, stock → gapper.
+        """
+        ET          = pytz.timezone("America/New_York")
+        GAP_OPEN    = dt_time(9, 35)
+        GAP_CLOSE   = dt_time(10, 45)
+        SYNC_SRCS   = {"alpaca_sync", "order_sync", "order_sync_synthetic"}
         updated = 0
         try:
             with self._conn() as conn:
+                # Catch both untagged records AND sync records that may have been
+                # mis-labelled by the old symbol-type heuristic.
                 rows = conn.execute(
-                    "SELECT trade_id, symbol, market_context FROM trades "
-                    "WHERE json_extract(market_context,'$.strategy_source') IS NULL"
+                    """SELECT trade_id, symbol, entry_at, market_context FROM trades
+                       WHERE json_extract(market_context,'$.strategy_source') IS NULL
+                          OR json_extract(market_context,'$.source')
+                             IN ('alpaca_sync','order_sync','order_sync_synthetic')"""
                 ).fetchall()
                 for row in rows:
                     trade_id = row["trade_id"]
                     symbol   = row["symbol"] or ""
+                    entry_at = row["entry_at"] or ""
                     mc_raw   = row["market_context"]
                     try:
                         ctx = json.loads(mc_raw) if mc_raw else {}
                     except Exception:
                         ctx = {}
-                    inferred = "geometric" if "/" in symbol else "gapper"
+
+                    src      = ctx.get("source", "")
+                    is_sync  = src in SYNC_SRCS
+                    is_crypto = "/" in symbol
+
+                    if is_sync:
+                        # Time-based inference: only stock entries during the
+                        # narrow gap window (9:35–10:45 ET) belong to the Gapper Expert.
+                        if is_crypto:
+                            inferred = "geometric"
+                        else:
+                            try:
+                                entry_dt = datetime.fromisoformat(
+                                    entry_at.replace("Z", "+00:00")
+                                )
+                                entry_et  = entry_dt.astimezone(ET)
+                                in_window = (
+                                    entry_et.weekday() < 5 and
+                                    GAP_OPEN <= entry_et.time() <= GAP_CLOSE
+                                )
+                                inferred = "gapper" if in_window else "geometric"
+                            except Exception:
+                                inferred = "geometric"
+                    else:
+                        # Legacy (pre-V2) records: symbol-type proxy is accurate
+                        inferred = "geometric" if is_crypto else "gapper"
+
+                    prev = ctx.get("strategy_source")
+                    if prev == inferred:
+                        continue  # already correct — no write needed
+
                     ctx["strategy_source"] = inferred
                     conn.execute(
                         "UPDATE trades SET market_context=? WHERE trade_id=?",
@@ -105,7 +155,9 @@ class TradingMemory:
                     )
                     updated += 1
             if updated:
-                logger.info(f"[MEMORY] 🔧 Backfilled strategy_source on {updated} trades")
+                logger.info(
+                    f"[MEMORY] 🔧 backfill_strategy_source: corrected {updated} trade(s)"
+                )
         except Exception as e:
             logger.error(f"backfill_strategy_source error: {e}")
         return updated
