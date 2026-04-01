@@ -85,6 +85,7 @@ interface IndividualTrade {
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
 type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
+type ExpertFilter = "all" | "gap" | "geo";
 
 interface AnalysisData {
   total_trades: number; winning_trades: number; losing_trades: number;
@@ -426,11 +427,42 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
   );
 }
 
-function AnalysisPage({ data }: { data: AnalysisData | null }) {
+function AnalysisPage() {
+  const [expert,  setExpert]  = useState<ExpertFilter>("all");
+  const [data,    setData]    = useState<AnalysisData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`${BASE}/api/analysis?expert=${expert}`)
+      .then(r => r.json())
+      .then(d => { setData((d as AnalysisData).total_trades !== undefined ? d as AnalysisData : null); })
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [expert]);
+
+  const accentLabel = expert === "gap"
+    ? <span className="text-amber-400 font-semibold">🚀 Gap — Stocks</span>
+    : expert === "geo"
+    ? <span className="text-violet-400 font-semibold">📐 Geo — Crypto</span>
+    : <span className="text-slate-400">Tous les experts</span>;
+
+  if (loading) {
+    return (
+      <div className="p-4 sm:p-6 space-y-4">
+        <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">Chargement…</div>
+      </div>
+    );
+  }
+
   if (!data || data.total_trades === 0) {
     return (
-      <div className="p-6 flex items-center justify-center min-h-[300px]">
-        <div className="text-slate-600 text-sm">No closed trades yet — analysis will appear once the first trade closes.</div>
+      <div className="p-4 sm:p-6 space-y-4">
+        <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">
+          Aucun trade fermé pour {expert === "all" ? "ce portefeuille" : expert === "gap" ? "l'expert Gap" : "l'expert Geo"} — l'analyse apparaîtra après le premier trade.
+        </div>
       </div>
     );
   }
@@ -449,7 +481,10 @@ function AnalysisPage({ data }: { data: AnalysisData | null }) {
 
   return (
     <div className="p-4 sm:p-6 space-y-6">
-      <h2 className="text-base font-bold text-white">Performance Analysis</h2>
+      <div className="flex items-center gap-3 flex-wrap">
+        <ExpertPills value={expert} onChange={setExpert} />
+        {accentLabel}
+      </div>
 
       {/* ── KPI Row 1 ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1194,23 +1229,55 @@ function SignalRow({ dec }: { dec: Decision }) {
   );
 }
 
+function ExpertPills({ value, onChange }: { value: ExpertFilter; onChange: (v: ExpertFilter) => void }) {
+  return (
+    <div className="flex items-center gap-1 bg-slate-800/60 border border-slate-700/50 rounded-lg p-0.5">
+      {(["all", "gap", "geo"] as ExpertFilter[]).map(e => (
+        <button key={e} onClick={() => onChange(e)}
+          className={`px-3 py-1 text-xs font-semibold rounded transition-colors ${value === e
+            ? e === "gap" ? "bg-amber-900/60 text-amber-400 shadow-sm"
+            : e === "geo" ? "bg-violet-900/60 text-violet-400 shadow-sm"
+            : "bg-slate-700 text-slate-200"
+            : "text-slate-500 hover:text-slate-300"}`}>
+          {e === "all" ? "Tous" : e === "gap" ? "🚀 Gap" : "📐 Geo"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function SignalsPage({ decisions }: { decisions: Decision[] }) {
-  const [filter,  setFilter]  = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
-  const [showAll, setShowAll] = useState(false);
+  const [actionFilter, setActionFilter] = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
+  const [expertFilter, setExpertFilter] = useState<ExpertFilter>("all");
+  const [showAll,      setShowAll]      = useState(false);
+
+  const isCrypto = (sym: string) => sym.includes("/");
+
+  const byExpert = expertFilter === "all" ? decisions
+    : expertFilter === "gap" ? decisions.filter(d => !isCrypto(d.symbol))
+    : decisions.filter(d => isCrypto(d.symbol));
 
   const latestBySymbol: Record<string, Decision> = {};
-  decisions.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
+  byExpert.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
   const deduped  = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
-  const baseList = showAll ? [...decisions].sort((a, b) => b.decided_at.localeCompare(a.decided_at)) : deduped;
-  const filtered = filter === "ALL" ? baseList : baseList.filter(d => d.decision.toUpperCase() === filter);
+  const baseList = showAll ? [...byExpert].sort((a, b) => b.decided_at.localeCompare(a.decided_at)) : deduped;
+  const filtered = actionFilter === "ALL" ? baseList : baseList.filter(d => d.decision.toUpperCase() === actionFilter);
 
   return (
-    <div className="p-4 sm:p-6">
-      {/* Filter bar */}
-      <div className="flex items-center gap-2 mb-4 flex-wrap">
+    <div className="p-4 sm:p-6 space-y-3">
+      {/* Expert selector */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <ExpertPills value={expertFilter} onChange={setExpertFilter} />
+        <span className="text-[10px] text-slate-600">
+          {expertFilter === "gap" ? "Stocks · sans /" : expertFilter === "geo" ? "Crypto · avec /" : "Tous les experts"}
+        </span>
+      </div>
+
+      {/* Action filter bar */}
+      <div className="flex items-center gap-2 flex-wrap">
         {(["ALL", "BUY", "SELL", "HOLD"] as const).map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${filter === f
+          <button key={f} onClick={() => setActionFilter(f)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${actionFilter === f
               ? f === "BUY"  ? "bg-emerald-900/50 text-emerald-400 border border-emerald-700"
               : f === "SELL" ? "bg-red-900/50 text-red-400 border border-red-700"
               : f === "HOLD" ? "bg-slate-700 text-slate-300 border border-slate-600"
@@ -1224,12 +1291,12 @@ function SignalsPage({ decisions }: { decisions: Decision[] }) {
           {showAll ? "History" : "Latest"}
         </button>
         <span className="ml-auto text-xs text-slate-600">
-          {filtered.length} signal{filtered.length !== 1 ? "s" : ""}{showAll ? " (full history)" : " (latest per asset)"}
+          {filtered.length} signal{filtered.length !== 1 ? "s" : ""}{showAll ? " (full history)" : " (latest par asset)"}
         </span>
       </div>
 
       {filtered.length === 0 ? (
-        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">No signals yet</div>
+        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">Aucun signal pour ce filtre</div>
       ) : (
         <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
           <div className="overflow-x-auto">
@@ -1808,7 +1875,7 @@ export default function App() {
         {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
         {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} />}
-        {activePage === "ANALYSIS" && <AnalysisPage data={analysis} />}
+        {activePage === "ANALYSIS" && <AnalysisPage />}
       </div>
     </div>
   );

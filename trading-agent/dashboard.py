@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Optional
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import config
 from memory import TradingMemory
@@ -265,35 +265,44 @@ def api_analysis():
         conn = sqlite3.connect(_memory.db_path, timeout=10)
         c    = conn.cursor()
 
+        # ── Expert filter (gap = stocks, geo = crypto with /) ──────────
+        expert = request.args.get("expert", "all").lower()
+        if expert == "gap":
+            ef = "AND symbol NOT LIKE '%/%'"
+        elif expert == "geo":
+            ef = "AND symbol LIKE '%/%'"
+        else:
+            ef = ""
+
         # ── All closed trades ──────────────────────────────────────────
-        c.execute("""
+        c.execute(f"""
             SELECT symbol, pnl, pnl_pct, hold_duration_min, close_reason, exit_at
-            FROM trades WHERE status='closed'
+            FROM trades WHERE status='closed' {ef}
             ORDER BY exit_at
         """)
         trades = c.fetchall()
 
         # ── Daily P&L (last 30 days) ───────────────────────────────────
-        c.execute("""
+        c.execute(f"""
             SELECT DATE(exit_at) AS day, SUM(pnl) AS day_pnl, COUNT(*) AS cnt
-            FROM trades WHERE status='closed'
+            FROM trades WHERE status='closed' {ef}
             GROUP BY day ORDER BY day DESC LIMIT 30
         """)
         daily_rows = c.fetchall()
 
         # ── P&L by asset ───────────────────────────────────────────────
-        c.execute("""
+        c.execute(f"""
             SELECT symbol, SUM(pnl) AS total, COUNT(*) AS cnt,
                    AVG(pnl) AS avg_pnl, AVG(hold_duration_min) AS avg_hold
-            FROM trades WHERE status='closed'
+            FROM trades WHERE status='closed' {ef}
             GROUP BY symbol ORDER BY total DESC
         """)
         asset_rows = c.fetchall()
 
         # ── Close reason breakdown ─────────────────────────────────────
-        c.execute("""
+        c.execute(f"""
             SELECT close_reason, COUNT(*) AS cnt, SUM(pnl) AS total_pnl
-            FROM trades WHERE status='closed'
+            FROM trades WHERE status='closed' {ef}
             GROUP BY close_reason ORDER BY cnt DESC
         """)
         reason_rows = c.fetchall()
