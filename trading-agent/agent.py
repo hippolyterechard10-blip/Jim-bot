@@ -114,6 +114,61 @@ class TradingAgent:
         except Exception as e:
             logger.error(f"_sync_orphan_positions error: {e}")
 
+    def _reconcile_stale_positions(self):
+        """
+        Inverse of _sync_orphan_positions: finds DB 'open' records that have
+        NO corresponding live Alpaca position, and marks them as 'closed'.
+        This handles cases where positions were closed in Alpaca (trailing stop,
+        manual close, bracket order fill) between agent restarts.
+        """
+        if not self.memory:
+            return
+        try:
+            alpaca_positions = self.broker.get_positions()
+            alpaca_symbols = {p.symbol.replace("/", "").upper() for p in alpaca_positions}
+            open_trades = self.memory.get_open_trades()
+            if not open_trades:
+                return
+            now_ts = datetime.now(timezone.utc).isoformat()
+            conn = sqlite3.connect(self.memory.db_path, timeout=10)
+            c = conn.cursor()
+            reconciled = 0
+            for t in open_trades:
+                sym_clean = t["symbol"].replace("/", "").upper()
+                if sym_clean in alpaca_symbols:
+                    continue
+                # Try to get a current price for rough PNL estimate
+                try:
+                    bars = self.broker.api.get_bars(sym_clean, "1Min", limit=1).df
+                    exit_price = float(bars["close"].iloc[-1]) if not bars.empty else t.get("entry_price") or 0
+                except Exception:
+                    exit_price = t.get("entry_price") or 0
+                entry = t.get("entry_price") or 0
+                qty = t.get("qty") or 0
+                pnl = pnl_pct = None
+                if entry and exit_price and qty:
+                    diff = exit_price - entry
+                    if t.get("side") == "sell":
+                        diff = -diff
+                    pnl = round(diff * qty, 6)
+                    pnl_pct = round(diff / entry * 100, 4)
+                c.execute("""UPDATE trades SET
+                    status='closed', exit_price=?, pnl=?, pnl_pct=?,
+                    close_reason='position_reconciled', exit_at=?
+                    WHERE trade_id=?
+                """, (exit_price or None, pnl, pnl_pct, now_ts, t["trade_id"]))
+                reconciled += 1
+                logger.info(
+                    f"🔄 RECONCILE stale: {t['symbol']} not in Alpaca → marked closed "
+                    f"(est. exit={exit_price:.4f} pnl~={pnl})"
+                )
+            if reconciled:
+                conn.commit()
+                logger.info(f"✅ Reconciled {reconciled} stale open record(s)")
+            conn.close()
+        except Exception as e:
+            logger.error(f"_reconcile_stale_positions error: {e}")
+
     def _pre_market_cash_liberation(self):
         """
         9:25 AM ET weekdays — per-position rules to free cash for stock market open:
@@ -1073,6 +1128,8 @@ class TradingAgent:
 
         # Sync any Alpaca positions that have no SQLite record (e.g. manual trades)
         self._sync_orphan_positions()
+        # Inverse: mark any DB-open records that no longer exist in Alpaca as closed
+        self._reconcile_stale_positions()
 
         # NOTE: Trailing stop management is handled exclusively by the fast loop (every 30s).
         # No trailing stop call here to avoid double-firing on simultaneous startup.

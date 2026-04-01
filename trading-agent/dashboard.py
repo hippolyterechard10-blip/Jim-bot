@@ -147,7 +147,9 @@ def api_closed_today():
                        MAX(exit_at)     AS last_exit_at,
                        GROUP_CONCAT(DISTINCT close_reason) AS reasons
                 FROM trades
-                WHERE status = 'closed' AND exit_at >= ?
+                WHERE status = 'closed'
+                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
+                  AND exit_at >= ?
                 GROUP BY symbol
                 ORDER BY MAX(exit_at) DESC
             """, (since,))
@@ -161,6 +163,7 @@ def api_closed_today():
                        GROUP_CONCAT(DISTINCT close_reason) AS reasons
                 FROM trades
                 WHERE status = 'closed'
+                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
                 GROUP BY symbol
                 ORDER BY MAX(exit_at) DESC
             """)
@@ -201,7 +204,9 @@ def api_trades_individual():
                        close_reason, entry_at, exit_at,
                        entry_snapshot, exit_vs_target
                 FROM trades
-                WHERE status = 'closed' AND exit_at >= ?
+                WHERE status = 'closed'
+                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
+                  AND exit_at >= ?
                 ORDER BY exit_at DESC LIMIT ?
             """, (since, limit))
         else:
@@ -212,6 +217,7 @@ def api_trades_individual():
                        entry_snapshot, exit_vs_target
                 FROM trades
                 WHERE status = 'closed'
+                  AND (close_reason IS NULL OR close_reason != 'position_reconciled')
                 ORDER BY exit_at DESC LIMIT ?
             """, (limit,))
         rows = c.fetchall()
