@@ -38,7 +38,12 @@ class Mastermind:
         self._gapper_consecutive_losses: int = 0
         self._last_reset_date: str = ""
 
-        logger.info("✅ Mastermind V2 initialized — Gapper $500 | Geometric $500")
+        logger.info("✅ Mastermind V2 initialized")
+        logger.info(
+            f"💰 CAPITAL SPLIT: Gapper=${config.STRATEGY_CAPITAL['gapper']:.2f} | "
+            f"Geometric=${config.STRATEGY_CAPITAL['geometric']:.2f} | "
+            f"Total=${sum(config.STRATEGY_CAPITAL.values()):.2f}"
+        )
 
     # ── Daily reset ────────────────────────────────────────────────────────
 
