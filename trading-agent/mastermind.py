@@ -175,6 +175,27 @@ class Mastermind:
             f"today={self._gapper_trades_today} | consec_losses={self._gapper_consecutive_losses}"
         )
 
+    def _compound_capital(self, expert: str, pnl: float):
+        """Persist realized P&L into capital_lock.json so capital survives restarts."""
+        import json
+        lock_file = config._CAPITAL_LOCK_FILE
+        try:
+            data = {"gapper": config.STRATEGY_CAPITAL["gapper"],
+                    "geometric": config.STRATEGY_CAPITAL["geometric"]}
+            if hasattr(config, '_CAPITAL_LOCK_FILE') and __import__('os').path.exists(lock_file):
+                with open(lock_file) as f:
+                    data = json.load(f)
+            key = "gapper" if expert == "gapper" else "geometric"
+            old = float(data.get(key, config.STRATEGY_CAPITAL[key]))
+            data[key] = round(old + pnl, 2)
+            data["updated_at"] = dt.datetime.utcnow().isoformat()
+            config.STRATEGY_CAPITAL[key] = data[key]
+            with open(lock_file, "w") as f:
+                json.dump(data, f)
+            logger.info(f"[CAPITAL] 💰 {expert} compounded: ${old:.2f} → ${data[key]:.2f} (pnl={pnl:+.2f})")
+        except Exception as e:
+            logger.error(f"[CAPITAL] compound error: {e}")
+
     # ── Circuit breaker ────────────────────────────────────────────────────
 
     def _is_paused(self) -> bool:
@@ -454,9 +475,12 @@ class Mastermind:
                     ctx = {}
                     try: ctx = json.loads(row["market_context"] or "{}")
                     except: pass
-                    won = (row["pnl"] or 0) > 0
+                    pnl = row["pnl"] or 0
+                    won = pnl > 0
                     self.record_gapper_outcome(won)
-                    new_ctx = {**ctx, "outcome_recorded": True}
+                    if pnl != 0:
+                        self._compound_capital("gapper", pnl)
+                    new_ctx = {**ctx, "outcome_recorded": True, "capital_recorded": True}
                     conn.execute("UPDATE trades SET market_context=? WHERE trade_id=?",
                                  (json.dumps(new_ctx), row["trade_id"]))
                 conn.commit()
@@ -464,11 +488,45 @@ class Mastermind:
         except Exception as e:
             logger.error(f"[MASTERMIND] outcome tracking error: {e}")
 
+    def _compound_geo_closed(self):
+        """Scan for newly closed geo trades and compound their P&L into the capital lock."""
+        try:
+            if not (self.memory and hasattr(self.memory, 'db_path')):
+                return
+            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT trade_id, pnl, market_context
+                FROM trades
+                WHERE status = 'closed'
+                  AND json_extract(market_context, '$.strategy_source') = 'geometric'
+                  AND (json_extract(market_context, '$.capital_recorded') IS NULL
+                       OR json_extract(market_context, '$.capital_recorded') = 0)
+                  AND pnl IS NOT NULL AND pnl != 0
+                ORDER BY exit_at DESC
+                LIMIT 20
+            """).fetchall()
+            for row in rows:
+                ctx = {}
+                try: ctx = json.loads(row["market_context"] or "{}")
+                except: pass
+                pnl = row["pnl"] or 0
+                if pnl != 0:
+                    self._compound_capital("geometric", pnl)
+                new_ctx = {**ctx, "capital_recorded": True}
+                conn.execute("UPDATE trades SET market_context=? WHERE trade_id=?",
+                             (json.dumps(new_ctx), row["trade_id"]))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"[MASTERMIND] geo compounding error: {e}")
+
     def run(self):
         """Called every 5min from main.py slow loop."""
         if self._is_paused():
             return
         self._circuit_breaker_slow()
+        self._compound_geo_closed()
         self._detect_geometric()
         logger.info(
             f"[MASTERMIND] ✅ Cycle | "

@@ -47,17 +47,37 @@ FAST_LOOP_INTERVAL_SECONDS = 30    # Fast loop: position stops + score triggers
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
 
 # Mastermind V2
+_CAPITAL_LOCK_FILE = os.path.join(os.path.dirname(__file__), "capital_lock.json")
+
 def _get_strategy_capital():
+    import json
+    if os.path.exists(_CAPITAL_LOCK_FILE):
+        try:
+            with open(_CAPITAL_LOCK_FILE) as f:
+                data = json.load(f)
+            if "gapper" in data and "geometric" in data:
+                g = float(data["gapper"])
+                geo = float(data["geometric"])
+                return {"gapper": g, "geometric": geo}
+        except Exception:
+            pass
     try:
         import alpaca_trade_api as tradeapi
         api = tradeapi.REST(
-            __import__("os").getenv("ALPACA_API_KEY"),
-            __import__("os").getenv("ALPACA_SECRET_KEY"),
+            os.getenv("ALPACA_API_KEY"),
+            os.getenv("ALPACA_SECRET_KEY"),
             "https://paper-api.alpaca.markets"
         )
-        total = float(api.get_account().portfolio_value)
+        total = float(api.get_account().equity)
         half = round(total / 2, 2)
-        return {"gapper": half, "geometric": half}
+        result = {"gapper": half, "geometric": half}
+        try:
+            import datetime
+            with open(_CAPITAL_LOCK_FILE, "w") as f:
+                json.dump({**result, "locked_at": datetime.datetime.utcnow().isoformat()}, f)
+        except Exception:
+            pass
+        return result
     except Exception:
         return {"gapper": 500.0, "geometric": 500.0}
 
