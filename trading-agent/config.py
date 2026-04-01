@@ -47,7 +47,21 @@ FAST_LOOP_INTERVAL_SECONDS = 30    # Fast loop: position stops + score triggers
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
 
 # Mastermind V2
-STRATEGY_CAPITAL = {"gapper": 500.0, "geometric": 500.0}
+def _get_strategy_capital():
+    try:
+        import alpaca_trade_api as tradeapi
+        api = tradeapi.REST(
+            __import__("os").getenv("ALPACA_API_KEY"),
+            __import__("os").getenv("ALPACA_SECRET_KEY"),
+            "https://paper-api.alpaca.markets"
+        )
+        total = float(api.get_account().portfolio_value)
+        half = round(total / 2, 2)
+        return {"gapper": half, "geometric": half}
+    except Exception:
+        return {"gapper": 500.0, "geometric": 500.0}
+
+STRATEGY_CAPITAL = _get_strategy_capital()
 GAPPER_MAX_TRADES_PER_DAY = 3
 GAPPER_MAX_CONSECUTIVE_LOSSES = 2
 GEOMETRIC_MAX_CAPITAL_PCT = 0.80
