@@ -79,6 +79,9 @@ class TradingNotifier:
         self.memory = memory
         self.analyzer = analyzer
         self._stop = threading.Event()
+        # In-memory guards — supplement SQLite dedup within the same process
+        self._daily_sent_date:  Optional[str] = None
+        self._weekly_sent_week: Optional[str] = None
         logger.info("✅ TradingNotifier ready")
 
     def send_daily_summary(self):
@@ -209,19 +212,25 @@ Capital en baisse de <strong>{loss_pct:.1f}%</strong>. Toutes les positions ont 
                 week  = now.strftime("%Y-W%W")
 
                 if now.hour == daily_hour_utc:
-                    if not self._already_sent_today("email.last_daily_sent", today):
-                        self.send_daily_summary()
-                        self._mark_sent("email.last_daily_sent", today)
+                    # Layer 1: in-process memory guard (survives nothing across restarts, but
+                    #          prevents double-fire within the same process lifetime)
+                    # Layer 2: SQLite guard written BEFORE sending so any restart/overlap
+                    #          finds it already marked and skips
+                    if self._daily_sent_date != today and not self._already_sent_today("email.last_daily_sent", today):
+                        self._daily_sent_date = today           # in-memory lock acquired
+                        self._mark_sent("email.last_daily_sent", today)  # SQLite lock written first
+                        self.send_daily_summary()              # now safe to send
 
                 if now.weekday() == 0 and now.hour == 8:
-                    if not self._already_sent_today("email.last_weekly_sent", week):
+                    if self._weekly_sent_week != week and not self._already_sent_today("email.last_weekly_sent", week):
+                        self._weekly_sent_week = week
+                        self._mark_sent("email.last_weekly_sent", week)
                         report = self.analyzer.generate_performance_report("weekly")
                         _send("[Trading Agent] Rapport hebdomadaire",
                               _html("Rapport hebdo",
                                     f'<div class="st">Analyse Claude</div>'
                                     f'<p style="font-size:12px;line-height:1.7;white-space:pre-wrap">{report}</p>'))
-                        self._mark_sent("email.last_weekly_sent", week)
 
-                self._stop.wait(30)
+                self._stop.wait(60)  # 60s tick is plenty — emails only fire once per day
         threading.Thread(target=loop, daemon=True, name="notifier").start()
         logger.info(f"📅 Scheduler started — daily at {daily_hour_utc}h UTC (persisted dedup via SQLite)")
