@@ -280,7 +280,7 @@ class Mastermind:
                 routed += 1
 
             if routed > 0:
-                logger.debug(f"[MASTERMIND] 📐 {routed} geometric candidates queued")
+                logger.info(f"[MASTERMIND] 📐 {routed} geometric candidates queued")
 
             # Execute top candidates
             if self.geometric.has_capital():

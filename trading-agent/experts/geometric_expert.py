@@ -88,11 +88,22 @@ class GeometricExpert:
         if is_crypto and not is_crypto_good_hours():
             return
 
+        logger.info(f"[GEO] 🔍 Evaluating {symbol}")
+
         # Double-entry guard — block re-entry on already-open geometric position
+        def _ctx(t):
+            raw = t.get("market_context") or {}
+            if isinstance(raw, str):
+                try:
+                    import json as _json
+                    return _json.loads(raw)
+                except Exception:
+                    return {}
+            return raw
         open_syms = {
             t["symbol"]
             for t in self.memory.get_open_trades()
-            if (t.get("market_context") or {}).get("strategy_source") == "geometric"
+            if _ctx(t).get("strategy_source") == "geometric"
         }
         if symbol in open_syms:
             logger.debug(f"[GEO GUARD] {symbol} already open → skip")
@@ -131,7 +142,7 @@ class GeometricExpert:
                 level       = nearest_resistance
                 level_score = resistance_score
             else:
-                logger.debug(f"[GEO] {symbol} — not near any key level, skip")
+                logger.info(f"[GEO] {symbol} — not near any key level, skip")
                 return
 
             # Crypto shorts not supported on Alpaca spot
@@ -167,7 +178,7 @@ class GeometricExpert:
                 confluence += 1
 
             if confluence < 3:
-                logger.debug(f"[GEO] {symbol} — confluence {confluence}/5 too low, skip")
+                logger.info(f"[GEO] {symbol} — confluence {confluence}/5 too low, skip")
                 return
 
             # Level exhaustion check
