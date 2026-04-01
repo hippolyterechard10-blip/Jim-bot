@@ -89,6 +89,12 @@ type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
 type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
 type ExpertFilter = "all" | "gap" | "geo";
 
+interface PeriodStat {
+  trades: number; wins: number; losses: number;
+  win_rate: number | null; pnl: number;
+}
+interface PeriodBreakdown { week: PeriodStat; month: PeriodStat; ytd: PeriodStat; all: PeriodStat; }
+
 interface AnalysisData {
   total_trades: number; winning_trades: number; losing_trades: number;
   win_rate: number; profit_factor: number; expectancy: number;
@@ -432,14 +438,20 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 function AnalysisPage() {
   const [expert,  setExpert]  = useState<ExpertFilter>("all");
   const [data,    setData]    = useState<AnalysisData | null>(null);
+  const [periods, setPeriods] = useState<PeriodBreakdown | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`${BASE}/api/analysis?expert=${expert}`)
-      .then(r => r.json())
-      .then(d => { setData((d as AnalysisData).total_trades !== undefined ? d as AnalysisData : null); })
-      .catch(() => setData(null))
+    Promise.all([
+      fetch(`${BASE}/api/analysis?expert=${expert}`).then(r => r.json()),
+      fetch(`${BASE}/api/stats/periods?expert=${expert}`).then(r => r.json()),
+    ])
+      .then(([d, p]) => {
+        setData((d as AnalysisData).total_trades !== undefined ? d as AnalysisData : null);
+        setPeriods((p as PeriodBreakdown).week ? p as PeriodBreakdown : null);
+      })
+      .catch(() => { setData(null); setPeriods(null); })
       .finally(() => setLoading(false));
   }, [expert]);
 
@@ -517,6 +529,40 @@ function AnalysisPage() {
           sub={`Max: ${data.max_win_streak}W / ${data.max_loss_streak}L`}
           color={streakCol} />
       </div>
+
+      {/* ── Win Rate by Period ───────────────────────────────────── */}
+      {periods && (
+        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700/50">
+            <span className="text-sm font-bold text-white">Win Rate by Period</span>
+          </div>
+          <div className="grid grid-cols-3 divide-x divide-slate-700/50">
+            {(["week", "month", "ytd"] as const).map(key => {
+              const p   = periods[key];
+              const wr  = p.win_rate;
+              const col = wr === null ? "text-slate-500"
+                        : wr >= 60   ? "text-emerald-400"
+                        : wr >= 50   ? "text-sky-400"
+                        : "text-red-400";
+              const pnlCol = p.pnl > 0 ? "text-emerald-400" : p.pnl < 0 ? "text-red-400" : "text-slate-500";
+              const label = key === "week" ? "This Week" : key === "month" ? "This Month" : "YTD";
+              return (
+                <div key={key} className="flex flex-col items-center py-4 gap-1">
+                  <span className="text-xs text-slate-500 uppercase tracking-widest">{label}</span>
+                  <span className={`text-2xl font-bold ${col}`}>
+                    {wr !== null ? `${wr.toFixed(1)}%` : "—"}
+                  </span>
+                  <span className="text-xs text-slate-400">{p.wins}W / {p.losses}L</span>
+                  <span className={`text-xs font-semibold ${pnlCol}`}>
+                    {p.pnl >= 0 ? "+" : ""}{p.pnl.toFixed(2)} P&L
+                  </span>
+                  <span className="text-xs text-slate-600">{p.trades} trade{p.trades !== 1 ? "s" : ""}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── P&L by Asset ──────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">

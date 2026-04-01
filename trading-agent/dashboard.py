@@ -33,6 +33,58 @@ def api_stats():
     if not _memory: return jsonify({})
     return jsonify(_memory.compute_performance_stats())
 
+@app.route("/api/stats/periods")
+def api_stats_periods():
+    from flask import request as flask_req
+    if not _memory:
+        return jsonify({})
+    expert = flask_req.args.get("expert", "all")
+    try:
+        conn = sqlite3.connect(_memory.db_path, timeout=5)
+
+        src_filter = ""
+        if expert == "gap":
+            src_filter = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
+        elif expert == "geo":
+            src_filter = "AND json_extract(market_context, '$.strategy_source') = 'geometric'"
+
+        def _pstats(since):
+            date_clause = f"AND exit_at >= '{since}'" if since else ""
+            rows = conn.execute(f"""
+                SELECT pnl FROM trades
+                WHERE status = 'closed'
+                  AND (close_reason IS NULL
+                       OR close_reason NOT IN ('position_reconciled', 'synced_close'))
+                  AND (json_extract(market_context, '$.source') IS NULL
+                       OR json_extract(market_context, '$.source')
+                          NOT IN ('order_sync', 'order_sync_synthetic'))
+                  {src_filter}
+                  {date_clause}
+            """).fetchall()
+            pnls   = [r[0] for r in rows if r[0] is not None]
+            wins   = [p for p in pnls if p > 0]
+            losses = [p for p in pnls if p <= 0]
+            total  = len(pnls)
+            return {
+                "trades":   total,
+                "wins":     len(wins),
+                "losses":   len(losses),
+                "win_rate": round(len(wins) / total * 100, 1) if total else None,
+                "pnl":      round(sum(pnls), 4) if pnls else 0.0,
+            }
+
+        result = {
+            "week":  _pstats(_period_start("week")),
+            "month": _pstats(_period_start("month")),
+            "ytd":   _pstats(_period_start("ytd")),
+            "all":   _pstats(None),
+        }
+        conn.close()
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"api_stats_periods error: {e}")
+        return jsonify({"error": str(e)})
+
 @app.route("/api/trades/open")
 def api_open_trades():
     if not _memory: return jsonify([])
