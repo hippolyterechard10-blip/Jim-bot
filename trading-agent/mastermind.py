@@ -290,6 +290,8 @@ class Mastermind:
         if self._is_paused():
             return
         self._detect_gappers()
+        self.gapper.manage_open_positions()
+        self.geometric.manage_open_positions()
 
     def run(self):
         """Called every 5min from main.py slow loop."""
