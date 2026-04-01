@@ -80,7 +80,40 @@ class MarketScanner:
         )
         self._news_cache = {"headlines": [], "sentiment": "neutral", "cached_at": None}
         self._movers_cache = {"symbols": [], "cached_at": None}
+        self._premarket_cache = {"gappers": [], "cached_at": None}
         logger.info("✅ MarketScanner initialized")
+
+    # ── Internal helper ─────────────────────────────────────────────────────
+
+    def _get_all_equity_symbols(self) -> list:
+        """
+        Return all tradeable US equity symbols that are candidates for gap plays:
+        - Tradeable on Alpaca
+        - Pure alpha symbols only (no dots, numbers, +, ^ — excludes BRK.A, preferred
+          shares, warrants-by-suffix) so we keep AAPL, CYCN, GME, NVDA etc.
+        - 1–5 characters (excludes SPAC units like ACBAW, long ETF names)
+        """
+        assets = self.api.list_assets(status="active", asset_class="us_equity")
+        return [
+            a.symbol for a in assets
+            if a.tradable and a.symbol.isalpha() and 1 <= len(a.symbol) <= 5
+        ]
+
+    def _batch_snapshots(self, symbols: list) -> dict:
+        """Fetch snapshots in chunks of 1000 (Alpaca API limit per request)."""
+        CHUNK = 1000
+        result = {}
+        for i in range(0, len(symbols), CHUNK):
+            batch = symbols[i : i + CHUNK]
+            try:
+                snaps = self.api.get_snapshots(batch)
+                result.update(snaps)
+            except Exception as e:
+                logger.warning(
+                    f"[SCANNER] Snapshot batch {i//CHUNK + 1}/"
+                    f"{(len(symbols) + CHUNK - 1) // CHUNK} error: {e}"
+                )
+        return result
 
     def get_top_movers(self, top_n=6):
         now = datetime.now(timezone.utc)
@@ -89,28 +122,38 @@ class MarketScanner:
             if age < 300 and self._movers_cache["symbols"]:
                 return self._movers_cache["symbols"]
         try:
-            assets = self.api.list_assets(status="active", asset_class="us_equity")
-            tradeable = [a for a in assets if a.tradable]
-            symbols = [a.symbol for a in tradeable[:2000]]
-            snapshots = self.api.get_snapshots(symbols)
+            # Full universe — all tradeable pure-alpha symbols ≤ 5 chars
+            # (excludes BRK.A, preferred shares PFE^A, warrants CYCNW+, SPAC units)
+            symbols = self._get_all_equity_symbols()
+            logger.info(f"[SCANNER] Full-universe scan: {len(symbols)} equities")
+
+            # Batch snapshots in chunks of 1000 (Alpaca API limit)
+            snapshots = self._batch_snapshots(symbols)
+
             gappers = []
             movers  = []
             for symbol, snap in snapshots.items():
                 try:
                     if not snap.daily_bar or not snap.prev_daily_bar:
                         continue
-                    prev       = snap.prev_daily_bar.close
-                    curr       = snap.daily_bar.close
-                    prev_vol   = snap.prev_daily_bar.volume or 1
-                    volume     = snap.daily_bar.volume
+                    prev     = snap.prev_daily_bar.close
+                    curr     = snap.daily_bar.close
+                    prev_vol = snap.prev_daily_bar.volume or 1
+                    volume   = snap.daily_bar.volume
                     if prev <= 0:
                         continue
+
+                    # Skip stocks outside tradeable price range ($0.50–$200)
+                    # Ultra-cheap pennies & megacaps can't produce gap plays we target
+                    if not (0.50 <= curr <= 200.0):
+                        continue
+
                     change_pct   = ((curr - prev) / prev) * 100
                     volume_ratio = round(volume / prev_vol, 1) if prev_vol > 0 else 0
                     is_microcap  = 0.50 <= curr <= 10.0
 
                     # Qualify as a mover:
-                    # - Standard:  |change| ≥ 3% AND volume > 50 000
+                    # - Standard:    |change| ≥ 3% AND volume > 50 000
                     # - Micro/small cap ($0.50–$10): volume must exceed 500 000 (higher bar)
                     if is_microcap:
                         qualifies = abs(change_pct) >= 3 and volume > 500_000
@@ -131,12 +174,12 @@ class MarketScanner:
                         "is_microcap":  is_microcap,
                     }
 
-                    # GAPPER ALERT: >50% gain on >5× average volume
+                    # GAPPER ALERT: ≥20% gain on ≥3× average volume
                     if change_pct >= 20 and volume_ratio >= 3:
                         entry["is_gapper"] = True
                         logger.info(
                             f"🚨 GAPPER ALERT: {symbol} +{change_pct:.1f}% "
-                            f"volume={volume_ratio}x — potential 100-200% move"
+                            f"vol={volume_ratio}x price=${curr:.2f} — potential 100-200% move"
                         )
                         gappers.append(entry)
                     else:
@@ -145,18 +188,18 @@ class MarketScanner:
                 except Exception:
                     continue
 
-            # Sort each bucket by magnitude; gappers always win
+            # Sort each bucket by magnitude; gappers always rank first
             gappers.sort(key=lambda x: x["change_pct"], reverse=True)
             movers.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
 
-            # Gappers all included; regular movers capped at top_n
+            # All gappers included; regular movers capped at top_n
             top = gappers + movers[:top_n]
             self._movers_cache = {"symbols": top, "cached_at": now}
 
             gap_labels   = [f"🚨{m['symbol']} +{m['change_pct']:.1f}% {m['volume_ratio']}x" for m in gappers]
             mover_labels = [f"{m['symbol']} {m['change_pct']:+.1f}%" for m in movers[:top_n]]
             if gap_labels:
-                logger.info(f"🚨 GAPPERS: {gap_labels}")
+                logger.info(f"🚨 GAPPERS ({len(gappers)} found): {gap_labels}")
             logger.info(f"🔥 Top movers: {mover_labels}")
             return top
         except Exception as e:
@@ -165,21 +208,28 @@ class MarketScanner:
 
     def get_premarket_gappers(self, min_change: float = 15.0, min_price: float = 1.0, max_price: float = 50.0) -> list:
         """
-        Pre-market gapper scanner (4h-9h30 ET).
+        Pre-market gapper scanner (4h–9h30 ET).
         Uses latest_trade.price vs prev_daily_bar.close — works before daily_bar is available.
+        Results cached for 2 minutes so the 30s fast-loop doesn't re-scan every tick.
         """
+        now = datetime.now(timezone.utc)
+        if self._premarket_cache["cached_at"]:
+            age = (now - self._premarket_cache["cached_at"]).total_seconds()
+            if age < 120 and self._premarket_cache["gappers"] is not None:
+                return self._premarket_cache["gappers"]
         try:
-            assets = self.api.list_assets(status="active", asset_class="us_equity")
-            tradeable = [a for a in assets if a.tradable]
-            symbols = [a.symbol for a in tradeable]
+            # Same full universe as get_top_movers — all tradeable pure-alpha ≤ 5 chars
+            symbols = self._get_all_equity_symbols()
+            logger.info(f"[SCANNER] Pre-market scan: {len(symbols)} equities")
 
-            snapshots = self.api.get_snapshots(symbols)
+            # Batch snapshots in chunks of 1000
+            snapshots = self._batch_snapshots(symbols)
             gappers = []
 
             for symbol, snap in snapshots.items():
                 try:
                     prev_close = snap.prev_daily_bar.close if snap.prev_daily_bar else None
-                    last_price = snap.latest_trade.price if snap.latest_trade else None
+                    last_price = snap.latest_trade.price  if snap.latest_trade  else None
 
                     if not prev_close or not last_price or prev_close <= 0:
                         continue
@@ -203,10 +253,14 @@ class MarketScanner:
                     continue
 
             gappers.sort(key=lambda x: x["change_pct"], reverse=True)
-            if gappers:
-                labels = [f"{g['symbol']} +{g['change_pct']:.1f}%" for g in gappers[:5]]
-                logger.info(f"🌅 Pre-market gappers: {labels}")
-            return gappers[:10]
+            top = gappers[:10]
+
+            self._premarket_cache = {"gappers": top, "cached_at": now}
+
+            if top:
+                labels = [f"{g['symbol']} +{g['change_pct']:.1f}%" for g in top[:5]]
+                logger.info(f"🌅 Pre-market gappers ({len(top)} found): {labels}")
+            return top
 
         except Exception as e:
             logger.error(f"get_premarket_gappers error: {e}")

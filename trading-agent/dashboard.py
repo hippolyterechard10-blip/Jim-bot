@@ -692,7 +692,14 @@ def api_experts_stats():
         return jsonify({"error": str(e)})
 
 def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
+    import subprocess, time as _time
     init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
+    # Release port from any lingering previous process (daemon thread didn't exit fast enough)
+    try:
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=3)
+        _time.sleep(0.5)
+    except Exception:
+        pass
     def run():
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     thread = threading.Thread(target=run, daemon=True)
