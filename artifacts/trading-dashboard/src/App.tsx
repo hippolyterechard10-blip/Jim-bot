@@ -49,9 +49,15 @@ interface StatsResponse {
 }
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
+interface PositionLive {
+  symbol: string; qty: number; entry_price: number;
+  live_price: number; alpaca_mark: number; unrealized: number;
+}
 interface AccountResponse {
   equity: number; cash: number; buying_power: number;
   portfolio_value: number; last_equity: number;
+  live_equity?: number; live_unrealized?: number;
+  positions_live?: PositionLive[];
 }
 interface ClosedTodayItem {
   symbol: string; pnl: number; trade_count: number;
@@ -1412,31 +1418,81 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
 
       {/* Portfolio Snapshot strip */}
       {(positions.length > 0 || account) && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-            <div className="text-[10px] uppercase text-slate-600 mb-1">Unrealized</div>
-            <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {fmtPnl(unrealizedTotal)}
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+              <div className="text-[10px] uppercase text-slate-600 mb-1">Unrealized ⚡</div>
+              <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {fmtPnl(unrealizedTotal)}
+              </div>
+              {account?.live_unrealized !== undefined && (
+                <div className="text-[9px] text-slate-600 mt-0.5">live feed</div>
+              )}
+            </div>
+            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+              <div className="text-[10px] uppercase text-slate-600 mb-1">Cash</div>
+              <div className="text-base font-bold font-mono text-slate-300">
+                ${account ? account.cash.toFixed(0) : "—"}
+              </div>
+            </div>
+            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+              <div className="text-[10px] uppercase text-slate-600 mb-1">Allocated</div>
+              <div className="text-base font-bold font-mono text-slate-300">
+                {allocatedPct.toFixed(1)}%
+              </div>
+            </div>
+            <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
+              <div className="text-[10px] uppercase text-slate-600 mb-1">Positions</div>
+              <div className="text-base font-bold font-mono text-slate-300">
+                {positions.length} open
+              </div>
             </div>
           </div>
-          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-            <div className="text-[10px] uppercase text-slate-600 mb-1">Cash</div>
-            <div className="text-base font-bold font-mono text-slate-300">
-              ${account ? account.cash.toFixed(0) : "—"}
+
+          {/* Live positions detail — shows live price vs Alpaca stale mark */}
+          {account?.positions_live && account.positions_live.length > 0 && (
+            <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 overflow-hidden">
+              <div className="px-4 py-2 border-b border-slate-700/30 flex items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Open Positions — Live Mark</span>
+                <span className="text-[9px] text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">⚡ notre feed vs Alpaca</span>
+              </div>
+              <div className="divide-y divide-slate-700/20">
+                {account.positions_live.map(pos => {
+                  const diff = pos.live_price - pos.alpaca_mark;
+                  const diffPct = (diff / pos.alpaca_mark) * 100;
+                  const pnlPos = pos.unrealized >= 0;
+                  return (
+                    <div key={pos.symbol} className="px-4 py-2.5 flex items-center gap-3 text-xs">
+                      <span className="font-bold text-slate-200 w-20">{pos.symbol}</span>
+                      <div className="flex-1 grid grid-cols-3 gap-3 text-center">
+                        <div>
+                          <div className="text-[9px] text-slate-600">Live price</div>
+                          <div className="font-mono font-semibold text-sky-400">${pos.live_price.toFixed(4)}</div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-slate-600">Alpaca mark</div>
+                          <div className={`font-mono text-slate-400 ${Math.abs(diffPct) > 0.5 ? "line-through opacity-50" : ""}`}>
+                            ${pos.alpaca_mark.toFixed(4)}
+                          </div>
+                          {Math.abs(diffPct) > 0.1 && (
+                            <div className={`text-[9px] ${diffPct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                              {diffPct >= 0 ? "+" : ""}{diffPct.toFixed(2)}% lag
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-slate-600">Unrealized</div>
+                          <div className={`font-mono font-semibold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+                            {pnlPos ? "+" : ""}{pos.unrealized.toFixed(2)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-            <div className="text-[10px] uppercase text-slate-600 mb-1">Allocated</div>
-            <div className="text-base font-bold font-mono text-slate-300">
-              {allocatedPct.toFixed(1)}%
-            </div>
-          </div>
-          <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-            <div className="text-[10px] uppercase text-slate-600 mb-1">Positions</div>
-            <div className="text-base font-bold font-mono text-slate-300">
-              {positions.length} open
-            </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -1568,12 +1624,14 @@ export default function App() {
   // Also re-fetch closed on every main refresh cycle
   useEffect(() => { fetchClosed(closedPeriod); }, [lastRefresh]); // eslint-disable-line
 
-  // Derived state — use real Alpaca equity when available, fall back to computed
-  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  // Derived state — prefer live_equity (our bar feed) over Alpaca's delayed marks
+  const unrealizedTotal = account?.live_unrealized ?? positions.reduce((s, p) => s + p.unrealized_pl, 0);
   const closedPnl       = stats?.total_pnl ?? status?.recent_trades.filter(t => t.pnl != null).reduce((s,t) => s + (t.pnl ?? 0), 0) ?? 0;
-  const portfolioValue  = account?.portfolio_value && account.portfolio_value > 0
-    ? account.portfolio_value
-    : INITIAL_CAPITAL + closedPnl + unrealizedTotal;
+  const portfolioValue  = (account?.live_equity && account.live_equity > 0)
+    ? account.live_equity
+    : account?.portfolio_value && account.portfolio_value > 0
+      ? account.portfolio_value
+      : INITIAL_CAPITAL + closedPnl + unrealizedTotal;
   const portfolioDelta  = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
   const allTrades       = status?.recent_trades ?? [];
 

@@ -377,12 +377,55 @@ def api_account():
         return jsonify({"equity": 0, "cash": 0, "buying_power": 0, "portfolio_value": 0})
     try:
         account = _agent.broker.get_account()
+        cash = float(account.cash)
+
+        # Compute live equity using our own price feed (bypasses Alpaca's ~15-min delayed marks)
+        live_equity = cash
+        live_unrealized = 0.0
+        positions_live = []
+        try:
+            positions = _agent.broker.get_positions()
+            for p in positions:
+                qty   = float(p.qty)
+                entry = float(p.avg_entry_price)
+                sym_raw = p.symbol  # e.g. LINKUSD
+                # Convert LINKUSD → LINK/USD for bar lookup
+                if sym_raw.endswith("USD") and "/" not in sym_raw:
+                    sym = sym_raw[:-3] + "/USD"
+                elif sym_raw.endswith("USDT") and "/" not in sym_raw:
+                    sym = sym_raw[:-4] + "/USDT"
+                else:
+                    sym = sym_raw
+                bars = _agent.broker.get_bars(sym, "1Min", limit=2)
+                if bars is not None and not bars.empty:
+                    live_price = float(bars["close"].iloc[-1])
+                else:
+                    live_price = float(p.current_price)  # fallback to Alpaca mark
+                side_m = 1.0 if p.side == "long" else -1.0
+                unrealized = (live_price - entry) * qty * side_m
+                live_unrealized += unrealized
+                live_equity += qty * live_price
+                positions_live.append({
+                    "symbol":      sym,
+                    "qty":         qty,
+                    "entry_price": round(entry, 6),
+                    "live_price":  round(live_price, 6),
+                    "alpaca_mark": round(float(p.current_price), 6),
+                    "unrealized":  round(unrealized, 4),
+                })
+        except Exception as pe:
+            logger.warning(f"live equity calc error: {pe}")
+            live_equity = float(account.portfolio_value)
+
         return jsonify({
-            "equity":          float(account.equity),
-            "cash":            float(account.cash),
-            "buying_power":    float(account.buying_power),
-            "portfolio_value": float(account.portfolio_value),
-            "last_equity":     float(account.last_equity),
+            "equity":           float(account.equity),
+            "cash":             cash,
+            "buying_power":     float(account.buying_power),
+            "portfolio_value":  float(account.portfolio_value),
+            "last_equity":      float(account.last_equity),
+            "live_equity":      round(live_equity, 4),
+            "live_unrealized":  round(live_unrealized, 4),
+            "positions_live":   positions_live,
         })
     except Exception as e:
         logger.error(f"api_account error: {e}")
