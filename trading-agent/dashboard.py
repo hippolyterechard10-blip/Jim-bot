@@ -657,21 +657,27 @@ function fmtDur(m){if(!m)return'—';const n=Math.round(m);return n<60?n+'min':M
 async function fetchJSON(url){try{const r=await fetch(url);return await r.json()}catch(e){return null}}
 function updateClock(){document.getElementById('clock').textContent=new Date().toUTCString().split(' ')[4]+' UTC'}
 setInterval(updateClock,1000);updateClock();
-async function updateExpertsStats(){
-  const d=await fetchJSON('/api/experts/stats');
-  if(!d)return;
-  const g=d.gapper||{};const geo=d.geometric||{};
-  const fmtCap=v=>'$'+(v||500).toFixed(2);
-  const fmtRet=v=>{const n=(v||0);const s=n>=0?'+':'';return s+n.toFixed(2)+'%'};
-  const fmtWr=v=>(v||0).toFixed(1)+'%';
-  document.getElementById('gap-capital').textContent=fmtCap(g.capital_now);
-  const gr=document.getElementById('gap-return');gr.textContent=fmtRet(g.capital_return);gr.className='stat-value '+(g.capital_return>=0?'pos':'neg');
-  document.getElementById('gap-trades').textContent=(g.total_trades||0)+(g.open_trades?` (${g.open_trades} open)`:'');
-  document.getElementById('gap-wr').textContent=fmtWr(g.win_rate);
-  document.getElementById('geo-capital').textContent=fmtCap(geo.capital_now);
-  const rr=document.getElementById('geo-return');rr.textContent=fmtRet(geo.capital_return);rr.className='stat-value '+(geo.capital_return>=0?'pos':'neg');
-  document.getElementById('geo-trades').textContent=(geo.total_trades||0)+(geo.open_trades?` (${geo.open_trades} open)`:'');
-  document.getElementById('geo-wr').textContent=fmtWr(geo.win_rate);
+async function updateExpertStats() {
+  const d = await fetchJSON('/api/experts/stats');
+  if (!d) return;
+  const g = d.gapper || {};
+  const geo = d.geometric || {};
+  const fmt$ = v => '$' + Math.abs(v).toFixed(2);
+  const fmtPct2 = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+
+  document.getElementById('gap-capital').textContent = fmt$(g.capital_now || 500);
+  document.getElementById('gap-capital').className = 'stat-value ' + ((g.capital_now || 500) >= 500 ? 'pos' : 'neg');
+  document.getElementById('gap-return').textContent = fmtPct2(g.capital_return || 0);
+  document.getElementById('gap-return').className = 'stat-value ' + ((g.capital_return || 0) >= 0 ? 'pos' : 'neg');
+  document.getElementById('gap-trades').textContent = g.total_trades || 0;
+  document.getElementById('gap-wr').textContent = (g.win_rate || 0).toFixed(1) + '%';
+
+  document.getElementById('geo-capital').textContent = fmt$(geo.capital_now || 500);
+  document.getElementById('geo-capital').className = 'stat-value ' + ((geo.capital_now || 500) >= 500 ? 'pos' : 'neg');
+  document.getElementById('geo-return').textContent = fmtPct2(geo.capital_return || 0);
+  document.getElementById('geo-return').className = 'stat-value ' + ((geo.capital_return || 0) >= 0 ? 'pos' : 'neg');
+  document.getElementById('geo-trades').textContent = geo.total_trades || 0;
+  document.getElementById('geo-wr').textContent = (geo.win_rate || 0).toFixed(1) + '%';
 }
 async function updateStats(){
   const s=await fetchJSON('/api/stats');
@@ -733,7 +739,7 @@ async function updateAnalyses(){
   }).join('');
 }
 async function refreshAll(){
-  await Promise.all([updateStats(),updateExpertsStats(),updateOpenTrades(),updateTradesHistory(),updateDecisions(),updateAnalyses()]);
+  await Promise.all([updateStats(),updateExpertStats(),updateOpenTrades(),updateTradesHistory(),updateDecisions(),updateAnalyses()]);
   const bar=document.getElementById('refresh-progress');
   bar.style.transition='none';bar.style.width='0%';
   requestAnimationFrame(()=>{bar.style.transition=`width ${REFRESH}ms linear`;bar.style.width='100%'});
