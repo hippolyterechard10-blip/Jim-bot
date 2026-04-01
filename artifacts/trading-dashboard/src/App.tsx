@@ -82,6 +82,7 @@ interface IndividualTrade {
   exit_vs_target: number | null;
   score: number | null; regime: string | null; session: string | null;
   patterns: string[]; rr: number | null; confidence: number | null;
+  strategy_source: string | null;
 }
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
@@ -679,6 +680,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
   const [tradeView,        setTradeView]        = useState<"grouped" | "individual">("individual");
   const [closedIndividual, setClosedIndividual] = useState<IndividualTrade[]>([]);
+  const [expertFilter,     setExpertFilter]     = useState<ExpertFilter>("all");
 
   useEffect(() => {
     const load = async () => {
@@ -692,9 +694,15 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
     return () => clearInterval(id);
   }, [closedPeriod]);
 
-  const indTotalPnl = closedIndividual.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const indWins     = closedIndividual.filter(t => (t.pnl ?? 0) > 0).length;
-  const indLosses   = closedIndividual.filter(t => (t.pnl ?? 0) < 0).length;
+  const filteredIndividual = closedIndividual.filter(t => {
+    if (expertFilter === "gap") return t.strategy_source === "gapper";
+    if (expertFilter === "geo") return t.strategy_source === "geometric";
+    return true;
+  });
+
+  const indTotalPnl = filteredIndividual.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const indWins     = filteredIndividual.filter(t => (t.pnl ?? 0) > 0).length;
+  const indLosses   = filteredIndividual.filter(t => (t.pnl ?? 0) < 0).length;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -759,6 +767,22 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
             ))}
           </div>
 
+          {/* Expert filter pills */}
+          <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
+            {([["all","All"],["gap","Gap"],["geo","Geo"]] as [ExpertFilter,string][]).map(([key,label]) => (
+              <button key={key} onClick={() => setExpertFilter(key)}
+                className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
+                  expertFilter === key
+                    ? key === "gap" ? "bg-orange-600/30 text-orange-400"
+                    : key === "geo" ? "bg-emerald-600/30 text-emerald-400"
+                    : "bg-slate-600/40 text-slate-300"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
           {/* View toggle */}
           <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
             <button onClick={() => setTradeView("individual")}
@@ -773,7 +797,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
           {/* Summary totals */}
           <div className="ml-auto flex items-center gap-3">
-            {tradeView === "individual" && closedIndividual.length > 0 && (
+            {tradeView === "individual" && filteredIndividual.length > 0 && (
               <>
                 <span className="text-[10px] text-slate-500">
                   <span className="text-emerald-500">{indWins}W</span>
@@ -795,7 +819,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
         {/* ── Individual view ── */}
         {tradeView === "individual" && (
-          closedIndividual.length === 0 ? (
+          filteredIndividual.length === 0 ? (
             <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
               No closed trades for this period
             </div>
@@ -805,13 +829,13 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-slate-700">
-                      {["Asset","Realized P&L","Entry → Exit","Hold","Exit Reason","Detail","Time"].map(h => (
+                      {["Asset","Expert","Realized P&L","Entry → Exit","Hold","Exit Reason","Detail","Time"].map(h => (
                         <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700/50">
-                    {closedIndividual.map(t => {
+                    {filteredIndividual.map(t => {
                       const isPos   = (t.pnl ?? 0) >= 0;
                       const isLong  = t.side === "buy" || t.side === "long";
                       return (
@@ -821,6 +845,13 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                             <span className={`ml-1.5 text-[10px] font-bold ${isLong ? "text-emerald-500" : "text-red-500"}`}>
                               {isLong ? "↑LONG" : "↓SHORT"}
                             </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            {t.strategy_source === "gapper"
+                              ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400">Gap</span>
+                              : t.strategy_source === "geometric"
+                              ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Geo</span>
+                              : <span className="text-[10px] text-slate-600">—</span>}
                           </td>
                           <td className="px-3 py-2">
                             <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>

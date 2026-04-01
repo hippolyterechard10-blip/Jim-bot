@@ -211,7 +211,7 @@ def api_trades_individual():
                 SELECT trade_id, symbol, side, qty, entry_price, exit_price,
                        pnl, pnl_pct, hold_duration_min,
                        close_reason, entry_at, exit_at,
-                       entry_snapshot, exit_vs_target
+                       entry_snapshot, exit_vs_target, market_context
                 FROM trades
                 WHERE status = 'closed'
                   AND (close_reason IS NULL OR close_reason != 'position_reconciled')
@@ -223,7 +223,7 @@ def api_trades_individual():
                 SELECT trade_id, symbol, side, qty, entry_price, exit_price,
                        pnl, pnl_pct, hold_duration_min,
                        close_reason, entry_at, exit_at,
-                       entry_snapshot, exit_vs_target
+                       entry_snapshot, exit_vs_target, market_context
                 FROM trades
                 WHERE status = 'closed'
                   AND (close_reason IS NULL OR close_reason != 'position_reconciled')
@@ -259,6 +259,7 @@ def api_trades_individual():
                 "patterns":       snap.get("patterns") or [],
                 "rr":             snap.get("risk_reward"),
                 "confidence":     snap.get("confidence"),
+                "strategy_source": (json.loads(r["market_context"]).get("strategy_source") if r["market_context"] else None),
             })
         return jsonify({"trades": trades, "period": period})
     except Exception as e:

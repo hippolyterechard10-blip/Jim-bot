@@ -178,11 +178,13 @@ class GeometricExpert:
                     structure = "range"
 
                 if structure == "uptrend" and side == "short":
-                    logger.debug(f"[GEO] {symbol} — uptrend, no shorts")
+                    logger.info(f"[GEO] {symbol} — uptrend, skipping short")
                     return
-                if structure == "downtrend" and side == "long":
-                    logger.debug(f"[GEO] {symbol} — downtrend, no longs")
+                if structure == "downtrend" and side == "long" and not rsi_divergence:
+                    logger.info(f"[GEO] {symbol} — downtrend without RSI divergence, skip long")
                     return
+                if structure == "downtrend" and side == "long" and rsi_divergence:
+                    logger.info(f"[GEO] {symbol} — downtrend BUT RSI divergence confirmed → allowing counter-trend long")
             else:
                 structure = "unknown"
 
@@ -195,10 +197,13 @@ class GeometricExpert:
             detected_names  = {p["name"] for p in candles["patterns"]}
 
             if side == "long" and not detected_names.intersection(bullish_candles):
-                logger.debug(f"[GEO] {symbol} — no bullish rejection candle at support")
-                return
+                if confluence >= 5:
+                    logger.info(f"[GEO] {symbol} — no bullish candle BUT confluence={confluence} (RSI divergence) → proceeding without candle confirmation")
+                else:
+                    logger.info(f"[GEO] {symbol} — no bullish candle + confluence={confluence}<5, skip")
+                    return
             if side == "short" and not detected_names.intersection(bearish_candles):
-                logger.debug(f"[GEO] {symbol} — no bearish rejection candle at resistance")
+                logger.info(f"[GEO] {symbol} — no bearish candle, skip")
                 return
 
             # STEP 6 — ATR-based stop
@@ -214,7 +219,7 @@ class GeometricExpert:
             risk   = abs(current_price - stop_price)
             reward = abs(target_price - current_price)
             if risk <= 0 or reward / risk < 2.0:
-                logger.debug(f"[GEO] {symbol} — R:R too low ({reward/risk:.1f}x)")
+                logger.info(f"[GEO] {symbol} — R:R too low ({reward/risk:.1f}x), skip")
                 return
 
             # STEP 7 — Correlation check (no 2 correlated positions)
