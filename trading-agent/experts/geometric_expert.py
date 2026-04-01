@@ -190,43 +190,7 @@ class GeometricExpert:
                 logger.debug(f"[GEO] {symbol} — crypto short not supported on Alpaca spot, skip")
                 return
 
-            # STEP 2 — Confluence score (1-5)
-            confluence = 0
-
-            # Factor 1: Level tested 2+ times
-            if level_score >= 2:
-                confluence += 1
-
-            # Factor 2: Round number
-            magnitude = 10 ** max(0, len(str(int(level))) - 2)
-            if abs(level % magnitude) < magnitude * 0.02:
-                confluence += 1
-
-            # Factor 3: Near SMA20
-            from numpy import mean as np_mean
-            sma20 = float(np_mean(closes_1m[-20:]))
-            if abs(level - sma20) / sma20 < 0.005:
-                confluence += 1
-
-            # Factor 4: High volume ratio recently
-            indicators = compute_indicators(closes_1m, volumes_1m)
-            if indicators.get("volume_ratio", 1) > 1.5:
-                confluence += 1
-
-            # Factor 5: Swing high/low (already captured in level_score)
-            if level_score >= 3:
-                confluence += 1
-
-            if confluence < 3:
-                logger.info(f"[GEO] {symbol} — confluence {confluence}/5 too low, skip")
-                return
-
-            # Level exhaustion check
-            if level_score >= 6:
-                logger.info(f"[GEO] {symbol} — level exhausted ({level_score} tests), skip")
-                return
-
-            # STEP 3 — RSI divergence check (+2 bonus)
+            # ── RSI divergence — computed first, used by Tier 1 and structure filter
             from strategy import _rsi
             import numpy as np
             prices_arr = np.array(closes_1m)
@@ -237,12 +201,10 @@ class GeometricExpert:
             price_lower    = closes_1m[-1] < closes_1m[-10]
             rsi_higher     = rsi_now > rsi_prev
             rsi_divergence = (side == "long" and price_lower and rsi_higher)
-
             if rsi_divergence:
-                confluence = min(confluence + 2, 7)
-                logger.info(f"[GEO] {symbol} — RSI divergence detected! confluence now {confluence}")
+                logger.info(f"[GEO] {symbol} — RSI divergence detected!")
 
-            # STEP 4 — Market structure (1h bars)
+            # ── Market structure (1h) — computed first, used by Tier 1 and directional filter
             bars_1h = self.broker.get_bars(symbol, "1Hour", limit=20)
             if bars_1h is not None and not bars_1h.empty and len(bars_1h) >= 5:
                 closes_1h = bars_1h["close"].tolist()
@@ -272,7 +234,108 @@ class GeometricExpert:
             else:
                 structure = "unknown"
 
-            # STEP 5 — Rejection candle at the level
+            # ── TIER 1 — Core geometric quality (max 7)
+            tier1 = 0
+
+            if level_score >= 6:
+                logger.info(f"[GEO] {symbol} — level exhausted ({level_score} tests), skip")
+                return
+            if level_score >= 4:
+                tier1 += 1
+            if level_score >= 2:
+                tier1 += 2
+            if structure != "unknown":
+                tier1 += 2
+            if rsi_divergence:
+                tier1 += 2
+
+            if tier1 < 2:
+                logger.info(f"[GEO] {symbol} — Tier 1 too weak ({tier1}), skip")
+                return
+
+            # ── TIER 2 — Precision filters (max 4.0)
+            tier2 = 0.0
+
+            try:
+                _vwap = sum(
+                    ((h + l + c) / 3) * v
+                    for h, l, c, v in zip(highs_1m, lows_1m, closes_1m, volumes_1m)
+                ) / max(sum(volumes_1m), 1)
+                if abs(level - _vwap) / _vwap < 0.003:
+                    tier2 += 1.5
+                    logger.info(f"[GEO] {symbol} — level near VWAP ${_vwap:.4f} (+1.5)")
+            except Exception:
+                pass
+
+            try:
+                _bars4h = self.broker.get_bars(symbol, "4Hour", limit=10)
+                if _bars4h is not None and not _bars4h.empty and len(_bars4h) >= 5:
+                    _h4 = _bars4h["high"].tolist()
+                    _l4 = _bars4h["low"].tolist()
+                    _hh4 = _h4[-1] > _h4[-3]
+                    _hl4 = _l4[-1]  > _l4[-3]
+                    _lh4 = _h4[-1] < _h4[-3]
+                    _ll4 = _l4[-1]  < _l4[-3]
+                    _s4 = "uptrend" if (_hh4 and _hl4) else "downtrend" if (_lh4 and _ll4) else "range"
+                    _aligned4 = (
+                        (side == "long"  and _s4 in ("uptrend", "range")) or
+                        (side == "short" and _s4 in ("downtrend", "range"))
+                    )
+                    if _aligned4:
+                        tier2 += 1.5
+                        logger.info(f"[GEO] {symbol} — 4h structure {_s4} aligns with {side} (+1.5)")
+            except Exception:
+                pass
+
+            try:
+                indicators = compute_indicators(closes_1m, volumes_1m)
+                if indicators.get("volume_ratio", 1) > 1.5:
+                    tier2 += 1
+                    logger.info(f"[GEO] {symbol} — volume ratio elevated (+1)")
+            except Exception:
+                pass
+
+            # ── TIER 3 — Context bonuses (max 3)
+            tier3 = 0
+
+            try:
+                magnitude = 10 ** max(0, len(str(int(level))) - 2)
+                if abs(level % magnitude) < magnitude * 0.02:
+                    tier3 += 1
+                    logger.info(f"[GEO] {symbol} — round number level (+1)")
+            except Exception:
+                pass
+
+            try:
+                _bars1d = self.broker.get_bars(symbol, "1Day", limit=3)
+                if _bars1d is not None and not _bars1d.empty and len(_bars1d) >= 2:
+                    _prev_high = float(_bars1d["high"].iloc[-2])
+                    _prev_low  = float(_bars1d["low"].iloc[-2])
+                    if (abs(level - _prev_high) / _prev_high < 0.005 or
+                            abs(level - _prev_low)  / _prev_low  < 0.005):
+                        tier3 += 1
+                        logger.info(f"[GEO] {symbol} — level near prev-day H/L (+1)")
+            except Exception:
+                pass
+
+            if structure == "range":
+                tier3 += 1
+                logger.info(f"[GEO] {symbol} — ranging market, optimal for geo (+1)")
+
+            # ── Total score + threshold
+            total_score = tier1 + tier2 + tier3
+            logger.info(
+                f"[GEO] {symbol} — Score {total_score:.1f} "
+                f"(T1={tier1} T2={tier2:.1f} T3={tier3}) side={side}"
+            )
+
+            if total_score < 4:
+                logger.info(f"[GEO] {symbol} — score {total_score:.1f} < 4, skip")
+                return
+
+            requires_candle = total_score < 6
+
+            # ── Rejection candle check
             candles = self.geometry.detect_candlestick_patterns(
                 opens_1m, highs_1m, lows_1m, closes_1m, volumes_1m
             )
@@ -280,15 +343,24 @@ class GeometricExpert:
             bearish_candles = {"SHOOTING_STAR", "BEARISH_ENGULFING", "THREE_BLACK_CROWS"}
             detected_names  = {p["name"] for p in candles["patterns"]}
 
-            if side == "long" and not detected_names.intersection(bullish_candles):
-                if confluence >= 5:
-                    logger.info(f"[GEO] {symbol} — no bullish candle BUT confluence={confluence} (RSI divergence) → proceeding without candle confirmation")
-                else:
-                    logger.info(f"[GEO] {symbol} — no bullish candle + confluence={confluence}<5, skip")
+            if requires_candle:
+                if side == "long" and not detected_names.intersection(bullish_candles):
+                    logger.info(
+                        f"[GEO] {symbol} — no bullish candle, "
+                        f"score {total_score:.1f} requires confirmation, skip"
+                    )
                     return
-            if side == "short" and not detected_names.intersection(bearish_candles):
-                logger.info(f"[GEO] {symbol} — no bearish candle, skip")
-                return
+                if side == "short" and not detected_names.intersection(bearish_candles):
+                    logger.info(
+                        f"[GEO] {symbol} — no bearish candle, "
+                        f"score {total_score:.1f} requires confirmation, skip"
+                    )
+                    return
+            else:
+                logger.info(
+                    f"[GEO] {symbol} — score {total_score:.1f} ≥ 6, "
+                    f"candle requirement waived. Detected: {detected_names or 'none'}"
+                )
 
             # STEP 6 — Level-based stop (the level holds or it doesn't — geometric principle)
             # ATR on 1-min bars produces 5%+ wide stops; instead anchor to the level itself.
@@ -309,21 +381,21 @@ class GeometricExpert:
             if risk <= 0 or reward / risk < 2.0:
                 rr_val = round(reward / risk, 1) if risk > 0 else 0
                 logger.info(f"[GEO] {symbol} — R:R too low ({rr_val}x), skip")
-                # Log WATCH signal when confluence is strong despite bad R:R
-                if confluence >= 5 and self.memory:
+                # Log WATCH signal when score is strong despite bad R:R
+                if total_score >= 5 and self.memory:
                     try:
-                        _base = min(int(confluence * 14), 70)
-                        _geo  = int(confluence * 4)
+                        _base = min(int(total_score * 8), 70)
+                        _geo  = int(total_score * 2)
                         _radj = +5 if structure in ("range", "uptrend") else -5
                         _final = min(100, _base + max(0, _radj) + _geo)
                         _regime_word = "CHOPPY" if _radj < 0 else ("BULL_MARKET" if structure == "uptrend" else "CHOPPY")
                         _rsn = (
-                            f"GEO V2 WATCH: {symbol} {side} | structure={structure} | R:R={rr_val}x (below 2:1 threshold)\n"
+                            f"GEO V2 WATCH: {symbol} {side} | structure={structure} | score={total_score:.1f} | R:R={rr_val}x (below 2:1 threshold)\n"
                             f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
                             f"{_regime_word}"
                         )
-                        _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "confluence": confluence, "rr": rr_val})
-                        self.memory.log_decision("WATCH", _rsn, symbol=symbol, confidence=round(min(confluence / 5.0, 1.0), 2), market_data=_md)
+                        _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "total_score": total_score, "rr": rr_val})
+                        self.memory.log_decision("WATCH", _rsn, symbol=symbol, confidence=round(min(total_score / 10.0, 1.0), 2), market_data=_md)
                     except Exception as _le:
                         logger.debug(f"[GEO] log_decision (watch) error: {_le}")
                 return
@@ -350,9 +422,9 @@ class GeometricExpert:
                 logger.info(f"[GEO] {symbol} — no capital available (${available:.0f})")
                 return
 
-            deploy_pct     = self.get_capital_pct_for_setup(min(confluence, 5))
+            deploy_pct     = 0.95 if total_score >= 8 else 0.90 if total_score >= 6 else 0.80
             max_capital    = config.STRATEGY_CAPITAL["geometric"] * deploy_pct
-            position_pct   = 0.28  # 28% of pool per position
+            position_pct   = 0.35 if total_score >= 8 else 0.28 if total_score >= 6 else 0.20
             capital_to_use = min(available, config.STRATEGY_CAPITAL["geometric"] * position_pct)
             capital_to_use = min(capital_to_use, max_capital - self.get_deployed_capital())
             # Apply calendar event size reduction if active
@@ -372,7 +444,7 @@ class GeometricExpert:
 
             logger.info(
                 f"[GEO] 📐 ENTERING: {symbol} {side.upper()} | "
-                f"level=${level:.4f} | confluence={confluence}/5 | "
+                f"level=${level:.4f} | score={total_score:.1f} (T1={tier1} T2={tier2:.1f} T3={tier3}) | "
                 f"stop=${stop_price:.4f} | target=${target_price:.4f} | "
                 f"R:R={reward/risk:.1f}x | structure={structure} | "
                 f"candles={detected_names} | capital=${capital_to_use:.0f}"
@@ -382,19 +454,19 @@ class GeometricExpert:
             if self.memory:
                 try:
                     _rr     = round(reward / risk, 1)
-                    _base   = min(int(confluence * 14), 70)
-                    _geo    = int(confluence * 4)
+                    _base   = min(int(total_score * 8), 70)
+                    _geo    = int(total_score * 2)
                     _radj   = +5 if structure in ("range", "uptrend") else -5
                     _final  = min(100, _base + max(0, _radj) + _geo)
                     _regime_word = "BULL_MARKET" if structure == "uptrend" else ("BEAR_MARKET" if structure == "downtrend" else "CHOPPY")
                     _rsn = (
-                        f"GEO V2: {symbol} {side} | structure={structure} | R:R={_rr}x | capital=${capital_to_use:.0f}\n"
+                        f"GEO V2: {symbol} {side} | structure={structure} | score={total_score:.1f} | R:R={_rr}x | capital=${capital_to_use:.0f}\n"
                         f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
                         f"{_regime_word}"
                     )
-                    _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "confluence": confluence, "rr": _rr})
+                    _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "total_score": round(total_score, 1), "rr": _rr})
                     _decision = "BUY" if side == "long" else "SELL"
-                    self.memory.log_decision(_decision, _rsn, symbol=symbol, confidence=round(min(confluence / 5.0, 1.0), 2), market_data=_md)
+                    self.memory.log_decision(_decision, _rsn, symbol=symbol, confidence=round(min(total_score / 10.0, 1.0), 2), market_data=_md)
                 except Exception as _le:
                     logger.debug(f"[GEO] log_decision error: {_le}")
 
@@ -431,7 +503,10 @@ class GeometricExpert:
                         "strategy_source": "geometric",
                         "side": side,
                         "level": float(level),
-                        "confluence": int(confluence),
+                        "total_score": round(total_score, 1),
+                        "tier1": tier1,
+                        "tier2": round(tier2, 1),
+                        "tier3": tier3,
                         "structure": structure,
                         "atr": float(atr),
                         "target_midpoint": float(target_price),
