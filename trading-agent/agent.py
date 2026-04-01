@@ -209,6 +209,15 @@ class TradingAgent:
                         return c
                 return sym
 
+            # Fetch live Alpaca positions so we know what's still open
+            try:
+                live_positions = {
+                    _display(p.symbol): float(p.qty)
+                    for p in self.broker.api.list_positions()
+                }
+            except Exception:
+                live_positions = {}
+
             conn = sqlite3.connect(self.memory.db_path, timeout=10)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
@@ -267,6 +276,14 @@ class TradingAgent:
                         (order_id,)
                     )
                     if c.fetchone():
+                        continue
+                    # Skip if the symbol is STILL open in Alpaca — the sell is historical,
+                    # not related to the current live position.
+                    if display_sym in live_positions and live_positions[display_sym] > 0:
+                        logger.debug(
+                            f"[OrderSync] Skipping sell for {display_sym} — still open in Alpaca "
+                            f"({live_positions[display_sym]:.4f} qty live)"
+                        )
                         continue
                     # Find oldest open DB record for this symbol to close
                     c.execute(
