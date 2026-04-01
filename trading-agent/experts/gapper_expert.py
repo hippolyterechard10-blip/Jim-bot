@@ -281,7 +281,7 @@ class GapperExpert:
                                 stop_loss=entry_price,  # breakeven
                                 market_context={**ctx_data, "partial_taken": True}
                             )
-                    return
+                    continue
 
                 # Trailing stop -15% from highest price (after partial)
                 if partial_taken:
