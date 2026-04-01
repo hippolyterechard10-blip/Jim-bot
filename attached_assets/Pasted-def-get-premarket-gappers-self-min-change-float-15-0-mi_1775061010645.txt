@@ -1,0 +1,47 @@
+def get_premarket_gappers(self, min_change: float = 15.0, min_price: float = 1.0, max_price: float = 50.0) -> list:
+    """
+    Pre-market gapper scanner (4h-9h30 ET).
+    Uses latest_trade.price vs prev_daily_bar.close — works before daily_bar is available.
+    """
+    try:
+        assets = self.api.list_assets(status="active", asset_class="us_equity")
+        tradeable = [a for a in assets if a.tradable]
+        symbols = [a.symbol for a in tradeable]
+
+        snapshots = self.api.get_snapshots(symbols)
+        gappers = []
+
+        for symbol, snap in snapshots.items():
+            try:
+                prev_close = snap.prev_daily_bar.close if snap.prev_daily_bar else None
+                last_price = snap.latest_trade.price if snap.latest_trade else None
+
+                if not prev_close or not last_price or prev_close <= 0:
+                    continue
+                if not (min_price <= last_price <= max_price):
+                    continue
+
+                change_pct = (last_price - prev_close) / prev_close * 100
+
+                if change_pct >= min_change:
+                    gappers.append({
+                        "symbol":       symbol,
+                        "price":        round(last_price, 4),
+                        "prev_close":   round(prev_close, 4),
+                        "change_pct":   round(change_pct, 2),
+                        "volume":       getattr(snap.latest_quote, "ask_size", 500_000),
+                        "volume_ratio": 0,  # Not available pre-market
+                        "is_gapper":    True,
+                        "source":       "premarket",
+                    })
+            except Exception:
+                continue
+
+        gappers.sort(key=lambda x: x["change_pct"], reverse=True)
+        if gappers:
+            logger.info(f"🌅 Pre-market gappers: {[f'{g[\"symbol\"]} +{g[\"change_pct\"]:.1f}%' for g in gappers[:5]]}")
+        return gappers[:10]
+
+    except Exception as e:
+        logger.error(f"get_premarket_gappers error: {e}")
+        return []
