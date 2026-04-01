@@ -396,11 +396,13 @@ def api_account():
                     sym = sym_raw[:-4] + "/USDT"
                 else:
                     sym = sym_raw
-                bars = _agent.broker.get_bars(sym, "1Min", limit=2)
-                if bars is not None and not bars.empty:
-                    live_price = float(bars["close"].iloc[-1])
-                else:
-                    live_price = float(p.current_price)  # fallback to Alpaca mark
+                live_price = _agent.broker.get_live_price(sym) if "/" in sym else None
+                if live_price is None:
+                    bars = _agent.broker.get_bars(sym, "1Min", limit=2)
+                    if bars is not None and not bars.empty:
+                        live_price = float(bars["close"].iloc[-1])
+                    else:
+                        live_price = float(p.current_price)  # fallback to Alpaca mark
                 side_m = 1.0 if p.side == "long" else -1.0
                 unrealized = (live_price - entry) * qty * side_m
                 live_unrealized += unrealized
