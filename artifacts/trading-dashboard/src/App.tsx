@@ -2151,7 +2151,12 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
 
   const gapCap  = experts.gapper?.capital_now   ?? 0;
   const geoCap  = experts.geometric?.capital_now ?? 0;
-  const totalCap = gapCap + geoCap;
+  // Use Alpaca live equity as the ground-truth total (avoids double-counting unrealized P&L)
+  const totalCap = (account?.live_equity && account.live_equity > 0)
+    ? account.live_equity
+    : (account?.equity && account.equity > 0)
+    ? account.equity
+    : gapCap + geoCap;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">

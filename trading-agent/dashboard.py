@@ -681,24 +681,21 @@ def source_file(filename):
 @app.route("/api/experts/stats")
 def api_experts_stats():
     """Returns independent P&L and capital for each expert.
-    capital_start = 50% of current account equity (dynamic allocation).
-    capital_now   = capital_start + all closed P&L attributed to that expert.
+    capital_now = authoritative value from capital_lock.json (compounded on each real V2 trade close).
+    Only V2-placed trades are counted in stats (synced_close/orphan trades excluded).
     """
     if not _memory:
         return jsonify({})
     try:
-        import json
+        import json as _json
 
-        # Dynamic 50% split of current equity
-        total_equity = config.INITIAL_CAPITAL
-        if _agent:
-            try:
-                acct = _agent.broker.get_account()
-                if acct:
-                    total_equity = float(acct.equity)
-            except Exception:
-                pass
-        capital_start = round(total_equity / 2, 2)
+        # ── Read authoritative capital from capital_lock.json ──────────────────
+        lock = {}
+        try:
+            with open(config._CAPITAL_LOCK_FILE) as f:
+                lock = _json.load(f)
+        except Exception:
+            pass
 
         all_trades = _memory.get_recent_trades(limit=500)
         result = {}
@@ -707,18 +704,24 @@ def api_experts_stats():
             for t in all_trades:
                 ctx = t.get("market_context") or {}
                 if isinstance(ctx, str):
-                    try: ctx = json.loads(ctx)
+                    try: ctx = _json.loads(ctx)
                     except: ctx = {}
                 if ctx.get("strategy_source") == source:
                     trades.append(t)
 
+            # Only count V2-placed trades in stats (exclude synced_close/orphan)
+            V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close")
             closed = [t for t in trades if t.get("status") == "closed"
-                      and t.get("close_reason") not in ("partial_profit_remainder",)]
+                      and t.get("close_reason") not in V2_EXCLUDE]
             pnls   = [t.get("pnl") or 0 for t in closed]
             wins   = [p for p in pnls if p > 0]
             losses = [p for p in pnls if p < 0]
             total_pnl = sum(pnls)
-            capital_now = capital_start + total_pnl
+
+            # capital_now = locked value (ground truth from compounding events)
+            capital_now = lock.get(source, config.INITIAL_CAPITAL / 2)
+            # capital_start = capital_now minus any compounded P&L (for % return calc)
+            capital_start = round(capital_now - total_pnl, 2) if capital_now else config.INITIAL_CAPITAL / 2
 
             open_trades = [t for t in trades if t.get("status") == "open"]
             # Live unrealized for open expert positions
@@ -746,7 +749,7 @@ def api_experts_stats():
                 "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
                 "capital_start":   capital_start,
                 "capital_now":     round(capital_now, 2),
-                "capital_return":  round((capital_now - capital_start) / capital_start * 100, 2)
+                "capital_return":  round(total_pnl / capital_start * 100, 2)
                                    if capital_start > 0 else 0,
                 "open_trades":     len(open_trades),
                 "live_unrealized": round(live_unrealized, 4),

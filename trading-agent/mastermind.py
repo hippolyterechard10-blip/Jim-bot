@@ -500,6 +500,7 @@ class Mastermind:
                 FROM trades
                 WHERE status = 'closed'
                   AND json_extract(market_context, '$.strategy_source') = 'geometric'
+                  AND close_reason NOT IN ('synced_close', 'orphan_close')
                   AND (json_extract(market_context, '$.capital_recorded') IS NULL
                        OR json_extract(market_context, '$.capital_recorded') = 0)
                   AND pnl IS NOT NULL AND pnl != 0
