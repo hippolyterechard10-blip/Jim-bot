@@ -16,6 +16,7 @@ class GeometricExpert:
         self.regime = regime
         self.correlations = correlations
         self._candidates = []
+        self._low_water: dict = {}
 
     def add_candidate(self, symbol: str):
         if symbol not in self._candidates:
@@ -99,6 +100,11 @@ class GeometricExpert:
                 level_score = resistance_score
             else:
                 logger.debug(f"[GEO] {symbol} — not near any key level, skip")
+                return
+
+            # Crypto shorts not supported on Alpaca spot
+            if side == "short" and is_crypto:
+                logger.debug(f"[GEO] {symbol} — crypto short not supported on Alpaca spot, skip")
                 return
 
             # STEP 2 — Confluence score (1-5)
@@ -361,10 +367,10 @@ class GeometricExpert:
                                 pnl = (current_price - entry_price) * qty
                                 self.memory.log_trade_close(match["trade_id"], current_price, "geo_trailing_stop", pnl=pnl)
                     else:
-                        best = ctx_data.get("low_water", current_price)
-                        new_best = min(best, current_price)
-                        ctx_data["low_water"] = new_best
-                        trail_stop = new_best * 1.01
+                        if symbol not in self._low_water:
+                            self._low_water[symbol] = current_price
+                        self._low_water[symbol] = min(self._low_water[symbol], current_price)
+                        trail_stop = self._low_water[symbol] * 1.01
                         if current_price >= trail_stop:
                             logger.info(f"[GEO] 🔴 TRAIL STOP (short): {symbol} ${current_price:.4f}")
                             self.broker.close_position(symbol)
