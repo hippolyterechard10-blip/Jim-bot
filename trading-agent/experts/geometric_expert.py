@@ -88,6 +88,7 @@ class GeometricExpert:
         if is_crypto and not is_crypto_good_hours():
             return
 
+        logger.info(f"[GEO] ✅ Session OK: {symbol}, evaluating...")
         logger.info(f"[GEO] 🔍 Evaluating {symbol}")
 
         # Double-entry guard — block re-entry on already-open geometric position
@@ -111,6 +112,7 @@ class GeometricExpert:
 
         # Get bars — 1-min for entry, 1-hour for structure
         bars_1m = self.broker.get_bars(symbol, "1Min", limit=50)
+        logger.info(f"[GEO] bars_1m: {'OK' if bars_1m is not None and not bars_1m.empty else 'NONE/EMPTY'} for {symbol}")
         if bars_1m is None or bars_1m.empty or len(bars_1m) < 20:
             return
 
@@ -132,6 +134,8 @@ class GeometricExpert:
             # Determine which level we're near (within 1.5%)
             dist_to_support    = (current_price - nearest_support) / current_price
             dist_to_resistance = (nearest_resistance - current_price) / current_price
+
+            logger.info(f"[GEO] SR levels: support={sr.get('nearest_support', 0):.2f} resistance={sr.get('nearest_resistance', 0):.2f} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f}")
 
             if dist_to_support <= 0.015:
                 side        = "long"
@@ -191,6 +195,7 @@ class GeometricExpert:
             import numpy as np
             prices_arr = np.array(closes_1m)
             rsi_now  = _rsi(prices_arr, 14)
+            logger.info(f"[GEO] RSI check OK: rsi_now={rsi_now:.1f}")
             rsi_prev = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
 
             price_lower    = closes_1m[-1] < closes_1m[-10]
