@@ -524,6 +524,8 @@ class TradingAgent:
                 loss_pct = (avg_entry - current_price) / avg_entry
                 if loss_pct >= config.TRADE_STOP_LOSS_PCT:
                     symbol = pos.symbol
+                    if getattr(config, 'TRADING_ENGINE', 'V1') == 'V2' and symbol not in self._trail_pcts:
+                        continue
                     logger.info(
                         f"[FAST] 🛑 FAST STOP: {symbol} hard stop hit at {current_price:.6g} "
                         f"— loss capped at {loss_pct*100:.1f}%"
@@ -919,6 +921,8 @@ class TradingAgent:
                 continue
 
             symbol = pos.symbol
+            if getattr(config, 'TRADING_ENGINE', 'V1') == 'V2' and symbol not in self._trail_pcts:
+                continue
             try:
                 current_price = float(pos.current_price)
                 current_qty   = abs(float(pos.qty))
@@ -1070,6 +1074,8 @@ class TradingAgent:
                 continue
 
             symbol = pos.symbol
+            if getattr(config, 'TRADING_ENGINE', 'V1') == 'V2' and symbol not in self._trail_pcts:
+                continue
             try:
                 current_price = float(pos.current_price)
                 current_qty   = abs(qty_val)
