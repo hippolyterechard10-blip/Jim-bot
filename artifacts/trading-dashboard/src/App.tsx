@@ -45,8 +45,8 @@ interface Mover { symbol: string; price: number; change_pct: number; direction: 
 interface SentimentResponse { sentiment: string; score: number; headlines?: string[]; alerts?: string[]; ts?: string; }
 interface RegimeResponse { regime: string; params?: Record<string, unknown>; context?: string; }
 interface StatsResponse {
-  total_trades: number; win_rate: number; profit_factor: number;
-  total_pnl: number; max_drawdown: number; best_asset: string | null; asset_pnl: Record<string, number>;
+  total_trades: number; win_rate: number | null; profit_factor: number | null;
+  total_pnl: number | null; max_drawdown: number; best_asset: string | null; asset_pnl: Record<string, number>;
 }
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
@@ -1509,8 +1509,8 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
       <div className="grid grid-cols-3 divide-x divide-slate-700/20 flex-1">
         <div className="px-3 py-3 text-center">
           <div className="text-[9px] uppercase text-slate-600 mb-1">Win rate</div>
-          <div className={`text-base font-bold ${data.win_rate >= 50 ? "text-emerald-400" : "text-amber-400"}`}>
-            {data.win_rate.toFixed(0)}%
+          <div className={`text-base font-bold ${(data.win_rate ?? 0) >= 50 ? "text-emerald-400" : "text-amber-400"}`}>
+            {data.win_rate != null ? data.win_rate.toFixed(0) + "%" : "—"}
           </div>
           <div className="text-[9px] text-slate-600 mt-0.5">{data.total_trades} trades</div>
         </div>
@@ -1568,13 +1568,13 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
     },
     {
       label: "Win Rate",
-      value: stats ? stats.win_rate.toFixed(1) + "%" : "—",
+      value: stats?.win_rate != null ? stats.win_rate.toFixed(1) + "%" : "—",
       sub: analysis ? `${analysis.winning_trades}W / ${analysis.losing_trades}L` : undefined,
       color: "text-sky-400",
     },
     {
       label: "Profit Factor",
-      value: stats ? (stats.profit_factor >= 999 ? "∞" : stats.profit_factor.toFixed(2)) : "—",
+      value: stats?.profit_factor != null ? (stats.profit_factor >= 999 ? "∞" : stats.profit_factor.toFixed(2)) : "—",
       sub: analysis ? `$${analysis.gross_win.toFixed(2)} gross` : undefined,
       color: "text-violet-400",
     },
@@ -1652,8 +1652,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         </div>
         <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
           <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Win rate global</div>
-          <div className={`text-base font-bold ${stats && stats.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
-            {stats ? stats.win_rate.toFixed(1) + "%" : "—"}
+          <div className={`text-base font-bold ${stats?.win_rate != null && stats.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
+            {stats?.win_rate != null ? stats.win_rate.toFixed(1) + "%" : "—"}
           </div>
           <div className="text-[9px] text-slate-600 mt-0.5">
             {analysis ? `${analysis.winning_trades}W / ${analysis.losing_trades}L` : "tous trades"}
