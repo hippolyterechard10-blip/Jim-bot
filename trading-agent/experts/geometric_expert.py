@@ -16,6 +16,7 @@ class GeometricExpert:
         self.regime = regime
         self.correlations = correlations
         self._candidates = []
+        self._high_water: dict = {}
         self._low_water: dict = {}
 
     def add_candidate(self, symbol: str):
@@ -361,10 +362,10 @@ class GeometricExpert:
                 # Trailing stop -1% from best price (after partial)
                 if partial_taken:
                     if side == "long":
-                        best = ctx_data.get("high_water", current_price)
-                        new_best = max(best, current_price)
-                        ctx_data["high_water"] = new_best
-                        trail_stop = new_best * 0.99
+                        if symbol not in self._high_water:
+                            self._high_water[symbol] = current_price
+                        self._high_water[symbol] = max(self._high_water[symbol], current_price)
+                        trail_stop = self._high_water[symbol] * 0.99
                         if current_price <= trail_stop:
                             logger.info(f"[GEO] 🔴 TRAIL STOP (long): {symbol} ${current_price:.4f}")
                             self.broker.close_position(symbol)
