@@ -1,0 +1,154 @@
+def evaluate(self, candidate: dict):
+    import pytz
+    from datetime import datetime, timezone
+    import uuid
+
+    ET = pytz.timezone("America/New_York")
+    now_et = datetime.now(ET)
+    t = now_et.time()
+
+    from datetime import time as dtime
+    if not (dtime(9, 35) <= t <= dtime(10, 45)):
+        logger.info(f"[GAPPER] {candidate.get('symbol')} — outside entry window (9:35-10:45 ET), skip")
+        return
+
+    symbol = candidate.get("symbol", "")
+    change_pct = candidate.get("change_pct", 0)
+    float_shares = candidate.get("float_shares")
+
+    # Float-based sizing
+    if float_shares:
+        if float_shares < 1_000_000:
+            size_pct = 0.10
+        elif float_shares < 10_000_000:
+            size_pct = 0.20
+        elif float_shares < 50_000_000:
+            size_pct = 0.10
+        else:
+            logger.info(f"[GAPPER] {symbol} — float {float_shares/1e6:.1f}M too large, skip")
+            return
+    else:
+        size_pct = 0.12  # default if float unknown
+
+    # Get 1-min bars
+    bars = self.broker.get_bars(symbol, "1Min", limit=50)
+    if bars is None or bars.empty:
+        logger.warning(f"[GAPPER] {symbol} — no bars available")
+        return
+
+    # Identify first 5-min candle (9:30-9:35 ET)
+    # Filter bars to find those between 9:30 and 9:35 ET
+    try:
+        bars_et = bars.copy()
+        if bars_et.index.tz is None:
+            bars_et.index = bars_et.index.tz_localize("UTC")
+        bars_et.index = bars_et.index.tz_convert(ET)
+
+        first_candle_bars = bars_et.between_time("09:30", "09:34")
+        if first_candle_bars.empty:
+            logger.info(f"[GAPPER] {symbol} — first 5-min candle not yet formed")
+            return
+
+        first_candle_high = float(first_candle_bars["high"].max())
+        first_candle_low = float(first_candle_bars["low"].min())
+    except Exception as e:
+        logger.error(f"[GAPPER] {symbol} first candle error: {e}")
+        return
+
+    current_price = float(bars["close"].iloc[-1])
+    current_volume = float(bars["volume"].iloc[-1])
+    avg_volume = float(bars["volume"].tail(20).mean()) if len(bars) >= 20 else current_volume
+
+    # Entry condition: price breaking above first candle high with volume
+    if current_price <= first_candle_high:
+        logger.info(
+            f"[GAPPER] {symbol} — price ${current_price:.2f} not above first candle high ${first_candle_high:.2f}, "
+            f"waiting for breakout"
+        )
+        return
+
+    if current_volume < avg_volume * 1.2:
+        logger.info(f"[GAPPER] {symbol} — volume not confirming breakout ({current_volume:.0f} vs avg {avg_volume:.0f})")
+        return
+
+    # Calculate stops and targets
+    stop_price = round(first_candle_low * 0.995, 4)  # first candle low -0.5%
+    hard_stop = round(current_price * 0.90, 4)        # -10% hard max
+    stop_price = max(stop_price, hard_stop)           # use whichever is tighter
+
+    risk_pct = (current_price - stop_price) / current_price
+    if risk_pct > 0.10:
+        logger.info(f"[GAPPER] {symbol} — stop too wide ({risk_pct*100:.1f}%), skip")
+        return
+
+    # Check capital available
+    available = self.get_available_capital()
+    if available < 50:
+        logger.info(f"[GAPPER] {symbol} — insufficient capital (${available:.0f})")
+        return
+
+    # If first trade of day was a loss, reduce size by 50%
+    from_memory = self._get_todays_first_outcome()
+    if from_memory == "loss":
+        size_pct *= 0.5
+
+    # Calculate position size
+    capital_to_use = min(available * size_pct / size_pct, available * size_pct)
+    # Rephrase: use size_pct of available, capped at 40% of total poche
+    capital_to_use = min(available, config.STRATEGY_CAPITAL["gapper"] * min(size_pct, 0.40))
+    qty = max(1, int(capital_to_use / current_price))
+
+    if qty * current_price < 20:
+        logger.info(f"[GAPPER] {symbol} — position too small (${qty*current_price:.0f}), skip")
+        return
+
+    logger.info(
+        f"[GAPPER] 🚀 ENTERING: {symbol} | price=${current_price:.4f} | "
+        f"stop=${stop_price:.4f} (-{risk_pct*100:.1f}%) | "
+        f"qty={qty} | capital=${qty*current_price:.0f} | "
+        f"gap={change_pct:+.1f}% | float={float_shares/1e6:.1f}M" if float_shares else
+        f"[GAPPER] 🚀 ENTERING: {symbol} | price=${current_price:.4f} | stop=${stop_price:.4f} | qty={qty}"
+    )
+
+    order = self.broker.place_order(symbol, qty, "buy", stop_loss=stop_price)
+
+    if order and self.memory:
+        trade_id = str(uuid.uuid4())
+        self.memory.log_trade_open(
+            trade_id=trade_id,
+            symbol=symbol,
+            side="buy",
+            qty=qty,
+            entry_price=current_price,
+            stop_loss=stop_price,
+            alpaca_order_id=getattr(order, "id", None),
+            market_context={
+                "strategy_source": "gapper",
+                "change_pct": change_pct,
+                "first_candle_high": first_candle_high,
+                "first_candle_low": first_candle_low,
+                "float_shares": float_shares,
+                "target_partial": round(current_price * 1.10, 4),
+                "target_pct": 10.0,
+            }
+        )
+
+def _get_todays_first_outcome(self) -> str:
+    """Returns 'win', 'loss', or None for today's first gapper trade."""
+    try:
+        import pytz
+        from datetime import datetime
+        ET = pytz.timezone("America/New_York")
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        recent = self.memory.get_recent_trades(limit=20)
+        for t in recent:
+            ctx = t.get("market_context") or {}
+            if isinstance(ctx, str):
+                import json
+                try: ctx = json.loads(ctx)
+                except: ctx = {}
+            if ctx.get("strategy_source") == "gapper" and t.get("exit_at", "")[:10] == today:
+                return "win" if (t.get("pnl") or 0) > 0 else "loss"
+        return None
+    except Exception:
+        return None
