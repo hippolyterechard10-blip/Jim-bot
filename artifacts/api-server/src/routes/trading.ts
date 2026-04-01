@@ -191,6 +191,15 @@ router.get("/closed-today", async (req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/closed-today?period=${period}`, { closed: [], date: "" }));
 });
 
+router.get("/trades/individual", async (req, res) => {
+  const period = (req.query.period as string) || "today";
+  const limit  = (req.query.limit  as string) || "300";
+  res.json(await proxyFlask(
+    `${FLASK_BASE}/api/trades/individual?period=${period}&limit=${limit}`,
+    { trades: [] }
+  ));
+});
+
 router.get("/analysis", async (_req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/analysis`, {}));
 });

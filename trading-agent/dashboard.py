@@ -149,7 +149,7 @@ def api_closed_today():
                 FROM trades
                 WHERE status = 'closed' AND exit_at >= ?
                 GROUP BY symbol
-                ORDER BY total_pnl DESC
+                ORDER BY MAX(exit_at) DESC
             """, (since,))
         else:
             c.execute("""
@@ -162,7 +162,7 @@ def api_closed_today():
                 FROM trades
                 WHERE status = 'closed'
                 GROUP BY symbol
-                ORDER BY total_pnl DESC
+                ORDER BY MAX(exit_at) DESC
             """)
         rows = c.fetchall()
         conn.close()
@@ -181,6 +181,74 @@ def api_closed_today():
     except Exception as e:
         logger.error(f"api_closed_today error: {e}")
         return jsonify({"closed": [], "error": str(e)})
+
+@app.route("/api/trades/individual")
+def api_trades_individual():
+    from flask import request as flask_req
+    if not _memory:
+        return jsonify({"trades": []})
+    try:
+        period = flask_req.args.get("period", "today")
+        since  = _period_start(period)
+        limit  = min(int(flask_req.args.get("limit", 300)), 500)
+        conn   = sqlite3.connect(_memory.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        if since:
+            c.execute("""
+                SELECT trade_id, symbol, side, qty, entry_price, exit_price,
+                       pnl, pnl_pct, hold_duration_min,
+                       close_reason, entry_at, exit_at,
+                       entry_snapshot, exit_vs_target
+                FROM trades
+                WHERE status = 'closed' AND exit_at >= ?
+                ORDER BY exit_at DESC LIMIT ?
+            """, (since, limit))
+        else:
+            c.execute("""
+                SELECT trade_id, symbol, side, qty, entry_price, exit_price,
+                       pnl, pnl_pct, hold_duration_min,
+                       close_reason, entry_at, exit_at,
+                       entry_snapshot, exit_vs_target
+                FROM trades
+                WHERE status = 'closed'
+                ORDER BY exit_at DESC LIMIT ?
+            """, (limit,))
+        rows = c.fetchall()
+        conn.close()
+        trades = []
+        for r in rows:
+            snap = {}
+            if r["entry_snapshot"]:
+                try:
+                    snap = json.loads(r["entry_snapshot"])
+                except Exception:
+                    snap = {}
+            trades.append({
+                "trade_id":       r["trade_id"],
+                "symbol":         r["symbol"],
+                "side":           r["side"],
+                "qty":            round(r["qty"], 8) if r["qty"] else 0,
+                "entry_price":    r["entry_price"],
+                "exit_price":     r["exit_price"],
+                "pnl":            round(r["pnl"], 6)    if r["pnl"]     is not None else None,
+                "pnl_pct":        round(r["pnl_pct"], 4) if r["pnl_pct"] is not None else None,
+                "hold_min":       round(r["hold_duration_min"], 1) if r["hold_duration_min"] else None,
+                "close_reason":   r["close_reason"],
+                "entry_at":       r["entry_at"],
+                "exit_at":        r["exit_at"],
+                "exit_vs_target": r["exit_vs_target"],
+                "score":          snap.get("final_score") or snap.get("base_score"),
+                "regime":         snap.get("regime"),
+                "session":        snap.get("session"),
+                "patterns":       snap.get("patterns") or [],
+                "rr":             snap.get("risk_reward"),
+                "confidence":     snap.get("confidence"),
+            })
+        return jsonify({"trades": trades, "period": period})
+    except Exception as e:
+        logger.error(f"api_trades_individual error: {e}")
+        return jsonify({"trades": [], "error": str(e)})
 
 @app.route("/api/analysis")
 def api_analysis():

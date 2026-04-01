@@ -57,6 +57,15 @@ interface ClosedTodayItem {
   symbol: string; pnl: number; trade_count: number;
   qty_sold: number; last_exit: string; reasons: string;
 }
+interface IndividualTrade {
+  trade_id: string; symbol: string; side: string; qty: number;
+  entry_price: number | null; exit_price: number | null;
+  pnl: number | null; pnl_pct: number | null; hold_min: number | null;
+  close_reason: string | null; entry_at: string; exit_at: string;
+  exit_vs_target: number | null;
+  score: number | null; regime: string | null; session: string | null;
+  patterns: string[]; rr: number | null; confidence: number | null;
+}
 
 type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
 type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
@@ -96,6 +105,10 @@ function fmtPnl(n: number) {
   return (n >= 0 ? "+" : "-") + "$" + str;
 }
 function fmtPct(n: number) { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
+function fmtHoldMin(m: number | null) {
+  if (m == null) return "—";
+  return m < 60 ? `${Math.round(m)}m` : `${(m / 60).toFixed(1)}h`;
+}
 function daysUntil(dateStr: string) {
   const diff = Math.round((new Date(dateStr + "T12:00:00Z").getTime() - Date.now()) / 86400_000);
   if (diff < 0)   return `${Math.abs(diff)}d ago`;
@@ -612,6 +625,25 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
     { key: "all",   label: "All"   },
   ];
 
+  const [tradeView,        setTradeView]        = useState<"grouped" | "individual">("individual");
+  const [closedIndividual, setClosedIndividual] = useState<IndividualTrade[]>([]);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(`${BASE}/api/trades/individual?period=${closedPeriod}`);
+        if (res.ok) { const d = await res.json(); setClosedIndividual(d.trades ?? []); }
+      } catch { /* silent */ }
+    };
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, [closedPeriod]);
+
+  const indTotalPnl = closedIndividual.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const indWins     = closedIndividual.filter(t => (t.pnl ?? 0) > 0).length;
+  const indLosses   = closedIndividual.filter(t => (t.pnl ?? 0) < 0).length;
+
   return (
     <div className="p-4 sm:p-6 space-y-5">
       <div className="flex items-center justify-between">
@@ -659,64 +691,164 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
         </div>
       )}
 
-      {/* ── Closed Trades (with period selector) ─────────────────── */}
+      {/* ── Closed Trades ─────────────────────────────────────────── */}
       <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-base font-bold text-white">Closed</h2>
-            {/* Period pill selector */}
-            <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
-              {PERIODS.map(p => (
-                <button key={p.key} onClick={() => setClosedPeriod(p.key)}
-                  className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${closedPeriod === p.key ? "bg-sky-600/30 text-sky-400" : "text-slate-500 hover:text-slate-300"}`}>
-                  {p.label}
-                </button>
-              ))}
-            </div>
+        {/* Header row: title + period pills + view toggle + total */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <h2 className="text-base font-bold text-white">Closed</h2>
+
+          {/* Period pills */}
+          <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
+            {PERIODS.map(p => (
+              <button key={p.key} onClick={() => setClosedPeriod(p.key)}
+                className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${closedPeriod === p.key ? "bg-sky-600/30 text-sky-400" : "text-slate-500 hover:text-slate-300"}`}>
+                {p.label}
+              </button>
+            ))}
           </div>
-          {(closedToday ?? []).length > 0 && (
-            <span className={`text-sm font-bold font-mono ${closedTotalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {closedTotalPnl >= 0 ? "+" : "-"}${Math.abs(closedTotalPnl).toFixed(4)}
-            </span>
-          )}
+
+          {/* View toggle */}
+          <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
+            <button onClick={() => setTradeView("individual")}
+              className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${tradeView === "individual" ? "bg-violet-600/30 text-violet-400" : "text-slate-500 hover:text-slate-300"}`}>
+              Each Trade
+            </button>
+            <button onClick={() => setTradeView("grouped")}
+              className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${tradeView === "grouped" ? "bg-violet-600/30 text-violet-400" : "text-slate-500 hover:text-slate-300"}`}>
+              By Asset
+            </button>
+          </div>
+
+          {/* Summary totals */}
+          <div className="ml-auto flex items-center gap-3">
+            {tradeView === "individual" && closedIndividual.length > 0 && (
+              <>
+                <span className="text-[10px] text-slate-500">
+                  <span className="text-emerald-500">{indWins}W</span>
+                  {" / "}
+                  <span className="text-red-500">{indLosses}L</span>
+                </span>
+                <span className={`text-sm font-bold font-mono ${indTotalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {indTotalPnl >= 0 ? "+" : "-"}${Math.abs(indTotalPnl).toFixed(4)}
+                </span>
+              </>
+            )}
+            {tradeView === "grouped" && (closedToday ?? []).length > 0 && (
+              <span className={`text-sm font-bold font-mono ${closedTotalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {closedTotalPnl >= 0 ? "+" : "-"}${Math.abs(closedTotalPnl).toFixed(4)}
+              </span>
+            )}
+          </div>
         </div>
-        {(closedToday ?? []).length === 0 ? (
-          <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
-            No closed trades for this period
-          </div>
-        ) : (
-          <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-700">
-                  {["Asset","Realized P&L","# Trades","Qty Sold","Last Exit","Type"].map(h => (
-                    <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-700/50">
-                {closedToday.map(c => {
-                  const isPos = c.pnl >= 0;
-                  return (
-                    <tr key={c.symbol} className={`border-l-2 ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
-                      <td className="px-3 py-2.5">
-                        <span className="font-bold text-white text-sm">{c.symbol.replace("/USD","")}</span>
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
-                          {isPos ? "+" : "-"}${Math.abs(c.pnl).toFixed(4)}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5 text-xs text-slate-400">{c.trade_count}</td>
-                      <td className="px-3 py-2.5 text-xs text-slate-400 font-mono">{c.qty_sold.toFixed(6)}</td>
-                      <td className="px-3 py-2.5 text-xs text-slate-500">{c.last_exit ? (closedPeriod === "today" ? fmtTime(c.last_exit) : fmtDateTime(c.last_exit)) : "—"}</td>
-                      <td className="px-3 py-2.5"><ReasonBadge reasons={c.reasons} /></td>
+
+        {/* ── Individual view ── */}
+        {tradeView === "individual" && (
+          closedIndividual.length === 0 ? (
+            <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
+              No closed trades for this period
+            </div>
+          ) : (
+            <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-slate-700">
+                      {["Asset","Realized P&L","Entry → Exit","Hold","Exit Reason","Detail","Time"].map(h => (
+                        <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                      ))}
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700/50">
+                    {closedIndividual.map(t => {
+                      const isPos   = (t.pnl ?? 0) >= 0;
+                      const isLong  = t.side === "buy" || t.side === "long";
+                      return (
+                        <tr key={t.trade_id} className={`border-l-2 ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
+                          <td className="px-3 py-2">
+                            <span className="font-bold text-white text-sm">{t.symbol.replace("/USD","")}</span>
+                            <span className={`ml-1.5 text-[10px] font-bold ${isLong ? "text-emerald-500" : "text-red-500"}`}>
+                              {isLong ? "↑LONG" : "↓SHORT"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                              {t.pnl != null ? ((isPos ? "+" : "-") + "$" + Math.abs(t.pnl).toFixed(4)) : "—"}
+                            </span>
+                            {t.pnl_pct != null && (
+                              <span className={`ml-1 text-[10px] ${isPos ? "text-emerald-500" : "text-red-500"}`}>
+                                ({t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(2)}%)
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-[11px] text-slate-400 font-mono whitespace-nowrap">
+                            {t.entry_price != null ? `$${t.entry_price}` : "—"}
+                            <span className="text-slate-600"> → </span>
+                            {t.exit_price != null ? `$${t.exit_price}` : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-slate-400">{fmtHoldMin(t.hold_min)}</td>
+                          <td className="px-3 py-2"><ReasonBadge reasons={t.close_reason ?? ""} /></td>
+                          <td className="px-3 py-2 text-[10px] text-slate-500 whitespace-nowrap">
+                            {t.exit_vs_target != null && (
+                              <span className={`mr-1.5 font-semibold ${t.exit_vs_target >= 100 ? "text-emerald-400" : t.exit_vs_target >= 50 ? "text-sky-400" : "text-red-400"}`}>
+                                {t.exit_vs_target}%obj
+                              </span>
+                            )}
+                            {t.score != null && <span className="mr-1.5">{Math.round(t.score)}/100</span>}
+                            {t.regime && <span className="opacity-50">{t.regime}</span>}
+                          </td>
+                          <td className="px-3 py-2 text-[10px] text-slate-600 whitespace-nowrap">
+                            {t.exit_at ? (closedPeriod === "today" ? fmtTime(t.exit_at) : fmtDateTime(t.exit_at)) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        )}
+
+        {/* ── Grouped view ── */}
+        {tradeView === "grouped" && (
+          (closedToday ?? []).length === 0 ? (
+            <div className="bg-slate-800/50 rounded-xl p-8 text-center text-slate-600 text-sm">
+              No closed trades for this period
+            </div>
+          ) : (
+            <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    {["Asset","Realized P&L","# Trades","Qty Sold","Last Exit","Type"].map(h => (
+                      <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700/50">
+                  {closedToday.map(c => {
+                    const isPos = c.pnl >= 0;
+                    return (
+                      <tr key={c.symbol} className={`border-l-2 ${isPos ? "border-emerald-600/70" : "border-red-600/70"}`}>
+                        <td className="px-3 py-2.5">
+                          <span className="font-bold text-white text-sm">{c.symbol.replace("/USD","")}</span>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+                            {isPos ? "+" : "-"}${Math.abs(c.pnl).toFixed(4)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-xs text-slate-400">{c.trade_count}</td>
+                        <td className="px-3 py-2.5 text-xs text-slate-400 font-mono">{c.qty_sold.toFixed(6)}</td>
+                        <td className="px-3 py-2.5 text-xs text-slate-500">{c.last_exit ? (closedPeriod === "today" ? fmtTime(c.last_exit) : fmtDateTime(c.last_exit)) : "—"}</td>
+                        <td className="px-3 py-2.5"><ReasonBadge reasons={c.reasons} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
         )}
       </div>
     </div>
