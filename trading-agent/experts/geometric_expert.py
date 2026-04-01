@@ -88,10 +88,25 @@ class GeometricExpert:
         if is_crypto and not is_crypto_good_hours():
             return
 
+        # Stocks: block entries within 10 minutes of 16:00 ET close
+        if not is_crypto:
+            import datetime as _dt
+            try:
+                import pytz as _pytz
+                _ET = _pytz.timezone("America/New_York")
+            except ImportError:
+                import zoneinfo as _zi
+                _ET = _zi.ZoneInfo("America/New_York")
+            _now_et = _dt.datetime.now(_ET)
+            if _now_et.hour == 15 and _now_et.minute >= 50:
+                logger.info(f"[GEO] {symbol} — within 10 min of close (15:{_now_et.minute} ET), skip")
+                return
+
         logger.info(f"[GEO] ✅ Session OK: {symbol}, evaluating...")
         logger.info(f"[GEO] 🔍 Evaluating {symbol} — crypto={is_crypto}")
 
         # Double-entry guard — block re-entry on already-open geometric position
+        # Layer 1: DB check
         def _ctx(t):
             raw = t.get("market_context") or {}
             if isinstance(raw, str):
@@ -107,8 +122,18 @@ class GeometricExpert:
             if _ctx(t).get("strategy_source") == "geometric"
         }
         if symbol in open_syms:
-            logger.debug(f"[GEO GUARD] {symbol} already open → skip")
+            logger.debug(f"[GEO GUARD] {symbol} already open (DB) → skip")
             return
+
+        # Layer 2: Live Alpaca positions check (catches cases where log_trade_open failed)
+        if not is_crypto:
+            try:
+                live_pos_syms = {p.symbol for p in (self.broker.get_positions() or [])}
+                if symbol in live_pos_syms:
+                    logger.info(f"[GEO GUARD] {symbol} already open (Alpaca live) → skip")
+                    return
+            except Exception as _pe:
+                logger.debug(f"[GEO GUARD] Alpaca position check error: {_pe}")
 
         # Get bars — 1-min for entry, 1-hour for structure
         bars_1m = self.broker.get_bars(symbol, "1Min", limit=50)
