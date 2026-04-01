@@ -252,7 +252,7 @@ class GapperExpert:
                     if self.memory:
                         pnl = (current_price - entry_price) * qty
                         self.memory.log_trade_close(match["trade_id"], current_price, "time_limit", pnl=pnl)
-                    return
+                    continue
 
                 # Partial profit at +10% → sell 50%, move stop to breakeven
                 if gain_pct >= target_pct and not partial_taken:
