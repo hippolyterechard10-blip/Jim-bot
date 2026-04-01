@@ -50,6 +50,7 @@ interface StatsResponse {
 }
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
+interface OpenDbTrade { symbol: string; strategy_source: string | null; deployed: number; qty: number; entry_price: number; }
 interface PositionLive {
   symbol: string; qty: number; entry_price: number;
   live_price: number; alpaca_mark: number; unrealized: number;
@@ -706,11 +707,12 @@ function AnalysisPage() {
 }
 
 // ── TRADES PAGE ───────────────────────────────────────────────────────────────
-function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday, closedPeriod, setClosedPeriod }: {
+function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday, closedPeriod, setClosedPeriod, experts = {} }: {
   positions: Position[]; decisions: Decision[];
   partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
   closedToday: ClosedTodayItem[];
   closedPeriod: ClosedPeriod; setClosedPeriod: (p: ClosedPeriod) => void;
+  experts?: ExpertsResponse;
 }) {
   const closedTotalPnl      = (closedToday ?? []).reduce((s, c) => s + c.pnl, 0);
   const unrealizedTotalPos  = positions.reduce((s, p) => s + p.unrealized_pl, 0);
@@ -727,6 +729,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
   const [tradeView,        setTradeView]        = useState<"grouped" | "individual">("individual");
   const [closedIndividual, setClosedIndividual] = useState<IndividualTrade[]>([]);
   const [expertFilter,     setExpertFilter]     = useState<ExpertFilter>("all");
+  const [openDbTrades,     setOpenDbTrades]     = useState<OpenDbTrade[]>([]);
 
   useEffect(() => {
     const load = async () => {
@@ -739,6 +742,28 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
     const id = setInterval(load, 15_000);
     return () => clearInterval(id);
   }, [closedPeriod]);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch(`${BASE}/api/trades/open`);
+        if (r.ok) setOpenDbTrades(await r.json() as OpenDbTrade[]);
+      } catch { /* silent */ }
+    };
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Split positions by expert source (matched via DB open trades)
+  const srcMap = Object.fromEntries(openDbTrades.map(t => [t.symbol, t.strategy_source]));
+  const gapPositions  = positions.filter(p => srcMap[p.symbol] === "gapper");
+  const geoPositions  = positions.filter(p => srcMap[p.symbol] === "geometric");
+  const otherPositions = positions.filter(p => srcMap[p.symbol] !== "gapper" && srcMap[p.symbol] !== "geometric");
+  const gapDeployed   = openDbTrades.filter(t => t.strategy_source === "gapper").reduce((s, t) => s + t.deployed, 0);
+  const geoDeployed   = openDbTrades.filter(t => t.strategy_source === "geometric").reduce((s, t) => s + t.deployed, 0);
+  const gapPool       = experts?.gapper?.capital_now   ?? 512.83;
+  const geoPool       = experts?.geometric?.capital_now ?? 512.83;
 
   const filteredIndividual = closedIndividual.filter(t => {
     if (expertFilter === "gap") return t.strategy_source === "gapper";
@@ -761,39 +786,84 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
           No open positions
         </div>
       ) : (
-        <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-700">
-                  {["Asset","Entry","Current","Unrealized","Secured","~Stop","Size",""].map(h => (
-                    <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-700/50">
-                {positions.map(p => (
-                  <PositionRow key={p.symbol} pos={p} decisions={decisions}
-                    partialProfits={partialProfits} stops={stops} totalPortfolio={totalPortfolio} />
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="border-t-2 border-slate-600 bg-slate-900/50">
-                  <td className="px-3 py-2 text-[10px] text-slate-500 uppercase font-semibold tracking-wider" colSpan={2}>Total</td>
-                  <td />
-                  <td className="px-3 py-2">
-                    <div className={`text-xs font-bold ${unrealizedTotalPos >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtPnl(unrealizedTotalPos)}</div>
-                  </td>
-                  <td className="px-3 py-2">
-                    {securedTotalPos > 0 && <span className="text-[10px] font-semibold text-emerald-400">✅ +${securedTotalPos.toFixed(2)}</span>}
-                  </td>
-                  <td />
-                  <td className="px-3 py-2 text-xs font-semibold text-slate-400">{allocatedTotalPct.toFixed(1)}%</td>
-                  <td />
-                </tr>
-              </tfoot>
-            </table>
-          </div>
+        <div className="space-y-4">
+          {([
+            { label: "🚀 Gap Expert",   key: "gap",   accent: "text-amber-400",  bar: "bg-amber-500",  posns: gapPositions,  deployed: gapDeployed,  pool: gapPool  },
+            { label: "📐 Geo Expert",   key: "geo",   accent: "text-violet-400", bar: "bg-violet-500", posns: geoPositions,  deployed: geoDeployed,  pool: geoPool  },
+            ...(otherPositions.length > 0 ? [{ label: "❓ Unclassified", key: "other", accent: "text-slate-400", bar: "bg-slate-500", posns: otherPositions, deployed: 0, pool: 0 }] : []),
+          ] as { label: string; key: string; accent: string; bar: string; posns: Position[]; deployed: number; pool: number }[]).map(({ label, key, accent, bar, posns, deployed, pool }) => (
+            <div key={key} className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
+              {/* Section header */}
+              <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+                <span className={`text-sm font-bold ${accent}`}>{label}</span>
+                <span className="text-xs text-slate-500">{posns.length} position{posns.length !== 1 ? "s" : ""}</span>
+              </div>
+
+              {posns.length === 0 ? (
+                <div className="px-4 py-5 text-center text-slate-600 text-xs">Flat — no open positions</div>
+              ) : (
+                <>
+                  {/* Allocation bar */}
+                  {pool > 0 && (
+                    <div className="px-4 pt-3 pb-2">
+                      <div className="flex items-center justify-between text-[10px] mb-1.5">
+                        <span className="text-slate-500 uppercase tracking-wider">Allocated</span>
+                        <span className={`font-semibold font-mono ${deployed / pool > 0.8 ? "text-amber-400" : "text-slate-300"}`}>
+                          ${deployed.toFixed(0)} / ${pool.toFixed(0)}
+                          <span className="ml-1.5 text-slate-500">({(deployed / pool * 100).toFixed(0)}%)</span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full transition-all duration-500 ${bar}`}
+                          style={{ width: `${Math.min(deployed / pool * 100, 100)}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  {/* Positions table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-slate-700">
+                          {["Asset","Entry","Current","Unrealized","Secured","~Stop","Size",""].map(h => (
+                            <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-700/50">
+                        {posns.map(p => (
+                          <PositionRow key={p.symbol} pos={p} decisions={decisions}
+                            partialProfits={partialProfits} stops={stops} totalPortfolio={totalPortfolio} />
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-slate-600 bg-slate-900/50">
+                          <td className="px-3 py-2 text-[10px] text-slate-500 uppercase font-semibold tracking-wider" colSpan={2}>Total</td>
+                          <td />
+                          <td className="px-3 py-2">
+                            <div className={`text-xs font-bold ${posns.reduce((s, p) => s + p.unrealized_pl, 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                              {fmtPnl(posns.reduce((s, p) => s + p.unrealized_pl, 0))}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2">
+                            {posns.some(p => (partialProfits[p.symbol]?.secured_pnl ?? 0) > 0) && (
+                              <span className="text-[10px] font-semibold text-emerald-400">
+                                ✅ +${posns.reduce((s, p) => s + (partialProfits[p.symbol]?.secured_pnl ?? 0), 0).toFixed(2)}
+                              </span>
+                            )}
+                          </td>
+                          <td />
+                          <td className="px-3 py-2 text-xs font-semibold text-slate-400">
+                            {(posns.reduce((s, p) => s + p.cost_basis, 0) / Math.max(totalPortfolio, INITIAL_CAPITAL) * 100).toFixed(1)}%
+                          </td>
+                          <td />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
@@ -1950,7 +2020,7 @@ export default function App() {
         {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} experts={experts} />}
         {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
         {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
-        {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} />}
+        {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} experts={experts} />}
         {activePage === "ANALYSIS" && <AnalysisPage />}
       </div>
     </div>

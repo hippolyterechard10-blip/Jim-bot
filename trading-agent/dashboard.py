@@ -88,7 +88,17 @@ def api_stats_periods():
 @app.route("/api/trades/open")
 def api_open_trades():
     if not _memory: return jsonify([])
-    return jsonify(_memory.get_open_trades())
+    trades = _memory.get_open_trades()
+    for t in trades:
+        raw = t.get("market_context") or {}
+        if isinstance(raw, str):
+            try: raw = json.loads(raw)
+            except: raw = {}
+        t["strategy_source"] = raw.get("strategy_source")
+        t["deployed"] = round(
+            float(t.get("entry_price") or 0) * float(t.get("qty") or 0), 2
+        )
+    return jsonify(trades)
 
 @app.route("/api/trades/recent")
 def api_recent_trades():
