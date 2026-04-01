@@ -302,30 +302,36 @@ class Mastermind:
         except Exception as e:
             logger.error(f"[MASTERMIND] position management error: {e}")
 
-        # Track gapper outcomes for day trader rules
+        # Track gapper outcomes for day trader rules (consecutive losses, daily count)
         try:
-            if self.memory:
-                import json
-                today_closes = [t for t in self.memory.get_recent_trades(limit=10)
-                               if t.get("status") == "closed"
-                               and t.get("close_reason") in ("time_limit", "trailing_stop", "hard_stop_loss")]
-                for t in today_closes:
-                    ctx = t.get("market_context") or {}
-                    if isinstance(ctx, str):
-                        try: ctx = json.loads(ctx)
-                        except: ctx = {}
-                    if ctx.get("strategy_source") == "gapper" and not ctx.get("outcome_recorded"):
-                        won = (t.get("pnl") or 0) > 0
-                        self.record_gapper_outcome(won)
-                        # Mark as recorded to avoid double counting — update SQLite
-                        import sqlite3
-                        if hasattr(self.memory, 'db_path'):
-                            conn = sqlite3.connect(self.memory.db_path, timeout=5)
-                            new_ctx = {**ctx, "outcome_recorded": True}
-                            conn.execute("UPDATE trades SET market_context=? WHERE trade_id=?",
-                                        (json.dumps(new_ctx), t["trade_id"]))
-                            conn.commit()
-                            conn.close()
+            if self.memory and hasattr(self.memory, 'db_path'):
+                import json, sqlite3
+                conn = sqlite3.connect(self.memory.db_path, timeout=5)
+                conn.row_factory = sqlite3.Row
+                # Query recently closed gapper trades that haven't been recorded yet
+                # Uses exit_at DESC so freshly closed trades always appear regardless of limit
+                rows = conn.execute("""
+                    SELECT trade_id, pnl, market_context
+                    FROM trades
+                    WHERE status = 'closed'
+                      AND close_reason IN ('time_limit', 'trailing_stop', 'hard_stop_loss')
+                      AND json_extract(market_context, '$.strategy_source') = 'gapper'
+                      AND (json_extract(market_context, '$.outcome_recorded') IS NULL
+                           OR json_extract(market_context, '$.outcome_recorded') = 0)
+                    ORDER BY exit_at DESC
+                    LIMIT 20
+                """).fetchall()
+                for row in rows:
+                    ctx = {}
+                    try: ctx = json.loads(row["market_context"] or "{}")
+                    except: pass
+                    won = (row["pnl"] or 0) > 0
+                    self.record_gapper_outcome(won)
+                    new_ctx = {**ctx, "outcome_recorded": True}
+                    conn.execute("UPDATE trades SET market_context=? WHERE trade_id=?",
+                                 (json.dumps(new_ctx), row["trade_id"]))
+                conn.commit()
+                conn.close()
         except Exception as e:
             logger.error(f"[MASTERMIND] outcome tracking error: {e}")
 
