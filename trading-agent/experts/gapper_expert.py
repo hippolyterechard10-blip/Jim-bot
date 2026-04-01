@@ -42,7 +42,28 @@ class GapperExpert:
             return config.STRATEGY_CAPITAL["gapper"]
 
     def get_available_capital(self) -> float:
-        return max(0.0, config.STRATEGY_CAPITAL["gapper"] - self.get_deployed_capital())
+        try:
+            import sqlite3
+            base = config.STRATEGY_CAPITAL["gapper"]
+            if not self.memory or not hasattr(self.memory, 'db_path'):
+                return max(0.0, base - self.get_deployed_capital())
+            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+            row = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0.0) FROM trades
+                WHERE status = 'closed'
+                  AND json_extract(market_context, '$.strategy_source') = 'gapper'
+                  AND close_reason != 'synced_close'
+                  AND (json_extract(market_context, '$.source') IS NULL
+                       OR json_extract(market_context, '$.source') NOT IN
+                          ('order_sync', 'order_sync_synthetic'))
+            """).fetchone()
+            conn.close()
+            closed_pnl = float(row[0]) if row and row[0] is not None else 0.0
+            pool = base + closed_pnl
+            return max(0.0, pool - self.get_deployed_capital())
+        except Exception as e:
+            logger.error(f"GapperExpert.get_available_capital: {e}")
+            return max(0.0, config.STRATEGY_CAPITAL["gapper"] - self.get_deployed_capital())
 
     def has_capital(self) -> bool:
         return self.get_available_capital() >= 50.0
