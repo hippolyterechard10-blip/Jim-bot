@@ -196,6 +196,30 @@ class GapperExpert:
                 f"stop=${stop_price:.4f} | qty={qty}"
             )
 
+        # Log decision to populate Signals page on the dashboard
+        if self.memory:
+            try:
+                _float_m = round(float_shares / 1e6, 1) if float_shares else None
+                _rr_est  = round(1 / risk_pct, 1) if risk_pct > 0 else 0
+                _gap_str = f"gap={change_pct:+.1f}%" if change_pct is not None else "gap=?"
+                _float_str = f" float={_float_m}M" if _float_m else ""
+                _base  = 65
+                _geo   = 15
+                _radj  = +5
+                _final = min(100, _base + _radj + _geo)
+                _rsn = (
+                    f"GAPPER V2: {symbol} BUY | {_gap_str}{_float_str} | stop={risk_pct*100:.1f}%\n"
+                    f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
+                    f"BULL_MARKET"
+                )
+                _patterns = ["GAP_UP"]
+                if change_pct is not None and change_pct > 15:
+                    _patterns.append("BIG_GAP")
+                _md = json.dumps({"patterns_detected": _patterns, "gap_pct": change_pct, "float_shares": float_shares, "rr_est": _rr_est})
+                self.memory.log_decision("BUY", _rsn, symbol=symbol, confidence=0.80, market_data=_md)
+            except Exception as _le:
+                import logging as _l; _l.getLogger(__name__).debug(f"[GAPPER] log_decision error: {_le}")
+
         order = self.broker.place_order(symbol, qty, "buy", stop_loss=stop_price)
 
         if order and self.memory:

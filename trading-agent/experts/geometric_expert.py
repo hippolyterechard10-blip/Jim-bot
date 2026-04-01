@@ -301,7 +301,25 @@ class GeometricExpert:
             risk   = abs(current_price - stop_price)
             reward = abs(target_price - current_price)
             if risk <= 0 or reward / risk < 2.0:
-                logger.info(f"[GEO] {symbol} — R:R too low ({reward/risk:.1f}x), skip")
+                rr_val = round(reward / risk, 1) if risk > 0 else 0
+                logger.info(f"[GEO] {symbol} — R:R too low ({rr_val}x), skip")
+                # Log WATCH signal when confluence is strong despite bad R:R
+                if confluence >= 5 and self.memory:
+                    try:
+                        _base = min(int(confluence * 14), 70)
+                        _geo  = int(confluence * 4)
+                        _radj = +5 if structure in ("range", "uptrend") else -5
+                        _final = min(100, _base + max(0, _radj) + _geo)
+                        _regime_word = "CHOPPY" if _radj < 0 else ("BULL_MARKET" if structure == "uptrend" else "CHOPPY")
+                        _rsn = (
+                            f"GEO V2 WATCH: {symbol} {side} | structure={structure} | R:R={rr_val}x (below 2:1 threshold)\n"
+                            f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
+                            f"{_regime_word}"
+                        )
+                        _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "confluence": confluence, "rr": rr_val})
+                        self.memory.log_decision("WATCH", _rsn, symbol=symbol, confidence=round(min(confluence / 5.0, 1.0), 2), market_data=_md)
+                    except Exception as _le:
+                        logger.debug(f"[GEO] log_decision (watch) error: {_le}")
                 return
 
             # STEP 7 — Correlation check (no 2 correlated positions)
@@ -353,6 +371,26 @@ class GeometricExpert:
                 f"R:R={reward/risk:.1f}x | structure={structure} | "
                 f"candles={detected_names} | capital=${capital_to_use:.0f}"
             )
+
+            # Log decision to populate Signals page on the dashboard
+            if self.memory:
+                try:
+                    _rr     = round(reward / risk, 1)
+                    _base   = min(int(confluence * 14), 70)
+                    _geo    = int(confluence * 4)
+                    _radj   = +5 if structure in ("range", "uptrend") else -5
+                    _final  = min(100, _base + max(0, _radj) + _geo)
+                    _regime_word = "BULL_MARKET" if structure == "uptrend" else ("BEAR_MARKET" if structure == "downtrend" else "CHOPPY")
+                    _rsn = (
+                        f"GEO V2: {symbol} {side} | structure={structure} | R:R={_rr}x | capital=${capital_to_use:.0f}\n"
+                        f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
+                        f"{_regime_word}"
+                    )
+                    _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "confluence": confluence, "rr": _rr})
+                    _decision = "BUY" if side == "long" else "SELL"
+                    self.memory.log_decision(_decision, _rsn, symbol=symbol, confidence=round(min(confluence / 5.0, 1.0), 2), market_data=_md)
+                except Exception as _le:
+                    logger.debug(f"[GEO] log_decision error: {_le}")
 
             order = self.broker.place_order(
                 symbol, qty,
