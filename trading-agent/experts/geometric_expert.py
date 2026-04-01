@@ -257,11 +257,19 @@ class GeometricExpert:
 
             # STEP 6 — ATR-based stop
             atr = self.geometry.calculate_atr(highs_1m, lows_1m, closes_1m, period=14)
+            is_crypto = "/" in symbol
+            # Minimum stop distance: 0.1% for crypto, max($0.10, 0.03% of price) for stocks
+            if is_crypto:
+                min_dist = current_price * 0.001
+            else:
+                min_dist = max(0.10, current_price * 0.0003)
             if side == "long":
                 stop_price   = round(level - atr, 6)
+                stop_price   = min(stop_price, current_price - min_dist)
                 target_price = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, 6)
             else:
                 stop_price   = round(level + atr, 6)
+                stop_price   = max(stop_price, current_price + min_dist)
                 target_price = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, 6)
 
             # R:R check — minimum 1:2
@@ -341,12 +349,12 @@ class GeometricExpert:
                     market_context={
                         "strategy_source": "geometric",
                         "side": side,
-                        "level": level,
-                        "confluence": confluence,
+                        "level": float(level),
+                        "confluence": int(confluence),
                         "structure": structure,
-                        "atr": atr,
-                        "target_midpoint": target_price,
-                        "rsi_divergence": rsi_divergence,
+                        "atr": float(atr),
+                        "target_midpoint": float(target_price),
+                        "rsi_divergence": bool(rsi_divergence),
                         "patterns": list(detected_names),
                     }
                 )

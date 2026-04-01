@@ -282,9 +282,11 @@ class Mastermind:
             if routed > 0:
                 logger.info(f"[MASTERMIND] 📐 {routed} geometric candidates queued")
 
-            # Execute top candidates
+            # Execute all candidates (was [:5] — crypto at positions 16-24 was never reached)
             if self.geometric.has_capital():
-                for symbol in self.geometric.flush_candidates()[:5]:
+                candidates = self.geometric.flush_candidates()
+                logger.info(f"[MASTERMIND] 📐 Evaluating {len(candidates)} geo candidates this cycle")
+                for symbol in candidates:
                     self.geometric.evaluate(symbol, size_modifier=self._size_modifier)
             else:
                 self.geometric.flush_candidates()  # Clear queue
