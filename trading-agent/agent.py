@@ -754,6 +754,8 @@ class TradingAgent:
 
                 # ── 4: Score threshold → synthesis gate → Claude ─────────────
                 if score > 60 or score < 30:
+                    if getattr(config, 'TRADING_ENGINE', 'V1') == 'V2':
+                        continue  # V2 mode: Mastermind handles all trade entries
                     _side = "long" if score > 60 else "short"
 
                     # Run full synthesis before calling Claude — same gate as slow loop
@@ -1273,6 +1275,7 @@ class TradingAgent:
             # V2 mode: position sync and reconciliation only — trading delegated to Mastermind experts
             self._sync_orphan_positions()
             self._reconcile_stale_positions()
+            self._sync_todays_orders()
             logger.info("[SLOW] V2 mode — trade logic skipped, Mastermind handles entries")
             return
 
