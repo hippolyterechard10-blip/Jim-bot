@@ -437,11 +437,14 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 }
 
 function AnalysisPage() {
-  const [expert,  setExpert]  = useState<ExpertFilter>("all");
-  const [data,    setData]    = useState<AnalysisData | null>(null);
-  const [periods, setPeriods] = useState<PeriodBreakdown | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [expert,       setExpert]       = useState<ExpertFilter>("all");
+  const [data,         setData]         = useState<AnalysisData | null>(null);
+  const [periods,      setPeriods]      = useState<PeriodBreakdown | null>(null);
+  const [loading,      setLoading]      = useState(true);
+  const [gapBreakdown, setGapBreakdown] = useState<AnalysisData | null>(null);
+  const [geoBreakdown, setGeoBreakdown] = useState<AnalysisData | null>(null);
 
+  // Filtered data — re-fetches when expert tab changes
   useEffect(() => {
     setLoading(true);
     Promise.all([
@@ -456,16 +459,133 @@ function AnalysisPage() {
       .finally(() => setLoading(false));
   }, [expert]);
 
+  // Per-expert breakdown — fetched once, always shown regardless of filter
+  useEffect(() => {
+    Promise.all([
+      fetch(`${BASE}/api/analysis?expert=gap`).then(r => r.json()),
+      fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json()),
+    ]).then(([g, geo]) => {
+      setGapBreakdown((g as AnalysisData).total_trades > 0 ? g as AnalysisData : null);
+      setGeoBreakdown((geo as AnalysisData).total_trades > 0 ? geo as AnalysisData : null);
+    }).catch(() => {});
+  }, []);
+
   const accentLabel = expert === "gap"
     ? <span className="text-amber-400 font-semibold">🚀 Gap — Stocks</span>
     : expert === "geo"
     ? <span className="text-violet-400 font-semibold">📐 Geo — Crypto</span>
     : <span className="text-slate-400">Tous les experts</span>;
 
+  // ── Hold duration formatter ────────────────────────────────────────────────
+  const fmtHold = (min: number) =>
+    min >= 60 ? `${(min / 60).toFixed(1)}h` : `${min.toFixed(0)}m`;
+
+  // ── Expert Breakdown card — always visible ─────────────────────────────────
+  const ExpertBreakdownSection = () => {
+    const hasAny = gapBreakdown || geoBreakdown;
+    if (!hasAny) return null;
+
+    const ExpertCol = ({
+      label, accent, d,
+    }: { label: string; accent: string; d: AnalysisData | null }) => {
+      if (!d) return (
+        <div className="flex-1 min-w-0 p-4 border border-slate-700/50 rounded-xl bg-slate-800/60">
+          <div className={`text-xs font-bold uppercase tracking-widest mb-3`} style={{ color: accent }}>{label}</div>
+          <div className="text-slate-600 text-xs text-center py-6">Aucun trade</div>
+        </div>
+      );
+
+      const topReasons = [...d.by_reason]
+        .filter(r => r.reason !== "partial_profit_remainder")
+        .sort((a, b) => b.trades - a.trades)
+        .slice(0, 3);
+
+      const avgPnl = d.total_trades > 0 ? d.total_pnl / d.total_trades : 0;
+
+      return (
+        <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3"
+          style={{ borderColor: `${accent}33` }}>
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-widest" style={{ color: accent }}>{label}</span>
+            <span className="text-[10px] text-slate-500">{d.total_trades} trades</span>
+          </div>
+          {/* 4 key metrics */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-slate-900/60 rounded-lg p-2.5">
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Win Rate</div>
+              <div className={`text-lg font-bold font-mono ${d.win_rate >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+                {d.win_rate.toFixed(1)}%
+              </div>
+              <div className="text-[9px] text-slate-600">{d.winning_trades}W / {d.losing_trades}L</div>
+            </div>
+            <div className="bg-slate-900/60 rounded-lg p-2.5">
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg P&amp;L</div>
+              <div className={`text-lg font-bold font-mono ${avgPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(4)}
+              </div>
+              <div className="text-[9px] text-slate-600">par trade</div>
+            </div>
+            <div className="bg-slate-900/60 rounded-lg p-2.5">
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Hold</div>
+              <div className="text-lg font-bold font-mono text-sky-400">{fmtHold(d.avg_hold_min)}</div>
+              <div className="text-[9px] text-slate-600">durée moyenne</div>
+            </div>
+            <div className="bg-slate-900/60 rounded-lg p-2.5">
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Profit Factor</div>
+              <div className={`text-lg font-bold font-mono ${d.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"}`}>
+                {d.profit_factor === 999 ? "∞" : d.profit_factor.toFixed(2)}
+              </div>
+              <div className="text-[9px] text-slate-600">brut W/L</div>
+            </div>
+          </div>
+          {/* Top exit reasons */}
+          {topReasons.length > 0 && (
+            <div>
+              <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Top sorties</div>
+              <div className="space-y-1">
+                {topReasons.map(r => {
+                  const pct = Math.round(r.trades / d.total_trades * 100);
+                  const isPos = r.pnl >= 0;
+                  return (
+                    <div key={r.reason} className="flex items-center gap-2">
+                      <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${isPos ? "bg-emerald-500/60" : "bg-red-500/60"}`}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="text-[9px] text-slate-400 w-32 truncate shrink-0">
+                        {(r.reason || "—").replace(/_/g, " ")}
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-500 w-8 text-right shrink-0">{pct}%</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <div className="bg-slate-800/30 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50">
+          <span className="text-sm font-bold text-white">Expert Breakdown</span>
+          <span className="text-[10px] text-slate-500 ml-2">Gap vs Geo — statistiques séparées</span>
+        </div>
+        <div className="p-4 flex flex-col sm:flex-row gap-3">
+          <ExpertCol label="🚀 Gap Expert — Stocks" accent="#f59e0b" d={gapBreakdown} />
+          <ExpertCol label="📐 Geo Expert — Crypto" accent="#a78bfa" d={geoBreakdown} />
+        </div>
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="p-4 sm:p-6 space-y-4">
         <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <ExpertBreakdownSection />
         <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">Chargement…</div>
       </div>
     );
@@ -475,6 +595,7 @@ function AnalysisPage() {
     return (
       <div className="p-4 sm:p-6 space-y-4">
         <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <ExpertBreakdownSection />
         <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">
           Aucun trade fermé pour {expert === "all" ? "ce portefeuille" : expert === "gap" ? "l'expert Gap" : "l'expert Geo"} — l'analyse apparaîtra après le premier trade.
         </div>
@@ -500,6 +621,7 @@ function AnalysisPage() {
         <ExpertPills value={expert} onChange={setExpert} />
         {accentLabel}
       </div>
+      <ExpertBreakdownSection />
 
       {/* ── KPI Row 1 ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
