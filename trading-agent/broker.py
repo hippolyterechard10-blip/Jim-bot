@@ -128,6 +128,7 @@ class AlpacaBroker:
     # ── Orders / positions ────────────────────────────────────────────────────
 
     def place_order(self, symbol, qty, side, stop_loss=None, take_profit=None):
+        """Plain market entry — stops are placed separately after fill."""
         try:
             is_crypto = "/" in symbol
             if not is_crypto:
@@ -139,12 +140,8 @@ class AlpacaBroker:
                 type="market",
                 time_in_force="gtc" if is_crypto else "day"
             )
-            if stop_loss and take_profit and "/" not in symbol:
-                order_params["order_class"] = "bracket"
-                order_params["stop_loss"]   = {"stop_price": round(stop_loss, 2)}
-                order_params["take_profit"] = {"limit_price": round(take_profit, 2)}
             order = self.api.submit_order(**order_params)
-            logger.info(f"✅ Order: {side} {qty} {symbol} | stop={stop_loss} target={take_profit}")
+            logger.info(f"✅ Order: {side} {qty} {symbol}")
             return order
         except Exception as e:
             logger.error(f"place_order error: {e}")

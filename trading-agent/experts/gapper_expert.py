@@ -26,6 +26,16 @@ class GapperExpert:
         self._candidates.clear()
         return c
 
+    def _cancel_stop_order(self, stop_order_id: str | None, symbol: str = ""):
+        """Cancel an Alpaca stop order before placing a closing order."""
+        if not stop_order_id:
+            return
+        try:
+            self.broker.api.cancel_order(stop_order_id)
+            logger.info(f"[GAPPER] 🛑 Cancelled stop order {stop_order_id} for {symbol}")
+        except Exception as _ce:
+            logger.debug(f"[GAPPER] cancel_order {stop_order_id} for {symbol}: {_ce}")
+
     def get_deployed_capital(self) -> float:
         try:
             total = 0.0
@@ -220,9 +230,21 @@ class GapperExpert:
             except Exception as _le:
                 import logging as _l; _l.getLogger(__name__).debug(f"[GAPPER] log_decision error: {_le}")
 
-        order = self.broker.place_order(symbol, qty, "buy", stop_loss=stop_price)
+        order = self.broker.place_order(symbol, qty, "buy")
 
         if order and self.memory:
+            # Place a real Alpaca stop order immediately after entry
+            stop_order_id = None
+            try:
+                _stop_ord = self.broker.api.submit_order(
+                    symbol=symbol, qty=qty, side="sell",
+                    type="stop", stop_price=round(stop_price, 2), time_in_force="day",
+                )
+                stop_order_id = getattr(_stop_ord, "id", None)
+                logger.info(f"[GAPPER] 🛑 Stop order placed: {symbol} stop=${stop_price:.4f} id={stop_order_id}")
+            except Exception as _se:
+                logger.error(f"[GAPPER] stop order error for {symbol}: {_se}")
+
             trade_id = str(uuid.uuid4())
             self.memory.log_trade_open(
                 trade_id=trade_id,
@@ -240,6 +262,7 @@ class GapperExpert:
                     "float_shares": float_shares,
                     "target_partial": round(current_price * 1.10, 4),
                     "target_pct": 10.0,
+                    "alpaca_stop_order_id": stop_order_id,
                 }
             )
 
@@ -299,25 +322,28 @@ class GapperExpert:
                 symbol = pos.symbol
                 target_pct = ctx_data.get("target_pct", 10.0)
                 partial_taken = ctx_data.get("partial_taken", False)
+                stop_order_id = ctx_data.get("alpaca_stop_order_id")
 
                 # Check time limit (10:45 ET) — force exit
                 ET = pytz.timezone("America/New_York")
                 now_et = datetime.now(ET)
                 if now_et.weekday() < 5 and now_et.time() >= dtime(10, 45):
                     logger.info(f"[GAPPER] ⏰ Time limit 10:45 ET — closing {symbol}")
+                    self._cancel_stop_order(stop_order_id, symbol)
                     self.broker.close_position(symbol)
                     if self.memory:
                         pnl = (current_price - entry_price) * qty
                         self.memory.log_trade_close(match["trade_id"], current_price, "time_limit", pnl=pnl)
                     continue
 
-                # Partial profit at +10% → sell 50%, move stop to breakeven
+                # Partial profit at +10% → sell 50%, cancel stop, re-place at breakeven
                 if gain_pct >= target_pct and not partial_taken:
                     sell_qty = max(1, int(qty * 0.50))
                     logger.info(
                         f"[GAPPER] 💰 PARTIAL PROFIT: {symbol} +{gain_pct:.1f}% "
                         f"→ selling 50%, stop→breakeven"
                     )
+                    self._cancel_stop_order(stop_order_id, symbol)
                     self.broker.place_order(symbol, sell_qty, "sell")
                     if self.memory:
                         ctx_data["partial_taken"] = True
@@ -328,6 +354,18 @@ class GapperExpert:
                         )
                         remaining_qty = qty - sell_qty
                         if remaining_qty > 0:
+                            # Re-place stop at breakeven for remaining position
+                            new_stop_id = None
+                            try:
+                                _be_stop = round(entry_price, 2)
+                                _be_ord = self.broker.api.submit_order(
+                                    symbol=symbol, qty=remaining_qty, side="sell",
+                                    type="stop", stop_price=_be_stop, time_in_force="day",
+                                )
+                                new_stop_id = getattr(_be_ord, "id", None)
+                                logger.info(f"[GAPPER] 🛑 Breakeven stop placed for remaining {remaining_qty} {symbol} @ ${_be_stop} id={new_stop_id}")
+                            except Exception as _rse:
+                                logger.error(f"[GAPPER] replace stop after partial error: {_rse}")
                             self.memory.log_trade_open(
                                 trade_id=str(__import__("uuid").uuid4()),
                                 symbol=symbol,
@@ -335,7 +373,7 @@ class GapperExpert:
                                 qty=remaining_qty,
                                 entry_price=entry_price,
                                 stop_loss=entry_price,  # breakeven
-                                market_context={**ctx_data, "partial_taken": True}
+                                market_context={**ctx_data, "partial_taken": True, "alpaca_stop_order_id": new_stop_id}
                             )
                     continue
 
@@ -352,6 +390,7 @@ class GapperExpert:
                             f"[GAPPER] 🔴 TRAILING STOP: {symbol} "
                             f"${current_price:.4f} <= ${trailing_stop:.4f}"
                         )
+                        self._cancel_stop_order(stop_order_id, symbol)
                         self.broker.close_position(symbol)
                         if self.memory:
                             pnl = (current_price - entry_price) * qty

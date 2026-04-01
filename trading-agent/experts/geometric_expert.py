@@ -28,6 +28,16 @@ class GeometricExpert:
         self._candidates.clear()
         return c
 
+    def _cancel_stop_order(self, stop_order_id: str | None, symbol: str = ""):
+        """Cancel an Alpaca stop order before placing a closing order."""
+        if not stop_order_id:
+            return
+        try:
+            self.broker.api.cancel_order(stop_order_id)
+            logger.info(f"[GEO] 🛑 Cancelled stop order {stop_order_id} for {symbol}")
+        except Exception as _ce:
+            logger.debug(f"[GEO] cancel_order {stop_order_id} for {symbol}: {_ce}")
+
     def get_deployed_capital(self) -> float:
         try:
             total = 0.0
@@ -280,21 +290,17 @@ class GeometricExpert:
                 logger.info(f"[GEO] {symbol} — no bearish candle, skip")
                 return
 
-            # STEP 6 — ATR-based stop
+            # STEP 6 — Level-based stop (the level holds or it doesn't — geometric principle)
+            # ATR on 1-min bars produces 5%+ wide stops; instead anchor to the level itself.
             atr = self.geometry.calculate_atr(highs_1m, lows_1m, closes_1m, period=14)
             is_crypto = "/" in symbol
-            # Minimum stop distance: 0.1% for crypto, max($0.10, 0.03% of price) for stocks
-            if is_crypto:
-                min_dist = current_price * 0.001
-            else:
-                min_dist = max(0.10, current_price * 0.0003)
             if side == "long":
-                stop_price   = round(level - atr, 6)
-                stop_price   = min(stop_price, current_price - min_dist)
+                # 0.5% below level for crypto, 0.3% below for stocks
+                stop_price   = round(level * 0.995, 4) if is_crypto else round(level * 0.997, 4)
                 target_price = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, 6)
             else:
-                stop_price   = round(level + atr, 6)
-                stop_price   = max(stop_price, current_price + min_dist)
+                # 0.5% above level for crypto, 0.3% above for stocks
+                stop_price   = round(level * 1.005, 4) if is_crypto else round(level * 1.003, 4)
                 target_price = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, 6)
 
             # R:R check — minimum 1:2
@@ -395,11 +401,24 @@ class GeometricExpert:
             order = self.broker.place_order(
                 symbol, qty,
                 "buy" if side == "long" else "sell",
-                stop_loss=stop_price,
-                take_profit=target_price,
             )
 
             if order and self.memory:
+                # Place a real Alpaca stop order immediately after entry
+                stop_order_id = None
+                try:
+                    _stop_side = "sell" if side == "long" else "buy"
+                    _sp = round(stop_price, 4) if is_crypto else round(stop_price, 2)
+                    _tif = "gtc" if is_crypto else "day"
+                    _stop_ord = self.broker.api.submit_order(
+                        symbol=symbol, qty=qty, side=_stop_side,
+                        type="stop", stop_price=_sp, time_in_force=_tif,
+                    )
+                    stop_order_id = getattr(_stop_ord, "id", None)
+                    logger.info(f"[GEO] 🛑 Stop order placed: {symbol} stop=${_sp} id={stop_order_id}")
+                except Exception as _se:
+                    logger.error(f"[GEO] stop order error for {symbol}: {_se}")
+
                 self.memory.log_trade_open(
                     trade_id=str(uuid.uuid4()),
                     symbol=symbol,
@@ -419,6 +438,7 @@ class GeometricExpert:
                         "target_midpoint": float(target_price),
                         "rsi_divergence": bool(rsi_divergence),
                         "patterns": list(detected_names),
+                        "alpaca_stop_order_id": stop_order_id,
                     }
                 )
 
@@ -462,12 +482,16 @@ class GeometricExpert:
                 else:
                     gain_pct = (entry_price - current_price) / entry_price * 100
 
-                # Partial at midpoint target → sell 50%
+                stop_order_id = ctx_data.get("alpaca_stop_order_id")
+                _is_crypto = "/" in symbol
+
+                # Partial at midpoint target → sell 50%, cancel old stop, re-place at breakeven
                 if target_mid and not partial_taken:
                     if (side == "long" and current_price >= target_mid) or \
                        (side == "short" and current_price <= target_mid):
-                        sell_qty = max(1, int(abs(qty) * 0.50)) if "/" not in symbol else round(abs(qty) * 0.50, 6)
+                        sell_qty = max(1, int(abs(qty) * 0.50)) if not _is_crypto else round(abs(qty) * 0.50, 6)
                         logger.info(f"[GEO] 💰 PARTIAL: {symbol} reached midpoint target ${target_mid:.4f}")
+                        self._cancel_stop_order(stop_order_id, symbol)
                         self.broker.place_order(symbol, sell_qty, "sell" if side == "long" else "buy")
                         if self.memory:
                             pnl = (current_price - entry_price) * sell_qty * (1 if side == "long" else -1)
@@ -475,11 +499,25 @@ class GeometricExpert:
                             remaining = abs(qty) - sell_qty
                             if remaining > 0:
                                 import uuid
+                                # Re-place stop at breakeven for the remaining position
+                                new_stop_id = None
+                                try:
+                                    _be = round(entry_price * (0.995 if _is_crypto else 0.997), 4 if _is_crypto else 2)
+                                    _tif = "gtc" if _is_crypto else "day"
+                                    _stop_side = "sell" if side == "long" else "buy"
+                                    _ord = self.broker.api.submit_order(
+                                        symbol=symbol, qty=remaining, side=_stop_side,
+                                        type="stop", stop_price=_be, time_in_force=_tif,
+                                    )
+                                    new_stop_id = getattr(_ord, "id", None)
+                                    logger.info(f"[GEO] 🛑 Breakeven stop placed for remaining {remaining} {symbol} @ ${_be} id={new_stop_id}")
+                                except Exception as _rse:
+                                    logger.error(f"[GEO] replace stop after partial error: {_rse}")
                                 self.memory.log_trade_open(
                                     trade_id=str(uuid.uuid4()),
                                     symbol=symbol, side=match.get("side"),
                                     qty=remaining, entry_price=entry_price,
-                                    market_context={**ctx_data, "partial_taken": True}
+                                    market_context={**ctx_data, "partial_taken": True, "alpaca_stop_order_id": new_stop_id}
                                 )
 
                 # Trailing stop -1% from best price (after partial)
@@ -491,6 +529,7 @@ class GeometricExpert:
                         trail_stop = self._high_water[symbol] * 0.99
                         if current_price <= trail_stop:
                             logger.info(f"[GEO] 🔴 TRAIL STOP (long): {symbol} ${current_price:.4f}")
+                            self._cancel_stop_order(stop_order_id, symbol)
                             self.broker.close_position(symbol)
                             if self.memory:
                                 pnl = (current_price - entry_price) * qty
@@ -502,6 +541,7 @@ class GeometricExpert:
                         trail_stop = self._low_water[symbol] * 1.01
                         if current_price >= trail_stop:
                             logger.info(f"[GEO] 🔴 TRAIL STOP (short): {symbol} ${current_price:.4f}")
+                            self._cancel_stop_order(stop_order_id, symbol)
                             self.broker.close_position(symbol)
                             if self.memory:
                                 pnl = (entry_price - current_price) * abs(qty)
