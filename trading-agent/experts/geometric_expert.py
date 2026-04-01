@@ -89,7 +89,7 @@ class GeometricExpert:
             return
 
         logger.info(f"[GEO] ✅ Session OK: {symbol}, evaluating...")
-        logger.info(f"[GEO] 🔍 Evaluating {symbol}")
+        logger.info(f"[GEO] 🔍 Evaluating {symbol} — crypto={is_crypto}")
 
         # Double-entry guard — block re-entry on already-open geometric position
         def _ctx(t):
@@ -136,6 +136,7 @@ class GeometricExpert:
             dist_to_resistance = (nearest_resistance - current_price) / current_price
 
             logger.info(f"[GEO] SR levels: support={sr.get('nearest_support', 0):.2f} resistance={sr.get('nearest_resistance', 0):.2f} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f}")
+            logger.info(f"[GEO] {symbol} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f} (threshold 0.015)")
 
             if dist_to_support <= 0.015:
                 side        = "long"
