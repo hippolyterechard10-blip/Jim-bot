@@ -149,6 +149,7 @@ class GeometricExpert:
 
     def evaluate(self, symbol: str = None, regime: str = "unknown"):
         symbol = symbol or config.GEO_SYMBOL
+        logger.info(f"[GEO] evaluating {symbol} | régime={regime}")
 
         # Gate régime
         _r = (regime or "unknown").lower()
