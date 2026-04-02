@@ -728,7 +728,7 @@ function AnalysisPage() {
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>
+        <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH+SOL Pool</span>
         <span className="text-[11px] text-slate-500">· filtered from April 2, 2026</span>
       </div>
 
@@ -1002,7 +1002,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
       ) : (
         <div className="space-y-4">
           {([
-            { label: "📐 Geo V4 — ETH/USD", key: "geo",   accent: "text-violet-400", bar: "bg-violet-500", posns: geoPositions,  deployed: geoDeployed,  pool: geoPool  },
+            { label: "📐 Geo V4 — ETH+SOL", key: "geo",   accent: "text-violet-400", bar: "bg-violet-500", posns: geoPositions,  deployed: geoDeployed,  pool: geoPool  },
             ...(otherPositions.length > 0 ? [{ label: "❓ Unclassified", key: "other", accent: "text-slate-400", bar: "bg-slate-500", posns: otherPositions, deployed: 0, pool: 0 }] : []),
           ] as { label: string; key: string; accent: string; bar: string; posns: Position[]; deployed: number; pool: number }[]).map(({ label, key, accent, bar, posns, deployed, pool }) => (
             <div key={key} className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
@@ -1975,7 +1975,7 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         <div className="flex items-center justify-between mb-3">
           <div>
             <h2 className="text-sm font-bold text-slate-200">📈 Jim Bot — Geo V4</h2>
-            <p className="text-[10px] text-slate-600 mt-0.5">ETH/USD · Zones S/R · Limit orders · 5min bars</p>
+            <p className="text-[10px] text-slate-600 mt-0.5">ETH/USD + SOL/USD · Pool global max 2 · 50% pos · Zones ±0.3%</p>
           </div>
           {totalCap > 0 && (
             <div className="text-right">
@@ -1988,8 +1988,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
         </div>
         <div className="grid grid-cols-1 gap-4">
           <ExpertCard
-            name="Geo V4 — ETH/USD" icon="📐" data={experts.geo_v4}
-            tagline="ETH/USD · Zones ±0.3% · RSI divergence · Pass 3b"
+            name="Geo V4 — ETH+SOL" icon="📐" data={experts.geo_v4}
+            tagline="ETH/USD + SOL/USD · Pool 2 max · 50% pos · target +0.9%"
             accent="violet"
           />
         </div>
