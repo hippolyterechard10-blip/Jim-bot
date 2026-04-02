@@ -709,19 +709,20 @@ def api_experts_stats():
                 if ctx.get("strategy_source") == source:
                     trades.append(t)
 
-            # Only count V2-placed trades in stats (exclude synced_close/orphan)
-            V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close")
+            # Stats: V2-placed trades only (exclude synced/orphan/reconciled for clean metrics)
+            V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close", "position_reconciled")
             closed = [t for t in trades if t.get("status") == "closed"
                       and t.get("close_reason") not in V2_EXCLUDE]
             pnls   = [t.get("pnl") or 0 for t in closed]
             wins   = [p for p in pnls if p > 0]
             losses = [p for p in pnls if p < 0]
-            total_pnl = sum(pnls)
 
-            # capital_now = locked value (ground truth from compounding events)
-            capital_now = lock.get(source, config.INITIAL_CAPITAL / 2)
-            # capital_start = capital_now minus any compounded P&L (for % return calc)
-            capital_start = round(capital_now - total_pnl, 2) if capital_now else config.INITIAL_CAPITAL / 2
+            # Capital: fixed start + ALL realized P&L (synced_close included, position_reconciled excluded — always $0)
+            capital_start = lock.get(f"initial_{source}", config.INITIAL_CAPITAL / 2)
+            all_closed = [t for t in trades if t.get("status") == "closed"
+                          and t.get("close_reason") != "position_reconciled"]
+            total_pnl   = round(sum(t.get("pnl") or 0 for t in all_closed), 4)
+            capital_now = round(capital_start + total_pnl, 2)
 
             open_trades = [t for t in trades if t.get("status") == "open"]
             # Live unrealized for open expert positions
