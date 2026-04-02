@@ -276,6 +276,29 @@ class GeometricExpert:
             else:
                 logger.info(f"[GEO] {symbol} — 4h bars unavailable ({_bars4h_len} rows), skipping MTF gate")
 
+            # ── Pre-fetch 1D bars and compute HTF confluence levels (4h + daily swings)
+            _htf_bars1d = None
+            try:
+                _htf_bars1d = self.broker.get_bars(symbol, "1Day", limit=30)
+            except Exception:
+                pass
+            _htf_levels = {"htf_supports": [], "htf_resistances": []}
+            try:
+                _h4h = _bars4h["high"].tolist() if (_bars4h is not None and not _bars4h.empty) else None
+                _l4h = _bars4h["low"].tolist() if (_bars4h is not None and not _bars4h.empty) else None
+                _h1d = _htf_bars1d["high"].tolist() if (_htf_bars1d is not None and not _htf_bars1d.empty) else None
+                _l1d = _htf_bars1d["low"].tolist() if (_htf_bars1d is not None and not _htf_bars1d.empty) else None
+                _htf_levels = self.geometry.find_htf_levels(
+                    highs_4h=_h4h, lows_4h=_l4h, highs_1d=_h1d, lows_1d=_l1d
+                )
+                logger.info(
+                    f"[GEO] {symbol} — HTF levels: "
+                    f"{len(_htf_levels['htf_supports'])} supports, "
+                    f"{len(_htf_levels['htf_resistances'])} resistances"
+                )
+            except Exception as _e_htf:
+                logger.debug(f"[GEO] HTF levels error: {_e_htf}")
+
             # ── RSI divergence — computed first, used by Tier 1 and structure filter
             from strategy import _rsi
             import numpy as np
@@ -347,6 +370,16 @@ class GeometricExpert:
                 tier1 += 2
             if rsi_divergence:
                 tier1 += 2
+
+            # ── HTF confluence: +2 if level aligns with 4h/daily swing, -1 if not
+            _ref_htf = _htf_levels["htf_supports"] if side == "long" else _htf_levels["htf_resistances"]
+            if _ref_htf:
+                if any(abs(level - htfl) / level < 0.005 for htfl in _ref_htf):
+                    tier1 += 2
+                    logger.info(f"[GEO] {symbol} — level confirmed on HTF (+2)")
+                else:
+                    tier1 -= 1
+                    logger.info(f"[GEO] {symbol} — level not on HTF (-1)")
 
             if tier1 < 2:
                 logger.info(f"[GEO] {symbol} — Tier 1 too weak ({tier1}), skip")
@@ -421,7 +454,7 @@ class GeometricExpert:
                 pass
 
             try:
-                _bars1d = self.broker.get_bars(symbol, "1Day", limit=3)
+                _bars1d = _htf_bars1d if (_htf_bars1d is not None and not _htf_bars1d.empty) else self.broker.get_bars(symbol, "1Day", limit=3)
                 if _bars1d is not None and not _bars1d.empty and len(_bars1d) >= 2:
                     _prev_high = float(_bars1d["high"].iloc[-2])
                     _prev_low  = float(_bars1d["low"].iloc[-2])

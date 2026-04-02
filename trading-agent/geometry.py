@@ -88,6 +88,30 @@ class GeometryAnalysis:
             "swing_lows":              sorted(swing_lows,  reverse=True)[:3],
         }
 
+    def find_htf_levels(
+        self,
+        highs_4h: list = None,
+        lows_4h: list = None,
+        highs_1d: list = None,
+        lows_1d: list = None,
+    ) -> dict:
+        """
+        Extract swing high/low levels from 4h and daily bars for HTF confluence scoring.
+        Uses the same ±1-bar swing detection as find_support_resistance().
+        Returns htf_supports and htf_resistances as flat price lists.
+        """
+        htf_supports = []
+        htf_resistances = []
+        for highs, lows in [(highs_4h, lows_4h), (highs_1d, lows_1d)]:
+            if not highs or not lows or len(highs) < 3:
+                continue
+            for i in range(1, len(highs) - 1):
+                if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+                    htf_resistances.append(highs[i])
+                if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+                    htf_supports.append(lows[i])
+        return {"htf_supports": htf_supports, "htf_resistances": htf_resistances}
+
     # ── ATR-Based Stop Calculation ────────────────────────────────────────────
 
     def calculate_atr_stop(
