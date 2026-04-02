@@ -44,6 +44,58 @@ class GeometricExpert:
         self._pending: dict = {}
         # Zone touch tracking
         self._touches: defaultdict = defaultdict(int)
+        # Réconciliation au démarrage — récupère l'état Alpaca
+        self._reconcile_alpaca_state()
+
+    def _reconcile_alpaca_state(self):
+        """Au démarrage, recharge les ordres GTC et les positions orphelines depuis Alpaca.
+        Évite de perdre le suivi après un redémarrage du bot."""
+        try:
+            # 1. Recharger les ordres GTC ouverts dans self._pending
+            open_orders = self.broker.api.list_orders(status="open")
+            for o in open_orders:
+                sym = o.symbol  # ex: 'ETH/USD'
+                if o.time_in_force == "gtc" and o.side == "buy" and o.limit_price:
+                    lim    = float(o.limit_price)
+                    qty    = float(o.qty or 0)
+                    stop   = round(lim * 0.997, 4)
+                    target = round(lim * 1.009, 4)
+                    zk     = f"{sym}_{lim:.4f}"
+                    self._pending[zk] = {
+                        "order_id": o.id,
+                        "symbol":   sym,
+                        "level":    lim,
+                        "stop":     stop,
+                        "target":   target,
+                        "qty":      qty,
+                    }
+                    logger.info(f"[GEO] 🔄 Recovered pending order: {sym} GTC@{lim}")
+
+            # 2. Réconcilier les positions Alpaca sans trade DB correspondant
+            positions = self.broker.api.list_positions()
+            open_db   = {t["symbol"] for t in self.memory.get_open_trades()}
+            for pos in positions:
+                sym = pos.symbol.replace("USD", "/USD") if "/" not in pos.symbol else pos.symbol
+                if sym not in open_db and any(s in sym for s in config.GEO_SYMBOLS):
+                    entry  = float(pos.avg_entry_price)
+                    qty    = float(pos.qty)
+                    stop   = round(entry * 0.997, 4)
+                    target = round(entry * 1.009, 4)
+                    self.memory.log_trade_open(
+                        trade_id=str(uuid.uuid4()),
+                        symbol=sym, side="buy",
+                        qty=qty, entry_price=entry,
+                        stop_loss=stop, take_profit=target,
+                        market_context={
+                            "strategy_source": "geo_v4",
+                            "side": "long", "level": entry,
+                            "stop": stop, "target": target,
+                            "reconciled": True,
+                        }
+                    )
+                    logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} qty={qty} entry={entry}")
+        except Exception as e:
+            logger.warning(f"[GEO] _reconcile_alpaca_state: {e}")
 
     # ── Capital ───────────────────────────────────────────────────────────────
 
