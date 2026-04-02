@@ -154,9 +154,9 @@ class MarketScanner:
 
                     # Qualify as a mover:
                     # - Standard:    |change| ≥ 3% AND volume > 50 000
-                    # - Micro/small cap ($0.50–$10): volume must exceed 500 000 (higher bar)
+                    # - Micro/small cap ($0.50–$10): volume > 300 000 OR volume_ratio ≥ 5x
                     if is_microcap:
-                        qualifies = abs(change_pct) >= 3 and volume > 500_000
+                        qualifies = abs(change_pct) >= 3 and (volume > 300_000 or volume_ratio >= 5)
                     else:
                         qualifies = abs(change_pct) >= 3 and volume > 50_000
 
