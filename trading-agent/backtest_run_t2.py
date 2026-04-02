@@ -32,7 +32,7 @@ except ImportError:
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-SYMBOLS       = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "DOGE-USD", "XRP-USD"]
+SYMBOLS       = ["ETH-USD", "XRP-USD", "AVAX-USD", "LINK-USD"]
 LOOKBACK_DAYS = 30
 CAPITAL       = 500.0
 POSITION_PCT  = 0.28
