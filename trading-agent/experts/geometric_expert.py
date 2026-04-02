@@ -216,6 +216,33 @@ class GeometricExpert:
                 logger.debug(f"[GEO] {symbol} — crypto short not supported on Alpaca spot, skip")
                 return
 
+            # ── 4h swing point validation — multi-timeframe confluence gate
+            # The 1-min level must align with a real 4h swing high/low (within 0.5%).
+            # A level that only appears on 1-min bars is noise, not institutional support.
+            _bars4h = self.broker.get_bars(symbol, "4Hour", limit=20)
+            if _bars4h is not None and not _bars4h.empty and len(_bars4h) >= 5:
+                _h4r = _bars4h["high"].tolist()
+                _l4r = _bars4h["low"].tolist()
+                _swing_highs_4h = [
+                    _h4r[i] for i in range(1, len(_h4r) - 1)
+                    if _h4r[i] >= _h4r[i - 1] and _h4r[i] >= _h4r[i + 1]
+                ]
+                _swing_lows_4h = [
+                    _l4r[i] for i in range(1, len(_l4r) - 1)
+                    if _l4r[i] <= _l4r[i - 1] and _l4r[i] <= _l4r[i + 1]
+                ]
+                if side == "long":
+                    _4h_ok = any(abs(level - sl) / level < 0.005 for sl in _swing_lows_4h)
+                else:
+                    _4h_ok = any(abs(level - sh) / level < 0.005 for sh in _swing_highs_4h)
+                if not _4h_ok:
+                    logger.info(f"[GEO] {symbol} — level not confirmed on 4h, skip")
+                    return
+                logger.info(f"[GEO] {symbol} — level confirmed on 4h ✓")
+            else:
+                _bars4h = None
+                logger.debug(f"[GEO] {symbol} — 4h bars unavailable, skipping MTF gate")
+
             # ── RSI divergence — computed first, used by Tier 1 and structure filter
             from strategy import _rsi
             import numpy as np
@@ -303,7 +330,6 @@ class GeometricExpert:
                 pass
 
             try:
-                _bars4h = self.broker.get_bars(symbol, "4Hour", limit=10)
                 if _bars4h is not None and not _bars4h.empty and len(_bars4h) >= 5:
                     _h4 = _bars4h["high"].tolist()
                     _l4 = _bars4h["low"].tolist()
