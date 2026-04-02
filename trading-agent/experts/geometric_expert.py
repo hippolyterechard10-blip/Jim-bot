@@ -47,6 +47,17 @@ class GeometricExpert:
 
     # ── Capital ───────────────────────────────────────────────────────────────
 
+    def _live_capital(self) -> float:
+        """Equity Alpaca réelle — source de vérité pour le sizing.
+        Fallback: GEO_CAPITAL + closed_pnl si l'API est indisponible."""
+        try:
+            equity = float(self.broker.api.get_account().equity)
+            logger.debug(f"[GEO] live capital Alpaca: ${equity:.2f}")
+            return equity
+        except Exception as e:
+            logger.warning(f"[GEO] _live_capital fallback: {e}")
+            return config.GEO_CAPITAL + self._closed_pnl()
+
     def get_deployed(self) -> float:
         try:
             total = 0.0
@@ -61,7 +72,7 @@ class GeometricExpert:
 
     def get_available(self) -> float:
         try:
-            return max(0.0, (config.GEO_CAPITAL + self._closed_pnl()) - self.get_deployed())
+            return max(0.0, self._live_capital() - self.get_deployed())
         except Exception as e:
             logger.error(f"[GEO] get_available: {e}")
             return max(0.0, config.GEO_CAPITAL - self.get_deployed())
@@ -240,10 +251,10 @@ class GeometricExpert:
             reward = abs(target - zone["center"])
             if risk <= 0 or reward / risk < 1.2: continue
 
-            # Sizing
+            # Sizing — basé sur l'equity Alpaca réelle
             available = self.get_available()
             if available < 30: break
-            current_capital = config.GEO_CAPITAL + self._closed_pnl()
+            current_capital = self._live_capital()
             deploy = min(available, current_capital * config.GEO_POS_PCT)
             qty    = round(deploy / zone["center"], 6)
             if qty * zone["center"] < 20: continue
