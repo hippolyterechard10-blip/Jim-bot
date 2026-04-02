@@ -13,6 +13,11 @@ ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
 GEO_CAPITAL     = INITIAL_CAPITAL   # Tout en geo, pas de split
 
+# ── Nouveau départ — reset P&L à partir de cette date ─────────────────────────
+# Seuls les trades après GEO_RESET_DATE entrent dans le calcul P&L du dashboard.
+# capital_start sera l'equity réelle Alpaca au moment du reset.
+GEO_RESET_DATE  = "2026-04-02"   # YYYY-MM-DD — mettre à jour à chaque reset
+
 # ── Geo V4 — Paramètres validés par backtest 2022-2025 ───────────────────────
 GEO_SYMBOL        = "ETH/USD"
 GEO_ZONE_PCT      = 0.003    # Zone ±0.3% autour du pivot

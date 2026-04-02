@@ -582,14 +582,49 @@ def source_file(filename):
     except Exception:
         return "File not found", 404
 
+# ── Cache equity Alpaca (évite d'appeler l'API à chaque request) ──────────────
+_equity_cache: dict = {"value": None, "ts": 0.0}
+_EQUITY_CACHE_TTL = 60  # secondes
+
+def _get_alpaca_equity() -> float:
+    """Retourne l'equity réelle du compte Alpaca paper, avec cache 60s."""
+    import time as _time
+    now = _time.time()
+    if _equity_cache["value"] is not None and now - _equity_cache["ts"] < _EQUITY_CACHE_TTL:
+        return _equity_cache["value"]
+    try:
+        import alpaca_trade_api as tradeapi
+        api = tradeapi.REST(
+            os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
+            "https://paper-api.alpaca.markets"
+        )
+        equity = float(api.get_account().equity)
+        _equity_cache["value"] = equity
+        _equity_cache["ts"]    = now
+        return equity
+    except Exception as e:
+        logger.warning(f"_get_alpaca_equity error: {e}")
+        # Retourne la valeur cachée même périmée, ou GEO_CAPITAL par défaut
+        return _equity_cache["value"] if _equity_cache["value"] else config.GEO_CAPITAL
+
+
 @app.route("/api/experts/stats")
 def api_experts_stats():
-    """Geo-Only ETH — capital et stats de la stratégie geo_v4."""
+    """Geo-Only ETH — capital et stats de la stratégie geo_v4.
+    capital_start = equity réelle Alpaca (nouveau départ GEO_RESET_DATE).
+    Seuls les trades APRÈS GEO_RESET_DATE entrent dans le calcul P&L.
+    """
     if not _memory:
         return jsonify({})
     try:
         import json as _json
+        from datetime import datetime as _dt
         EXCLUDE = ("synced_close", "orphan_close", "position_reconciled")
+
+        # ── Equity réelle Alpaca = capital de base ──────────────────────────
+        capital_start = _get_alpaca_equity()
+
+        # ── Trades geo_v4 — uniquement APRÈS GEO_RESET_DATE ─────────────────
         all_trades = _memory.get_recent_trades(limit=500)
         geo_trades = []
         for t in all_trades:
@@ -597,20 +632,28 @@ def api_experts_stats():
             if isinstance(ctx, str):
                 try: ctx = _json.loads(ctx)
                 except: ctx = {}
-            if ctx.get("strategy_source") == "geo_v4":
-                geo_trades.append(t)
+            if ctx.get("strategy_source") != "geo_v4":
+                continue
+            # Filtre date de reset
+            created = t.get("created_at") or t.get("entry_time") or ""
+            if created and str(created)[:10] < config.GEO_RESET_DATE:
+                continue
+            geo_trades.append(t)
+
         closed = [t for t in geo_trades if t.get("status") == "closed"
                   and t.get("close_reason") not in EXCLUDE]
         pnls   = [t.get("pnl") or 0 for t in closed]
         wins   = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         pf     = round(sum(wins) / abs(sum(losses)), 2) if losses else 999
+
         deployed = sum(
             float(t.get("entry_price", 0)) * float(t.get("qty", 0))
             for t in geo_trades if t.get("status") == "open"
         )
-        capital_now = round(config.GEO_CAPITAL + sum(pnls) - deployed, 2)
         total_pnl   = round(sum(pnls), 4)
+        capital_now = round(capital_start + total_pnl, 2)
+
         return jsonify({
             "geo_v4": {
                 "total_trades":    len(closed),
@@ -619,9 +662,9 @@ def api_experts_stats():
                 "profit_factor":   pf,
                 "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
                 "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
-                "capital_start":   config.GEO_CAPITAL,
+                "capital_start":   round(capital_start, 2),
                 "capital_now":     max(0.0, capital_now),
-                "capital_return":  round(total_pnl / config.GEO_CAPITAL * 100, 2),
+                "capital_return":  round(total_pnl / capital_start * 100, 2) if capital_start else 0,
                 "open_trades":     len([t for t in geo_trades if t.get("status") == "open"]),
                 "live_unrealized": 0.0,
                 "deployed":        round(deployed, 2),
