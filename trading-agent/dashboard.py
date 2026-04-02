@@ -1,11 +1,14 @@
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, make_response, redirect, render_template_string, request, url_for
 from flask_cors import CORS
 import config
 from memory import TradingMemory
@@ -13,8 +16,115 @@ from memory import TradingMemory
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
+app.secret_key = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+
 _memory: Optional[TradingMemory] = None
 _regime  = None
+
+# ── Auth helpers ───────────────────────────────────────────────────────────────
+_AUTH_COOKIE   = "jb_session"
+_SESSION_DAYS  = 30
+
+def _dashboard_password() -> str:
+    return os.getenv("DASHBOARD_PASSWORD", "")
+
+def _sign_token(payload: str) -> str:
+    key = app.secret_key.encode() if isinstance(app.secret_key, str) else app.secret_key
+    sig = hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+def _verify_token(token: str) -> bool:
+    if not token or "." not in token:
+        return False
+    payload, _, sig = token.rpartition(".")
+    expected = hmac.new(
+        app.secret_key.encode() if isinstance(app.secret_key, str) else app.secret_key,
+        payload.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+def _is_authenticated() -> bool:
+    token = request.cookies.get(_AUTH_COOKIE, "")
+    return bool(token) and _verify_token(token)
+
+_PUBLIC_PATHS = {"/login", "/favicon.ico"}
+
+@app.before_request
+def require_auth():
+    if request.path in _PUBLIC_PATHS or request.path.startswith("/static"):
+        return
+    if not _is_authenticated():
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "unauthorized"}), 401
+        return redirect(url_for("login"))
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        pwd = request.form.get("password", "")
+        expected = _dashboard_password()
+        if expected and hmac.compare_digest(
+            hashlib.sha256(pwd.encode()).hexdigest(),
+            hashlib.sha256(expected.encode()).hexdigest(),
+        ):
+            token   = _sign_token(secrets.token_hex(24))
+            resp    = make_response(redirect(url_for("dashboard")))
+            expires = datetime.now(timezone.utc) + timedelta(days=_SESSION_DAYS)
+            resp.set_cookie(
+                _AUTH_COOKIE, token,
+                httponly=True, samesite="Lax",
+                expires=expires, max_age=_SESSION_DAYS * 86400,
+            )
+            return resp
+        error = "Mot de passe incorrect."
+    return render_template_string(_LOGIN_HTML, error=error)
+
+@app.route("/logout")
+def logout():
+    resp = make_response(redirect(url_for("login")))
+    resp.delete_cookie(_AUTH_COOKIE)
+    return resp
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jim Bot — Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#c8d6e5;font-family:'Space Mono',monospace,sans-serif;
+     min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#0d1117;border:1px solid #1a2030;border-radius:12px;padding:40px 36px;
+      width:100%;max-width:360px;text-align:center}
+.logo{font-size:22px;font-weight:800;letter-spacing:.15em;color:#00ff88;
+      text-transform:uppercase;margin-bottom:8px}
+.sub{font-size:11px;color:#4a5568;margin-bottom:28px;letter-spacing:.05em}
+input[type=password]{width:100%;padding:12px 14px;background:#080c10;border:1px solid #1a2030;
+  border-radius:8px;color:#c8d6e5;font-family:inherit;font-size:13px;margin-bottom:14px;
+  outline:none;transition:border .2s}
+input[type=password]:focus{border-color:#00ff88}
+button{width:100%;padding:12px;background:#00ff88;color:#080c10;border:none;border-radius:8px;
+  font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.08em;cursor:pointer;
+  text-transform:uppercase;transition:opacity .2s}
+button:hover{opacity:.85}
+.error{color:#ff3860;font-size:11px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">📐 Jim Bot</div>
+  <div class="sub">Geo V4 — ETH/USD · Accès restreint</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="password" name="password" placeholder="Mot de passe" autofocus>
+    <button type="submit">Connexion</button>
+  </form>
+</div>
+</body>
+</html>"""
+
 
 def init_dashboard(memory, regime=None, **kwargs):
     global _memory, _regime
@@ -684,59 +794,6 @@ def api_health():
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
-@app.route("/source")
-def api_source():
-    """Return all Python source files concatenated as plain text — shareable in a browser."""
-    from flask import Response
-    base = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(base, ".."))
-
-    PYTHON_FILES = [
-        "trading-agent/main.py",
-        "trading-agent/config.py",
-        "trading-agent/broker.py",
-        "trading-agent/memory.py",
-        "trading-agent/regime.py",
-        "trading-agent/geometry.py",
-        "trading-agent/experts/geometric_expert.py",
-        "trading-agent/dashboard.py",
-    ]
-
-    SEP = "=" * 80
-    chunks = ["JIM BOT — Python Source\n" + SEP + "\n"]
-
-    total_lines = 0
-    for rel in PYTHON_FILES:
-        abs_path = os.path.join(project_root, rel)
-        if not os.path.exists(abs_path):
-            continue
-        try:
-            with open(abs_path, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            n = len(content.splitlines())
-            total_lines += n
-            chunks.append(f"\n{SEP}\nFILE: {rel}  ({n} lines)\n{SEP}\n\n{content}\n")
-        except Exception as e:
-            chunks.append(f"\n{SEP}\nFILE: {rel}  — ERROR: {e}\n{SEP}\n")
-
-    chunks.append(f"\n{SEP}\nTotal: {len(PYTHON_FILES)} files, {total_lines} lines\n{SEP}\n")
-    return Response("".join(chunks), mimetype="text/plain; charset=utf-8")
-
-AGENT_FILES = ["main", "config", "broker", "memory", "regime", "geometry", "dashboard"]
-
-@app.route("/api/source/<filename>")
-def source_file(filename):
-    """Return a single Python source file by name (no extension)."""
-    from flask import Response as _R
-    if filename not in AGENT_FILES:
-        return "Not found", 404
-    base = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(base, f"{filename}.py")
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            return _R(f.read(), status=200, mimetype="text/plain; charset=utf-8")
-    except Exception:
-        return "File not found", 404
 
 # ── Cache equity Alpaca (évite d'appeler l'API à chaque request) ──────────────
 _equity_cache: dict = {"value": None, "ts": 0.0}
