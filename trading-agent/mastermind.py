@@ -486,6 +486,16 @@ class Mastermind:
             # Sort by conviction: gap × volume — strongest first
             candidates.sort(key=lambda x: x.get("change_pct", 0) * x.get("volume_ratio", 0), reverse=True)
 
+            try:
+                self.memory.log_decision(
+                    "SCAN",
+                    f"GAPPER SCAN: {len(candidates)} candidates found: {[c['symbol'] for c in candidates[:3]]}",
+                    symbol="MASTERMIND",
+                    confidence=1.0,
+                )
+            except Exception:
+                pass
+
             for candidate in candidates[:3]:  # Top 3 max per tick
                 sym = candidate.get("symbol", "")
                 price = candidate.get("price", 0)
@@ -526,6 +536,15 @@ class Mastermind:
             if self.geometric.has_capital():
                 candidates = self.geometric.flush_candidates()
                 logger.info(f"[MASTERMIND] 📐 Evaluating {len(candidates)} geo candidates this cycle")
+                try:
+                    self.memory.log_decision(
+                        "SCAN",
+                        f"GEO WATCHLIST: {len(candidates)} symbols queued: {candidates[:5]}",
+                        symbol="MASTERMIND",
+                        confidence=1.0,
+                    )
+                except Exception:
+                    pass
                 # Night multiplier: 2h-6h UTC = 40% size (low liquidity window)
                 _hour_utc = dt.datetime.now(timezone.utc).hour
                 _night_mult = 0.4 if 2 <= _hour_utc < 6 else 1.0

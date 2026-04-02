@@ -81,6 +81,61 @@ router.get("/decisions", (_req, res) => {
   res.json({ db_connected: connected, decisions });
 });
 
+router.get("/signals", (_req, res) => {
+  const db = getDb();
+  let signals: unknown[] = [];
+  let connected = false;
+
+  if (db) {
+    try {
+      const rows = db
+        .prepare(
+          `SELECT id, symbol, decision, reasoning, confidence, decided_at, market_data
+           FROM agent_decisions
+           ORDER BY decided_at DESC LIMIT 50`,
+        )
+        .all() as Array<{
+          id: number;
+          symbol: string;
+          decision: string;
+          reasoning: string;
+          confidence: number;
+          decided_at: string;
+          market_data: string | null;
+        }>;
+      connected = true;
+      db.close();
+      signals = rows.map((r) => {
+        let source = "geo";
+        if (r.symbol === "MASTERMIND") {
+          source = "mastermind";
+        } else {
+          try {
+            const md = JSON.parse(r.market_data || "{}") as { strategy_source?: string };
+            const s = md.strategy_source ?? "";
+            if (s.includes("gapper")) source = "gap";
+            else if (s.includes("geometric")) source = "geo";
+          } catch { /* ignore */ }
+        }
+        return {
+          id: r.id,
+          symbol: r.symbol,
+          source,
+          decision: r.decision,
+          detail: (r.reasoning || "").substring(0, 80),
+          confidence: r.confidence,
+          decided_at: r.decided_at,
+        };
+      });
+    } catch (e) {
+      console.error("[trading] signals query error:", e);
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+
+  res.json({ db_connected: connected, signals });
+});
+
 router.get("/partial-profits", (_req, res) => {
   const db = getDb();
   if (!db) {

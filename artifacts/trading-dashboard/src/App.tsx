@@ -31,6 +31,15 @@ interface Decision {
   reasoning: string; market_data?: string; decided_at: string;
   strategy_source?: string | null;
 }
+interface Signal {
+  id: number;
+  symbol: string;
+  source: "mastermind" | "gap" | "geo";
+  decision: string;
+  detail: string;
+  confidence: number;
+  decided_at: string;
+}
 interface Status {
   agent: string; timestamp: string; db_connected: boolean;
   total_trades: number; recent_trades: Trade[];
@@ -1808,68 +1817,101 @@ function ExpertPills({ value, onChange }: { value: ExpertFilter; onChange: (v: E
   );
 }
 
-function SignalsPage({ decisions }: { decisions: Decision[] }) {
-  const [actionFilter, setActionFilter] = useState<"ALL" | "BUY" | "SELL" | "HOLD">("ALL");
-  const [expertFilter, setExpertFilter] = useState<ExpertFilter>("all");
-  const [showAll,      setShowAll]      = useState(false);
+type SignalSourceFilter = "all" | "mastermind" | "gap" | "geo";
 
-  const byExpert = expertFilter === "all" ? decisions
-    : expertFilter === "gap" ? decisions.filter(d => d.strategy_source === "gapper")
-    : decisions.filter(d => d.strategy_source === "geometric");
+function SourceBadge({ source }: { source: string }) {
+  const cfg =
+    source === "mastermind" ? { label: "🧠 Mastermind", cls: "bg-sky-900/60 text-sky-300 border-sky-700/60" } :
+    source === "gap"        ? { label: "🚀 Gap",        cls: "bg-amber-900/60 text-amber-400 border-amber-700/60" } :
+                              { label: "📐 Geo",        cls: "bg-violet-900/60 text-violet-400 border-violet-700/60" };
+  return (
+    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${cfg.cls}`}>{cfg.label}</span>
+  );
+}
 
-  const latestBySymbol: Record<string, Decision> = {};
-  byExpert.forEach(d => { if (!latestBySymbol[d.symbol]) latestBySymbol[d.symbol] = d; });
-  const deduped  = Object.values(latestBySymbol).sort((a, b) => b.decided_at.localeCompare(a.decided_at));
-  const baseList = showAll ? [...byExpert].sort((a, b) => b.decided_at.localeCompare(a.decided_at)) : deduped;
-  const filtered = actionFilter === "ALL" ? baseList : baseList.filter(d => d.decision.toUpperCase() === actionFilter);
+function DecisionSignalBadge({ decision }: { decision: string }) {
+  const d = decision.toUpperCase();
+  const cfg =
+    d === "BUY"  ? "bg-emerald-900/60 text-emerald-400 border-emerald-700/60" :
+    d === "SELL" ? "bg-red-900/60 text-red-400 border-red-700/60" :
+    d === "SCAN" ? "bg-slate-700/80 text-slate-400 border-slate-600/60" :
+                   "bg-slate-700/60 text-slate-400 border-slate-600/40";
+  return (
+    <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${cfg}`}>{d}</span>
+  );
+}
+
+function SignalsPage({ decisions: _decisions }: { decisions: Decision[] }) {
+  const [signals,  setSignals]  = useState<Signal[]>([]);
+  const [filter,   setFilter]   = useState<SignalSourceFilter>("all");
+  const [loading,  setLoading]  = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`${BASE}/api/signals`);
+        if (r.ok && mounted) {
+          const d = await r.json() as { signals?: Signal[] };
+          setSignals(d.signals ?? []);
+        }
+      } catch { /* ignore */ }
+      if (mounted) setLoading(false);
+    };
+    load();
+    const id = setInterval(load, 15000);
+    return () => { mounted = false; clearInterval(id); };
+  }, []);
+
+  const filtered = filter === "all" ? signals : signals.filter(s => s.source === filter);
+
+  const filterBtn = (key: SignalSourceFilter, label: string, active: string, inactive: string) => (
+    <button key={key} onClick={() => setFilter(key)}
+      className={`px-3 py-1.5 text-xs font-semibold rounded border transition-colors ${filter === key ? active : inactive}`}>
+      {label}
+    </button>
+  );
 
   return (
     <div className="p-4 sm:p-6 space-y-3">
-      {/* Expert selector */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <ExpertPills value={expertFilter} onChange={setExpertFilter} />
-        <span className="text-[10px] text-slate-600">
-          {expertFilter === "gap" ? "strategy_source: gapper" : expertFilter === "geo" ? "strategy_source: geometric" : "Tous les experts"}
-        </span>
-      </div>
-
-      {/* Action filter bar */}
+      {/* Source filter */}
       <div className="flex items-center gap-2 flex-wrap">
-        {(["ALL", "BUY", "SELL", "HOLD"] as const).map(f => (
-          <button key={f} onClick={() => setActionFilter(f)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${actionFilter === f
-              ? f === "BUY"  ? "bg-emerald-900/50 text-emerald-400 border border-emerald-700"
-              : f === "SELL" ? "bg-red-900/50 text-red-400 border border-red-700"
-              : f === "HOLD" ? "bg-slate-700 text-slate-300 border border-slate-600"
-              : "bg-sky-900/40 text-sky-400 border border-sky-700"
-              : "text-slate-500 hover:text-slate-300 border border-transparent"}`}>
-            {f}
-          </button>
-        ))}
-        <button onClick={() => setShowAll(v => !v)}
-          className={`px-2.5 py-1.5 text-[10px] rounded border font-semibold transition-colors ml-1 ${showAll ? "bg-violet-900/30 text-violet-400 border-violet-700" : "text-slate-500 border-slate-700 hover:text-slate-400"}`}>
-          {showAll ? "History" : "Latest"}
-        </button>
+        {filterBtn("all",        "All",            "bg-sky-900/40 text-sky-400 border-sky-700",       "text-slate-500 border-slate-700 hover:text-slate-300")}
+        {filterBtn("mastermind", "🧠 Mastermind",  "bg-sky-900/60 text-sky-300 border-sky-600",       "text-slate-500 border-slate-700 hover:text-slate-300")}
+        {filterBtn("gap",        "🚀 Gap",          "bg-amber-900/50 text-amber-400 border-amber-700", "text-slate-500 border-slate-700 hover:text-slate-300")}
+        {filterBtn("geo",        "📐 Geo",          "bg-violet-900/50 text-violet-400 border-violet-700","text-slate-500 border-slate-700 hover:text-slate-300")}
         <span className="ml-auto text-xs text-slate-600">
-          {filtered.length} signal{filtered.length !== 1 ? "s" : ""}{showAll ? " (full history)" : " (latest par asset)"}
+          {loading ? "Loading…" : `${filtered.length} signal${filtered.length !== 1 ? "s" : ""}`}
         </span>
       </div>
 
-      {filtered.length === 0 ? (
-        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">Aucun signal pour ce filtre</div>
+      {!loading && filtered.length === 0 ? (
+        <div className="bg-slate-800/50 rounded-xl p-10 text-center text-slate-600 text-sm">No signals for this filter</div>
       ) : (
         <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-slate-700">
-                  {["Time","Asset","Signal","Confidence","Score","Regime",""].map(h => (
+                  {["Time", "Source", "Decision", "Detail"].map(h => (
                     <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700/50">
-                {filtered.map(d => <SignalRow key={`${d.symbol}-${d.decided_at}`} dec={d} />)}
+                {filtered.map(s => (
+                  <tr key={s.id} className="hover:bg-slate-800/50 transition-colors">
+                    <td className="px-3 py-2.5 text-xs text-slate-500 whitespace-nowrap">{fmtDateTime(s.decided_at)}</td>
+                    <td className="px-3 py-2.5"><SourceBadge source={s.source} /></td>
+                    <td className="px-3 py-2.5"><DecisionSignalBadge decision={s.decision} /></td>
+                    <td className="px-3 py-2.5 text-xs text-slate-400 max-w-xs truncate" title={s.detail}>
+                      {s.symbol !== "MASTERMIND" && (
+                        <span className="text-slate-500 font-bold mr-1">{s.symbol.replace("/USD","")}</span>
+                      )}
+                      {s.detail}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
