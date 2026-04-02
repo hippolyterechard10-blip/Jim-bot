@@ -60,10 +60,10 @@ def _run_watchdog(geo: GeometricExpert, broker: AlpacaBroker, thread_ref: list):
 def main():
     logger.info("🚀 Jim Bot Geo-Only ETH démarrage...")
 
-    memory   = TradingMemory("trading_memory.db")
-    broker   = AlpacaBroker()
+    memory  = TradingMemory("trading_memory.db")
+    broker  = AlpacaBroker()
     geometry = GeometryAnalysis()
-    regime   = MarketRegime()
+    regime  = MarketRegime()
 
     geo = GeometricExpert(
         broker=broker,
