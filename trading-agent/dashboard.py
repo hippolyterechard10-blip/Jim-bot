@@ -681,15 +681,22 @@ def source_file(filename):
 @app.route("/api/experts/stats")
 def api_experts_stats():
     """Returns independent P&L and capital for each expert.
-    capital_now = authoritative value from capital_lock.json (compounded on each real V2 trade close).
-    Only V2-placed trades are counted in stats (synced_close/orphan trades excluded).
+
+    Capital source of truth = Alpaca account equity (not DB PnL, which can contain
+    mis-priced synced_close entries).
+
+    Logic:
+      - capital_start = initial per expert (from capital_lock.json initial_ keys, default 513)
+      - gap_capital_now  = capital_start + sum(V2 gap pnl from DB)   [gap trades are reliable]
+      - geo_capital_now  = alpaca_equity - gap_capital_now            [derived from real account]
+      - total_pnl        = capital_now - capital_start                [always consistent]
     """
     if not _memory:
         return jsonify({})
     try:
         import json as _json
 
-        # ── Read authoritative capital from capital_lock.json ──────────────────
+        # ── Read initial capital from capital_lock.json ────────────────────────
         lock = {}
         try:
             with open(config._CAPITAL_LOCK_FILE) as f:
@@ -697,40 +704,68 @@ def api_experts_stats():
         except Exception:
             pass
 
+        # ── Fetch real account equity from Alpaca ──────────────────────────────
+        alpaca_equity = None
+        if _agent:
+            try:
+                alpaca_equity = float(_agent.broker.api.get_account().equity)
+            except Exception as e:
+                logger.warning(f"api_experts_stats: could not fetch Alpaca equity: {e}")
+
         all_trades = _memory.get_recent_trades(limit=500)
+
+        # ── Per-source trade filtering ─────────────────────────────────────────
+        by_source = {"gapper": [], "geometric": []}
+        for t in all_trades:
+            ctx = t.get("market_context") or {}
+            if isinstance(ctx, str):
+                try: ctx = _json.loads(ctx)
+                except: ctx = {}
+            src = ctx.get("strategy_source")
+            if src in by_source:
+                by_source[src].append(t)
+
+        # ── Stats filter (V2-only, for win-rate / avg-win / avg-loss) ─────────
+        V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close", "position_reconciled")
+
+        # ── Gap capital: DB PnL is reliable (V2 closes only, few trades) ──────
+        gap_initial = lock.get("initial_gapper", 513.0)
+        gap_v2_closed = [t for t in by_source["gapper"]
+                         if t.get("status") == "closed"
+                         and t.get("close_reason") not in V2_EXCLUDE]
+        gap_v2_pnl   = sum(t.get("pnl") or 0 for t in gap_v2_closed)
+        gap_capital_now = round(gap_initial + gap_v2_pnl, 2)
+
         result = {}
         for source in ["gapper", "geometric"]:
-            trades = []
-            for t in all_trades:
-                ctx = t.get("market_context") or {}
-                if isinstance(ctx, str):
-                    try: ctx = _json.loads(ctx)
-                    except: ctx = {}
-                if ctx.get("strategy_source") == source:
-                    trades.append(t)
-
-            # Stats: V2-placed trades only (exclude synced/orphan/reconciled for clean metrics)
-            V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close", "position_reconciled")
-            closed = [t for t in trades if t.get("status") == "closed"
-                      and t.get("close_reason") not in V2_EXCLUDE]
-            pnls   = [t.get("pnl") or 0 for t in closed]
+            trades     = by_source[source]
+            v2_closed  = [t for t in trades if t.get("status") == "closed"
+                          and t.get("close_reason") not in V2_EXCLUDE]
+            pnls   = [t.get("pnl") or 0 for t in v2_closed]
             wins   = [p for p in pnls if p > 0]
             losses = [p for p in pnls if p < 0]
 
-            # Capital: fixed start + ALL realized P&L (synced_close included, position_reconciled excluded — always $0)
-            capital_start = lock.get(f"initial_{source}", config.INITIAL_CAPITAL / 2)
-            all_closed = [t for t in trades if t.get("status") == "closed"
-                          and t.get("close_reason") != "position_reconciled"]
-            total_pnl   = round(sum(t.get("pnl") or 0 for t in all_closed), 4)
-            capital_now = round(capital_start + total_pnl, 2)
+            capital_start = lock.get(f"initial_{source}", 513.0)
+
+            if source == "gapper":
+                capital_now = gap_capital_now
+            else:
+                # Geo = real account equity minus what gap holds
+                # Falls back to gap_initial + total_v2_pnl if Alpaca unavailable
+                if alpaca_equity is not None:
+                    capital_now = round(alpaca_equity - gap_capital_now, 2)
+                else:
+                    geo_v2_pnl  = sum(t.get("pnl") or 0 for t in v2_closed)
+                    capital_now = round(capital_start + geo_v2_pnl, 2)
+
+            total_pnl = round(capital_now - capital_start, 4)
 
             open_trades = [t for t in trades if t.get("status") == "open"]
-            # Live unrealized for open expert positions
             live_unrealized = 0.0
             if _agent:
                 for ot in open_trades:
-                    sym = ot.get("symbol", "")
-                    qty = float(ot.get("qty") or 0)
+                    sym  = ot.get("symbol", "")
+                    qty  = float(ot.get("qty") or 0)
                     entry = float(ot.get("entry_price") or 0)
                     if not sym or not qty or not entry:
                         continue
@@ -743,13 +778,13 @@ def api_experts_stats():
                         pass
 
             result[source] = {
-                "total_trades":    len(closed),
+                "total_trades":    len(v2_closed),
                 "total_pnl":       round(total_pnl, 4),
                 "win_rate":        round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
                 "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
                 "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
                 "capital_start":   capital_start,
-                "capital_now":     round(capital_now, 2),
+                "capital_now":     capital_now,
                 "capital_return":  round(total_pnl / capital_start * 100, 2)
                                    if capital_start > 0 else 0,
                 "open_trades":     len(open_trades),
