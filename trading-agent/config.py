@@ -34,7 +34,7 @@ PARTIAL_PROFIT_PCT   = 0.03   # Take partial profits at +3% unrealised gain
 PARTIAL_PROFIT_RATIO = 0.50   # Sell / cover this fraction of the position (50%)
 
 # Universe
-CRYPTO_SYMBOLS   = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD", "SHIB/USD", "MATIC/USD"]
+CRYPTO_SYMBOLS   = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD"]
 STOCK_SYMBOLS    = ["AAPL", "NVDA", "TSLA", "META", "GOOGL", "MSFT", "AMD"]
 ETF_SYMBOLS      = ["QQQ", "SPY", "ARKK"]
 # Fixed blue-chip list always evaluated every cycle regardless of top movers
