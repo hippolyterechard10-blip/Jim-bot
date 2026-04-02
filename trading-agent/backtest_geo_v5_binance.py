@@ -27,10 +27,10 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 ASSETS = {
-    "ETHUSDT":  {"start": "2022-01-01", "end": "2022-12-31", "target": 0.009, "pos_pct": 0.28, "max_sim": 2},
-    "XRPUSDT":  {"start": "2022-01-01", "end": "2022-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
-    "LINKUSDT": {"start": "2022-01-01", "end": "2022-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
-    "AVAXUSDT": {"start": "2022-01-01", "end": "2022-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
+    "ETHUSDT":  {"start": "2023-01-01", "end": "2023-12-31", "target": 0.009, "pos_pct": 0.28, "max_sim": 2},
+    "XRPUSDT":  {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
+    "LINKUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
+    "AVAXUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
 }
 
 CAPITAL      = 500.0
