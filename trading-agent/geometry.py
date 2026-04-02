@@ -517,3 +517,128 @@ class GeometryAnalysis:
             "resistance":        sr["nearest_resistance"],
             "patterns_detected": [p["name"] for p in candles["patterns"] + charts["patterns"]],
         }
+
+    # ── Méthodes scalping 3-timeframes ───────────────────────────────────────
+
+    def find_swing_levels(self, bars_df, min_tests: int = 2) -> dict:
+        """
+        Détecte les niveaux S/R depuis un DataFrame (n'importe quel timeframe).
+        Groupe les pivots proches à ±0.3% en clusters.
+        Ne retourne que les niveaux testés >= min_tests fois.
+        Utilisé par GeometricExpert pour les passes 15min et 5min.
+        """
+        if bars_df is None or bars_df.empty or len(bars_df) < 10:
+            return {"supports": [], "resistances": []}
+
+        highs   = bars_df["high"].tolist()
+        lows    = bars_df["low"].tolist()
+        closes  = bars_df["close"].tolist()
+        current = closes[-1]
+
+        swing_highs = []
+        swing_lows  = []
+
+        # Fenêtre de 2 bougies de chaque côté — confirmée (pas look-ahead live)
+        for i in range(2, len(highs) - 2):
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2]
+                    and highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                swing_highs.append(highs[i])
+            if (lows[i] < lows[i-1] and lows[i] < lows[i-2]
+                    and lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+                swing_lows.append(lows[i])
+
+        def _cluster(levels, zone_pct=0.003):
+            """Regroupe les niveaux proches. Retourne [(prix_moyen, nb_tests)]."""
+            if not levels:
+                return []
+            sorted_lvls = sorted(levels)
+            clusters    = [[sorted_lvls[0]]]
+            for lvl in sorted_lvls[1:]:
+                if (lvl - clusters[-1][0]) / clusters[-1][0] < zone_pct:
+                    clusters[-1].append(lvl)
+                else:
+                    clusters.append([lvl])
+            return [(sum(c) / len(c), len(c)) for c in clusters]
+
+        supports = [
+            {"level": round(price, 8), "tests": count}
+            for price, count in _cluster(swing_lows)
+            if count >= min_tests and price < current * 0.999
+        ]
+        resistances = [
+            {"level": round(price, 8), "tests": count}
+            for price, count in _cluster(swing_highs)
+            if count >= min_tests and price > current * 1.001
+        ]
+
+        # Nearest-first: supports décroissants, resistances croissantes
+        supports.sort(key=lambda x: x["level"], reverse=True)
+        resistances.sort(key=lambda x: x["level"])
+
+        return {"supports": supports, "resistances": resistances}
+
+    def find_5min_stop(self, bars_5m, side: str, entry_price: float) -> float:
+        """
+        Cherche le swing low 5min le plus récent sous l'entrée (long)
+        ou swing high au-dessus (short) dans une fenêtre de 15 bougies.
+        Place le stop 0.2% au-delà du swing pour lui laisser un buffer.
+        Fallback : entry * 0.997 (long) ou 1.003 (short) si aucun swing valide.
+        Stop plafonné à -0.5% / +0.5% pour rester dans la philosophie scalping.
+        """
+        fallback_mult = 0.997 if side == "long" else 1.003
+        fallback      = round(entry_price * fallback_mult, 8)
+
+        if bars_5m is None or bars_5m.empty or len(bars_5m) < 6:
+            return fallback
+
+        highs = bars_5m["high"].tolist()
+        lows  = bars_5m["low"].tolist()
+
+        window_lows  = lows[-15:]
+        window_highs = highs[-15:]
+
+        if side == "long":
+            max_stop = entry_price * 0.995          # plafond -0.5%
+            candidates = [
+                window_lows[i]
+                for i in range(1, len(window_lows) - 1)
+                if (window_lows[i] < window_lows[i-1]
+                    and window_lows[i] < window_lows[i+1]
+                    and max_stop <= window_lows[i] < entry_price)
+            ]
+            if candidates:
+                stop = max(candidates) * 0.998      # 0.2% sous le swing low
+                return round(stop, 8)
+
+        else:  # short
+            max_stop = entry_price * 1.005          # plafond +0.5%
+            candidates = [
+                window_highs[i]
+                for i in range(1, len(window_highs) - 1)
+                if (window_highs[i] > window_highs[i-1]
+                    and window_highs[i] > window_highs[i+1]
+                    and entry_price < window_highs[i] <= max_stop)
+            ]
+            if candidates:
+                stop = min(candidates) * 1.002      # 0.2% au-dessus du swing high
+                return round(stop, 8)
+
+        return fallback
+
+    def calculate_vwap(self, bars_df) -> float:
+        """
+        VWAP intraday = somme(prix_typique × volume) / somme(volume)
+        Prix typique = (high + low + close) / 3.
+        Retourne 0.0 si données insuffisantes ou volume nul.
+        """
+        if bars_df is None or bars_df.empty:
+            return 0.0
+        try:
+            typical_price = (bars_df["high"] + bars_df["low"] + bars_df["close"]) / 3
+            total_volume  = bars_df["volume"].sum()
+            if total_volume <= 0:
+                return 0.0
+            vwap = (typical_price * bars_df["volume"]).sum() / total_volume
+            return round(float(vwap), 8)
+        except Exception:
+            return 0.0
