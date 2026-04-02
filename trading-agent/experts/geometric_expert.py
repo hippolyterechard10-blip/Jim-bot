@@ -219,8 +219,33 @@ class GeometricExpert:
             # ── 4h swing point validation — multi-timeframe confluence gate
             # The 1-min level must align with a real 4h swing high/low (within 0.5%).
             # A level that only appears on 1-min bars is noise, not institutional support.
-            _bars4h = self.broker.get_bars(symbol, "4Hour", limit=20)
-            if _bars4h is not None and not _bars4h.empty and len(_bars4h) >= 5:
+            # broker.get_bars("4Hour") only returns today's bars (≤3); use direct request
+            # with a 5-day start so we get ~30 bars worth of real swing history.
+            _bars4h = None
+            try:
+                import requests as _rq
+                import datetime as _dt4h
+                import pandas as _pd4h
+                _start_4h = (_dt4h.datetime.utcnow() - _dt4h.timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _qs4h = f"symbols={symbol}&timeframe=4Hour&limit=30&start={_start_4h}&sort=desc"
+                _r4h = _rq.get(
+                    f"https://data.alpaca.markets/v1beta3/crypto/us/bars?{_qs4h}",
+                    headers=self.broker._headers,
+                    timeout=10,
+                )
+                if _r4h.ok:
+                    _raw4h = _r4h.json().get("bars", {}).get(symbol, [])
+                    if _raw4h and len(_raw4h) >= 5:
+                        _df4h = _pd4h.DataFrame(_raw4h)
+                        _df4h["timestamp"] = _pd4h.to_datetime(_df4h["t"])
+                        _df4h = _df4h.sort_values("timestamp")
+                        _df4h = _df4h.rename(columns={"h": "high", "l": "low"})
+                        _bars4h = _df4h
+            except Exception as _e4h:
+                logger.debug(f"[GEO] 4h bars fetch error: {_e4h}")
+
+            _bars4h_len = len(_bars4h) if _bars4h is not None else 0
+            if _bars4h_len >= 5:
                 _h4r = _bars4h["high"].tolist()
                 _l4r = _bars4h["low"].tolist()
                 _swing_highs_4h = [
@@ -231,6 +256,10 @@ class GeometricExpert:
                     _l4r[i] for i in range(1, len(_l4r) - 1)
                     if _l4r[i] <= _l4r[i - 1] and _l4r[i] <= _l4r[i + 1]
                 ]
+                logger.info(
+                    f"[GEO] {symbol} — 4h bars={_bars4h_len} "
+                    f"swing_lows={len(_swing_lows_4h)} swing_highs={len(_swing_highs_4h)}"
+                )
                 if side == "long":
                     _4h_ok = any(abs(level - sl) / level < 0.005 for sl in _swing_lows_4h)
                 else:
@@ -240,8 +269,7 @@ class GeometricExpert:
                     return
                 logger.info(f"[GEO] {symbol} — level confirmed on 4h ✓")
             else:
-                _bars4h = None
-                logger.debug(f"[GEO] {symbol} — 4h bars unavailable, skipping MTF gate")
+                logger.info(f"[GEO] {symbol} — 4h bars unavailable ({_bars4h_len} rows), skipping MTF gate")
 
             # ── RSI divergence — computed first, used by Tier 1 and structure filter
             from strategy import _rsi
