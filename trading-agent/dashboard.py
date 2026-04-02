@@ -20,7 +20,7 @@ _scanner = None
 _regime  = None
 _agent   = None
 
-def init_dashboard(memory, analyzer, scanner=None, regime=None, agent=None):
+def init_dashboard(memory, analyzer=None, scanner=None, regime=None, agent=None):
     global _memory, _analyzer, _scanner, _regime, _agent
     _memory  = memory
     _analyzer = analyzer
@@ -795,7 +795,7 @@ def api_experts_stats():
         logger.error(f"api_experts_stats error: {e}")
         return jsonify({"error": str(e)})
 
-def start_dashboard(memory, analyzer, scanner=None, regime=None, agent=None, port=8080):
+def start_dashboard(memory, analyzer=None, scanner=None, regime=None, agent=None, port=8080):
     import subprocess, time as _time
     init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
     # Release port from any lingering previous process (daemon thread didn't exit fast enough)
