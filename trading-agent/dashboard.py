@@ -613,17 +613,18 @@ def api_experts_stats():
         total_pnl   = round(sum(pnls), 4)
         return jsonify({
             "geo_v4": {
-                "total_trades":   len(closed),
-                "total_pnl":      total_pnl,
-                "win_rate":       round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
-                "profit_factor":  pf,
-                "avg_win":        round(sum(wins) / len(wins), 4) if wins else 0,
-                "avg_loss":       round(sum(losses) / len(losses), 4) if losses else 0,
-                "capital_start":  config.GEO_CAPITAL,
-                "capital_now":    max(0.0, capital_now),
-                "capital_return": round(total_pnl / config.GEO_CAPITAL * 100, 2),
-                "open_trades":    len([t for t in geo_trades if t.get("status") == "open"]),
-                "deployed":       round(deployed, 2),
+                "total_trades":    len(closed),
+                "total_pnl":       total_pnl,
+                "win_rate":        round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
+                "profit_factor":   pf,
+                "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
+                "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
+                "capital_start":   config.GEO_CAPITAL,
+                "capital_now":     max(0.0, capital_now),
+                "capital_return":  round(total_pnl / config.GEO_CAPITAL * 100, 2),
+                "open_trades":     len([t for t in geo_trades if t.get("status") == "open"]),
+                "live_unrealized": 0.0,
+                "deployed":        round(deployed, 2),
             }
         })
     except Exception as e:

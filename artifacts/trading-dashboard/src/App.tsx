@@ -1973,7 +1973,8 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
   const capPos = data.capital_now >= data.capital_start;
   const retPos = data.capital_return >= 0;
   const pnlPos = data.total_pnl >= 0;
-  const unrPos = data.live_unrealized >= 0;
+  const liveUnrealized = data.live_unrealized ?? 0;
+  const unrPos = liveUnrealized >= 0;
   const rr     = data.avg_win !== 0 && data.avg_loss !== 0
     ? (data.avg_win / Math.abs(data.avg_loss)).toFixed(2) + "x" : "—";
   const barW   = Math.min(100, Math.max(2, (data.capital_now / Math.max(data.capital_start, data.capital_now, 1)) * 100));
@@ -2035,8 +2036,8 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
         </div>
         <div className="px-3 py-3 text-center">
           <div className="text-[9px] uppercase text-slate-600 mb-1">Unrealized</div>
-          <div className={`text-base font-bold font-mono ${data.live_unrealized > 0 ? "text-emerald-400" : data.live_unrealized < 0 ? "text-red-400" : "text-slate-500"}`}>
-            {data.live_unrealized !== 0 ? (unrPos ? "+" : "") + data.live_unrealized.toFixed(2) : "—"}
+          <div className={`text-base font-bold font-mono ${liveUnrealized > 0 ? "text-emerald-400" : liveUnrealized < 0 ? "text-red-400" : "text-slate-500"}`}>
+            {liveUnrealized !== 0 ? (unrPos ? "+" : "") + liveUnrealized.toFixed(2) : "—"}
           </div>
           <div className="text-[9px] text-slate-600 mt-0.5">{data.open_trades > 0 ? `${data.open_trades} pos` : "flat"}</div>
         </div>
