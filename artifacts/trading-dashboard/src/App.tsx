@@ -454,19 +454,17 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 }
 
 function AnalysisPage() {
-  const [expert,       setExpert]       = useState<ExpertFilter>("all");
   const [data,         setData]         = useState<AnalysisData | null>(null);
   const [periods,      setPeriods]      = useState<PeriodBreakdown | null>(null);
   const [loading,      setLoading]      = useState(true);
   const [geoBreakdown, setGeoBreakdown] = useState<AnalysisData | null>(null);
   const [geoRecentTrades, setGeoRecentTrades] = useState<IndividualTrade[]>([]);
 
-  // Filtered data — re-fetches when expert tab changes
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      fetch(`${BASE}/api/analysis?expert=${expert}`).then(r => r.json()),
-      fetch(`${BASE}/api/stats/periods?expert=${expert}`).then(r => r.json()),
+      fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json()),
+      fetch(`${BASE}/api/stats/periods?expert=geo`).then(r => r.json()),
     ])
       .then(([d, p]) => {
         setData((d as AnalysisData).total_trades !== undefined ? d as AnalysisData : null);
@@ -474,7 +472,7 @@ function AnalysisPage() {
       })
       .catch(() => { setData(null); setPeriods(null); })
       .finally(() => setLoading(false));
-  }, [expert]);
+  }, []);
 
   // Geo breakdown — fetched once
   useEffect(() => {
@@ -498,9 +496,7 @@ function AnalysisPage() {
     return () => clearInterval(id);
   }, []);
 
-  const accentLabel = expert === "geo"
-    ? <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>
-    : <span className="text-slate-400">Tous les trades</span>;
+  const accentLabel = <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>;
 
   // ── Hold duration formatter ────────────────────────────────────────────────
   const fmtHold = (min: number) =>
@@ -667,9 +663,9 @@ function AnalysisPage() {
   if (loading) {
     return (
       <div className="p-4 sm:p-6 space-y-4">
-        <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <div className="flex items-center gap-3">{accentLabel}</div>
         <ExpertBreakdownSection />
-        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">Chargement…</div>
+        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">Loading…</div>
       </div>
     );
   }
@@ -677,10 +673,10 @@ function AnalysisPage() {
   if (!data || data.total_trades === 0) {
     return (
       <div className="p-4 sm:p-6 space-y-4">
-        <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
+        <div className="flex items-center gap-3">{accentLabel}</div>
         <ExpertBreakdownSection />
         <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">
-          Aucun trade fermé pour {expert === "all" ? "ce portefeuille" : "Geo V4 ETH/USD"} — l'analyse apparaîtra après le premier trade.
+          No closed trades for Geo V4 ETH/USD — analysis will appear after the first trade.
         </div>
       </div>
     );
@@ -701,7 +697,6 @@ function AnalysisPage() {
   return (
     <div className="p-4 sm:p-6 space-y-6">
       <div className="flex items-center gap-3 flex-wrap">
-        <ExpertPills value={expert} onChange={setExpert} />
         {accentLabel}
       </div>
       <ExpertBreakdownSection />
@@ -1076,7 +1071,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
   const [tradeView,        setTradeView]        = useState<"grouped" | "individual">("individual");
   const [closedIndividual, setClosedIndividual] = useState<IndividualTrade[]>([]);
-  const [expertFilter,     setExpertFilter]     = useState<ExpertFilter>("all");
+  const [expertFilter] = useState<ExpertFilter>("geo");
   const [selectedTradeId,  setSelectedTradeId]  = useState<string | null>(null);
   const [openDbTrades,     setOpenDbTrades]     = useState<OpenDbTrade[]>([]);
 
@@ -1225,21 +1220,6 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
               <button key={p.key} onClick={() => setClosedPeriod(p.key)}
                 className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${closedPeriod === p.key ? "bg-sky-600/30 text-sky-400" : "text-slate-500 hover:text-slate-300"}`}>
                 {p.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Expert filter pills */}
-          <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
-            {([["all","All"],["geo","Geo V4"]] as [ExpertFilter,string][]).map(([key,label]) => (
-              <button key={key} onClick={() => setExpertFilter(key)}
-                className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
-                  expertFilter === key
-                    ? key === "geo" ? "bg-violet-600/30 text-violet-400"
-                    : "bg-slate-600/40 text-slate-300"
-                    : "text-slate-500 hover:text-slate-300"
-                }`}>
-                {label}
               </button>
             ))}
           </div>
@@ -1726,7 +1706,7 @@ function ExpertPills({ value, onChange }: { value: ExpertFilter; onChange: (v: E
             ? e === "geo" ? "bg-violet-900/60 text-violet-400 shadow-sm"
             : "bg-slate-700 text-slate-200"
             : "text-slate-500 hover:text-slate-300"}`}>
-          {e === "all" ? "Tous" : "📐 Geo V4"}
+          {e === "all" ? "All" : "📐 Geo V4"}
         </button>
       ))}
     </div>
@@ -1994,7 +1974,7 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
           <div className={`text-lg font-bold font-mono ${retPos ? "text-emerald-400" : "text-red-400"}`}>
             {retPos ? "+" : ""}{data.capital_return.toFixed(2)}%
           </div>
-          <div className="text-[9px] text-slate-600">retour capital</div>
+          <div className="text-[9px] text-slate-600">capital return</div>
         </div>
       </div>
 
@@ -2002,18 +1982,18 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
       <div className="px-4 pt-3 pb-3 border-b border-slate-700/20">
         <div className="flex items-end justify-between mb-2">
           <div>
-            <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-0.5">Capital actuel</div>
+            <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-0.5">Current Capital</div>
             <div className={`text-2xl font-bold font-mono ${capPos ? "text-emerald-400" : "text-red-400"}`}>
               ${data.capital_now.toFixed(2)}
             </div>
           </div>
           <div className="text-right space-y-0.5">
             <div>
-              <span className="text-[9px] text-slate-600">Départ </span>
+              <span className="text-[9px] text-slate-600">Start </span>
               <span className="text-xs font-mono text-slate-400">${data.capital_start.toFixed(0)}</span>
             </div>
             <div>
-              <span className="text-[9px] text-slate-600">Réalisé </span>
+              <span className="text-[9px] text-slate-600">Realized </span>
               <span className={`text-xs font-mono font-semibold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
                 {pnlPos ? "+" : ""}${data.total_pnl.toFixed(2)}
               </span>
@@ -2060,14 +2040,14 @@ function ExpertCard({ name, icon, data, tagline, accent }: {
   );
 }
 
-function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis, experts = {} }: {
+function HomePage({ trades, decisions, stats, positions, portfolioValue, account, analysis, experts = {}, capitalBase = INITIAL_CAPITAL }: {
   trades: Trade[]; decisions: Decision[];
   stats: StatsResponse | null; positions: Position[]; portfolioValue: number;
   account: AccountResponse | null; analysis: AnalysisData | null;
-  experts?: ExpertsResponse;
+  experts?: ExpertsResponse; capitalBase?: number;
 }) {
-  const totalReturn    = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
-  const grossPnl       = portfolioValue - INITIAL_CAPITAL;
+  const totalReturn    = capitalBase > 0 ? ((portfolioValue - capitalBase) / capitalBase) * 100 : 0;
+  const grossPnl       = portfolioValue - capitalBase;
   const now            = new Date();
   const mDecisions     = decisions.filter(d => {
     const dt = new Date(d.decided_at.includes("T") ? d.decided_at : d.decided_at.replace(" ", "T") + "Z");
@@ -2077,7 +2057,7 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
   const totalCost      = REPLIT_MONTHLY_COST + claudeCost;
   const netPnl         = grossPnl - totalCost;
   const unrealizedTotal = positions.reduce((s, p) => s + p.unrealized_pl, 0);
-  const allocatedPct    = positions.reduce((s, p) => s + p.cost_basis, 0) / Math.max(portfolioValue, INITIAL_CAPITAL) * 100;
+  const allocatedPct    = positions.reduce((s, p) => s + p.cost_basis, 0) / Math.max(portfolioValue, capitalBase) * 100;
 
   const kpis = [
     {
@@ -2128,7 +2108,7 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
           {totalCap > 0 && (
             <div className="text-right">
               <div className="text-[9px] text-slate-600 uppercase tracking-wider">Total</div>
-              <div className={`text-base font-bold font-mono ${totalCap >= INITIAL_CAPITAL ? "text-emerald-400" : "text-red-400"}`}>
+              <div className={`text-base font-bold font-mono ${totalCap >= capitalBase ? "text-emerald-400" : "text-red-400"}`}>
                 ${totalCap.toFixed(2)}
               </div>
             </div>
@@ -2146,8 +2126,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
       {/* ── Portfolio strip ─────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Portefeuille ⚡</div>
-          <div className={`text-base font-bold font-mono ${portfolioValue >= INITIAL_CAPITAL ? "text-emerald-400" : "text-red-400"}`}>
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Portfolio ⚡</div>
+          <div className={`text-base font-bold font-mono ${portfolioValue >= capitalBase ? "text-emerald-400" : "text-red-400"}`}>
             ${portfolioValue.toFixed(0)}
           </div>
           <div className={`text-[9px] mt-0.5 ${totalReturn >= 0 ? "text-emerald-600" : "text-red-600"}`}>
@@ -2159,17 +2139,17 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
           <div className={`text-base font-bold font-mono ${unrealizedTotal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
             {fmtPnl(unrealizedTotal)}
           </div>
-          <div className="text-[9px] text-slate-600 mt-0.5">{positions.length} pos ouvertes</div>
+          <div className="text-[9px] text-slate-600 mt-0.5">{positions.length} open pos</div>
         </div>
         <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Cash dispo</div>
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Cash Available</div>
           <div className="text-base font-bold font-mono text-slate-300">
             ${account ? account.cash.toFixed(0) : "—"}
           </div>
-          <div className="text-[9px] text-slate-600 mt-0.5">{allocatedPct.toFixed(1)}% déployé</div>
+          <div className="text-[9px] text-slate-600 mt-0.5">{allocatedPct.toFixed(1)}% deployed</div>
         </div>
         <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/30">
-          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Win rate global</div>
+          <div className="text-[9px] uppercase text-slate-600 tracking-wider mb-1">Global Win Rate</div>
           <div className={`text-base font-bold ${stats?.win_rate != null && stats.win_rate >= 50 ? "text-sky-400" : "text-amber-400"}`}>
             {stats?.win_rate != null ? stats.win_rate.toFixed(1) + "%" : "—"}
           </div>
@@ -2183,8 +2163,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
       {account?.positions_live && account.positions_live.length > 0 && (
         <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 overflow-hidden">
           <div className="px-4 py-2 border-b border-slate-700/30 flex items-center gap-2">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Positions ouvertes — Live</span>
-            <span className="text-[9px] text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">⚡ notre feed vs Alpaca</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Open Positions — Live</span>
+            <span className="text-[9px] text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">⚡ live feed vs Alpaca</span>
           </div>
           <div className="divide-y divide-slate-700/20">
             {account.positions_live.map(pos => {
@@ -2371,7 +2351,8 @@ export default function App() {
     : account?.portfolio_value && account.portfolio_value > 0
       ? account.portfolio_value
       : INITIAL_CAPITAL + closedPnl + unrealizedTotal;
-  const portfolioDelta  = ((portfolioValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100;
+  const capitalBase     = experts.geo_v4?.capital_start ?? INITIAL_CAPITAL;
+  const portfolioDelta  = capitalBase > 0 ? ((portfolioValue - capitalBase) / capitalBase) * 100 : 0;
   const allTrades       = status?.recent_trades ?? [];
 
   return (
@@ -2388,7 +2369,7 @@ export default function App() {
       />
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
-        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} experts={experts} />}
+        {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} experts={experts} capitalBase={capitalBase} />}
         {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} experts={experts} />}
         {activePage === "ANALYSIS" && <AnalysisPage />}
       </div>
