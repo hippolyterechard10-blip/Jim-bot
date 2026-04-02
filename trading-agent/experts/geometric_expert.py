@@ -109,7 +109,7 @@ class GeometricExpert:
         if confluence_score >= 4: return 0.90
         return 0.80
 
-    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown"):
+    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown", vix=None, dxy=None):
         import uuid
         from strategy import compute_indicators, is_good_stock_window, is_crypto_good_hours
 
@@ -461,6 +461,11 @@ class GeometricExpert:
                 f"size_mult={_regime_size_mult:.1f}x stop_pct={_stop_pct:.3f} threshold={_threshold}"
             )
 
+            # ── VIX override: tighten stop when fear is elevated
+            if vix is not None and vix > 25:
+                _stop_pct = 0.003
+                logger.info(f"[GEO] VIX={vix:.1f} > 25 → stop tightened to 0.3%")
+
             if total_score < _threshold:
                 logger.info(
                     f"[GEO] {symbol} — score {total_score:.1f} < threshold {_threshold} "
@@ -583,6 +588,11 @@ class GeometricExpert:
             capital_to_use *= _regime_size_mult
             if _regime_size_mult != 1.0:
                 logger.info(f"[GEO] 📊 Regime multiplier ×{_regime_size_mult:.2f} → capital=${capital_to_use:.0f}")
+
+            # ── DXY rising: reduce crypto long size (dollar strength headwind)
+            if dxy == "rising" and is_crypto and side == "long":
+                capital_to_use *= 0.7
+                logger.info(f"[GEO] DXY rising → crypto long size ×0.7 → capital=${capital_to_use:.0f}")
 
             if capital_to_use < 30:
                 logger.info(f"[GEO] {symbol} — capital deployment limit reached")

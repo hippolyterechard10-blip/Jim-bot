@@ -534,8 +534,10 @@ class Mastermind:
                     logger.info(f"[MASTERMIND] 🌙 Night window (02-06 UTC) — size modifier {self._size_modifier:.2f} × 0.40 = {_eff_modifier:.2f}")
                 _regime_str = self.regime.detect_regime()
                 logger.info(f"[MASTERMIND] 📊 Regime for geo evaluation: {_regime_str.upper()}")
+                _vix = self.regime._cache.get("vix")
+                _dxy = self.regime._cache.get("dxy")
                 for symbol in candidates:
-                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str)
+                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str, vix=_vix, dxy=_dxy)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 
