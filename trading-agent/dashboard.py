@@ -9,13 +9,12 @@ from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import config
 from memory import TradingMemory
-from analyzer import TradeAnalyzer
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 _memory: Optional[TradingMemory] = None
-_analyzer: Optional[TradeAnalyzer] = None
+_analyzer = None
 _scanner = None
 _regime  = None
 _agent   = None
