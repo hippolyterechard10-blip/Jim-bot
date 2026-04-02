@@ -34,10 +34,10 @@ except ImportError:
 # ── CONFIG PAR CLASSE ─────────────────────────────────────────────────────────
 
 ASSET_CONFIG = {
-    "ETH-USD":  {"class": "major", "target": 0.009, "pos_pct": 0.28, "max_simultaneous": 3},
-    "XRP-USD":  {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 2},
-    "AVAX-USD": {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 2},
-    "LINK-USD": {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 2},
+    "ETH-USD":  {"class": "major", "target": 0.009, "pos_pct": 0.28, "max_simultaneous": 1},
+    "XRP-USD":  {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 1},
+    "AVAX-USD": {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 1},
+    "LINK-USD": {"class": "alt",   "target": 0.010, "pos_pct": 0.20, "max_simultaneous": 1},
 }
 
 CAPITAL          = 500.0
@@ -202,7 +202,7 @@ def _zone_key(center):
 def backtest_symbol(symbol):
     cfg   = ASSET_CONFIG.get(symbol, ASSET_CONFIG["XRP-USD"])
     end   = datetime.now(timezone.utc)
-    start = end - timedelta(days=LOOKBACK_DAYS + 5)
+    start = end - timedelta(days=min(LOOKBACK_DAYS + 5, 58))
 
     print(f"\n    ▶ {symbol}")
     try:
