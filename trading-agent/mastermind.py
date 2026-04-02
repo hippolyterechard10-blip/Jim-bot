@@ -561,7 +561,7 @@ class Mastermind:
                 if _sentiment_alerts:
                     logger.warning(f"[MASTERMIND] ⚡ Sentiment alerts: {_sentiment_alerts}")
                 for symbol in candidates:
-                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str, vix=_vix, dxy=_dxy, sentiment_score=_sentiment_score, sentiment_alerts=_sentiment_alerts)
+                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 
@@ -577,9 +577,10 @@ class Mastermind:
         if self._is_paused():
             return
         self._detect_gappers()
-        # Manage open expert positions
+        # Manage pending limit orders and open positions
         try:
             self.gapper.manage_open_positions()
+            self.geometric.manage_pending_orders()
             self.geometric.manage_open_positions()
         except Exception as e:
             logger.error(f"[MASTERMIND] position management error: {e}")

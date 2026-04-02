@@ -1,46 +1,64 @@
 """
 GeometricExpert — Pilier 2 ($500 virtual pool)
-Metrics: Confluence score (1-5), Market structure, Timeframe alignment, RSI divergence.
-Stop: 1x ATR below level. Entry: rejection candle breakout.
+Session 2 avril 2026 — Réécriture 3 timeframes
+
+Philosophie:
+  PASS 1 — 1h  : bias directionnel (uptrend/downtrend/range)
+  PASS 2 — 15min: niveau S/R qualité (testé ≥ 2×), nearest-first
+  PASS 3 — 5min : confirmation (momentum vers niveau + RSI + volume + VWAP)
+  PASS 4 — Stop : swing low/high 5min le plus récent, fallback -0.3%
+  PASS 5 — Target: prochaine S/R 5min, fallback +0.5%
+
+Ordre: limit au niveau → bracket pour stocks, watchdog pour crypto.
 """
-import logging, json
+import logging, json, uuid
+import numpy as np
 import config
 
 logger = logging.getLogger(__name__)
 
 
 def _smart_round(price: float) -> float:
-    """Precision-aware rounding — handles micro-priced tokens like SHIB ($0.000009)."""
-    if price >= 100:
-        return round(price, 2)
-    elif price >= 1:
-        return round(price, 4)
-    elif price >= 0.01:
-        return round(price, 6)
-    elif price >= 0.0001:
-        return round(price, 8)
-    else:
-        return round(price, 10)
+    if price >= 100:      return round(price, 2)
+    elif price >= 1:      return round(price, 4)
+    elif price >= 0.01:   return round(price, 6)
+    elif price >= 0.0001: return round(price, 8)
+    else:                 return round(price, 10)
 
 
 def _smart_decimals(price: float) -> int:
-    """Returns the decimal places _smart_round would use — for log format strings."""
-    if price >= 100:    return 2
-    elif price >= 1:    return 4
-    elif price >= 0.01: return 6
+    if price >= 100:      return 2
+    elif price >= 1:      return 4
+    elif price >= 0.01:   return 6
     elif price >= 0.0001: return 8
-    else: return 10
+    else:                 return 10
+
+
+def _rsi(prices: np.ndarray, period: int = 14) -> float:
+    if len(prices) < period + 1:
+        return 50.0
+    deltas = np.diff(prices)
+    gains  = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_g  = gains[-period:].mean()
+    avg_l  = losses[-period:].mean()
+    if avg_l == 0:
+        return 100.0
+    return 100 - (100 / (1 + avg_g / avg_l))
+
 
 class GeometricExpert:
     def __init__(self, broker, memory, geometry, regime, correlations):
-        self.broker = broker
-        self.memory = memory
-        self.geometry = geometry
-        self.regime = regime
+        self.broker       = broker
+        self.memory       = memory
+        self.geometry     = geometry
+        self.regime       = regime
         self.correlations = correlations
-        self._candidates = []
+        self._candidates  = []
         self._high_water: dict = {}
-        self._low_water: dict = {}
+        self._low_water:  dict = {}
+        # Pending limit orders: symbol → {order_id, level, side, stop, target, qty, ...}
+        self._pending_orders: dict = {}
 
     def add_candidate(self, symbol: str):
         if symbol not in self._candidates:
@@ -51,15 +69,16 @@ class GeometricExpert:
         self._candidates.clear()
         return c
 
-    def _cancel_stop_order(self, stop_order_id: str | None, symbol: str = ""):
-        """Cancel an Alpaca stop order before placing a closing order."""
-        if not stop_order_id:
+    def _cancel_order(self, order_id: str | None, symbol: str = ""):
+        if not order_id:
             return
         try:
-            self.broker.api.cancel_order(stop_order_id)
-            logger.info(f"[GEO] 🛑 Cancelled stop order {stop_order_id} for {symbol}")
-        except Exception as _ce:
-            logger.debug(f"[GEO] cancel_order {stop_order_id} for {symbol}: {_ce}")
+            self.broker.api.cancel_order(order_id)
+            logger.info(f"[GEO] 🛑 Cancelled order {order_id} for {symbol}")
+        except Exception as e:
+            logger.debug(f"[GEO] cancel_order {order_id}: {e}")
+
+    # ── Capital ───────────────────────────────────────────────────────────────
 
     def get_deployed_capital(self) -> float:
         try:
@@ -73,14 +92,14 @@ class GeometricExpert:
                     total += float(t.get("entry_price", 0)) * float(t.get("qty", 0))
             return total
         except Exception as e:
-            logger.error(f"GeometricExpert.get_deployed_capital: {e}")
+            logger.error(f"[GEO] get_deployed_capital: {e}")
             return config.STRATEGY_CAPITAL["geometric"]
 
     def get_available_capital(self) -> float:
         try:
             import sqlite3
             base = config.STRATEGY_CAPITAL["geometric"]
-            if not self.memory or not hasattr(self.memory, 'db_path'):
+            if not self.memory or not hasattr(self.memory, "db_path"):
                 return max(0.0, base - self.get_deployed_capital())
             conn = sqlite3.connect(self.memory.db_path, timeout=5)
             row = conn.execute("""
@@ -88,41 +107,31 @@ class GeometricExpert:
                 WHERE status = 'closed'
                   AND json_extract(market_context, '$.strategy_source') = 'geometric'
                   AND close_reason != 'synced_close'
-                  AND (json_extract(market_context, '$.source') IS NULL
-                       OR json_extract(market_context, '$.source') NOT IN
-                          ('order_sync', 'order_sync_synthetic'))
             """).fetchone()
             conn.close()
             closed_pnl = float(row[0]) if row and row[0] is not None else 0.0
-            pool = base + closed_pnl
-            return max(0.0, pool - self.get_deployed_capital())
+            return max(0.0, base + closed_pnl - self.get_deployed_capital())
         except Exception as e:
-            logger.error(f"GeometricExpert.get_available_capital: {e}")
+            logger.error(f"[GEO] get_available_capital: {e}")
             return max(0.0, config.STRATEGY_CAPITAL["geometric"] - self.get_deployed_capital())
 
     def has_capital(self) -> bool:
-        return self.get_available_capital() >= 50.0
+        return self.get_available_capital() >= 30.0
 
-    def get_capital_pct_for_setup(self, confluence_score: int) -> float:
-        """Capital deployed based on setup quality."""
-        if confluence_score >= 5: return 0.95
-        if confluence_score >= 4: return 0.90
-        return 0.80
+    # ── EVALUATE — cœur de la stratégie ──────────────────────────────────────
 
-    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown", vix=None, dxy=None, sentiment_score: int = 0, sentiment_alerts=None):
-        import uuid
-        from strategy import compute_indicators, is_good_stock_window, is_crypto_good_hours
+    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown"):
+        from strategy import is_good_stock_window, is_crypto_good_hours
 
         is_crypto = "/" in symbol
 
-        # Session check
+        # Garde session
         if not is_crypto and not is_good_stock_window():
             return
         if is_crypto and not is_crypto_good_hours():
             return
 
-        # Stocks: block entries within 10 minutes of 16:00 ET close,
-        # and before 9:35 ET (first complete 1-min candle not yet formed)
+        # Garde fermeture stocks (pas de nouvel ordre dans les 15 min avant 16h)
         if not is_crypto:
             import datetime as _dt
             try:
@@ -132,707 +141,380 @@ class GeometricExpert:
                 import zoneinfo as _zi
                 _ET = _zi.ZoneInfo("America/New_York")
             _now_et = _dt.datetime.now(_ET)
-            if _now_et.hour == 15 and _now_et.minute >= 50:
-                logger.info(f"[GEO] {symbol} — within 10 min of close (15:{_now_et.minute} ET), skip")
-                return
-            if _now_et.hour == 9 and _now_et.minute < 35:
-                logger.info(f"[GEO] {symbol} — pre-open (9:{_now_et.minute:02d} ET), skip stocks")
+            if _now_et.hour == 15 and _now_et.minute >= 45:
                 return
 
-        logger.info(f"[GEO] ✅ Session OK: {symbol}, evaluating...")
-        logger.info(f"[GEO] 🔍 Evaluating {symbol} — crypto={is_crypto}")
-
-        # Double-entry guard — block re-entry on already-open geometric position
-        # Layer 1: DB check
+        # Garde double-entrée
         def _ctx(t):
             raw = t.get("market_context") or {}
             if isinstance(raw, str):
-                try:
-                    import json as _json
-                    return _json.loads(raw)
-                except Exception:
-                    return {}
+                try: return json.loads(raw)
+                except: return {}
             return raw
+
         open_syms = {
             t["symbol"]
             for t in self.memory.get_open_trades()
             if _ctx(t).get("strategy_source") == "geometric"
         }
         if symbol in open_syms:
-            logger.debug(f"[GEO GUARD] {symbol} already open (DB) → skip")
+            logger.debug(f"[GEO] {symbol} already open → skip")
             return
 
-        # Layer 2: Live Alpaca positions check (catches cases where log_trade_open failed)
+        _regime = (regime or "unknown").lower()
+
+        # ── PASS 1: Bias 1h ───────────────────────────────────────────────────
+        bars_1h = self.broker.get_bars(symbol, "1Hour", limit=50)
+        if bars_1h is None or bars_1h.empty or len(bars_1h) < 10:
+            logger.debug(f"[GEO] {symbol} — pas de données 1h")
+            return
+
+        highs_1h  = bars_1h["high"].tolist()
+        lows_1h   = bars_1h["low"].tolist()
+
+        # Structure sur les 4 dernières bougies 1h
+        hh = highs_1h[-1] > highs_1h[-4]
+        hl = lows_1h[-1]  > lows_1h[-4]
+        lh = highs_1h[-1] < highs_1h[-4]
+        ll = lows_1h[-1]  < lows_1h[-4]
+
+        if hh and hl:
+            structure_1h  = "uptrend"
+            allowed_sides = ["long"]
+        elif lh and ll:
+            structure_1h  = "downtrend"
+            # Crypto: pas de short sur Alpaca spot
+            allowed_sides = [] if is_crypto else ["short"]
+        else:
+            structure_1h  = "range"
+            allowed_sides = ["long"] if is_crypto else ["long", "short"]
+
+        # Filtre régime
+        if _regime == "panic":
+            allowed_sides = [s for s in allowed_sides if s != "long"]
+        if _regime == "bear" and structure_1h != "range":
+            allowed_sides = [s for s in allowed_sides if s != "long"]
+
+        if not allowed_sides:
+            logger.debug(f"[GEO] {symbol} — aucun side valide (structure={structure_1h} regime={_regime})")
+            return
+
+        # ── PASS 2: Niveau 15min ──────────────────────────────────────────────
+        bars_15m = self.broker.get_bars(symbol, "15Min", limit=100)
+        if bars_15m is None or bars_15m.empty or len(bars_15m) < 20:
+            logger.debug(f"[GEO] {symbol} — pas de données 15min")
+            return
+
+        current_price = float(bars_15m["close"].iloc[-1])
+        swing_15m     = self.geometry.find_swing_levels(bars_15m, min_tests=2)
+
+        chosen_side  = None
+        chosen_level = None
+
+        for side in allowed_sides:
+            candidates = swing_15m["supports"] if side == "long" else swing_15m["resistances"]
+            for lvl_info in candidates:
+                lvl  = lvl_info["level"]
+                dist = (
+                    (current_price - lvl) / current_price if side == "long"
+                    else (lvl - current_price) / current_price
+                )
+                # Prix doit approcher (0.1% à 1.5% du niveau), pas déjà passé à travers
+                if 0.001 <= dist <= 0.015:
+                    chosen_side  = side
+                    chosen_level = lvl
+                    logger.info(
+                        f"[GEO] {symbol} — niveau 15min trouvé: {side} @ {lvl:.6f} "
+                        f"(dist={dist*100:.2f}% tests={lvl_info['tests']})"
+                    )
+                    break
+            if chosen_level:
+                break
+
+        if not chosen_level:
+            logger.debug(f"[GEO] {symbol} — aucun niveau 15min qualifié")
+            return
+
+        # ── PASS 3: Confirmation 5min ─────────────────────────────────────────
+        bars_5m = self.broker.get_bars(symbol, "5Min", limit=30)
+        if bars_5m is None or bars_5m.empty or len(bars_5m) < 10:
+            logger.debug(f"[GEO] {symbol} — pas de données 5min")
+            return
+
+        closes_5m  = bars_5m["close"].tolist()
+        volumes_5m = bars_5m["volume"].tolist()
+
+        # 1. Momentum vers le niveau (prix se dirige vers le support/résistance)
+        if len(closes_5m) >= 4:
+            moving_toward = (
+                (chosen_side == "long"  and closes_5m[-1] <= closes_5m[-4]) or
+                (chosen_side == "short" and closes_5m[-1] >= closes_5m[-4])
+            )
+            if not moving_toward:
+                logger.info(f"[GEO] {symbol} — prix ne se dirige pas vers le niveau, skip")
+                return
+
+        # 2. RSI 5min — ni rebond déjà amorcé, ni crash en cours
+        rsi_5m = _rsi(np.array(closes_5m), 14)
+        rsi_valid = (
+            (chosen_side == "long"  and 25 <= rsi_5m <= 55) or
+            (chosen_side == "short" and 45 <= rsi_5m <= 75)
+        )
+        if not rsi_valid:
+            logger.info(f"[GEO] {symbol} — RSI5m={rsi_5m:.1f} hors plage pour {chosen_side}, skip")
+            return
+
+        # 3. Volume minimum — marché actif
+        avg_vol = sum(volumes_5m[-20:]) / min(20, len(volumes_5m))
+        if avg_vol > 0 and volumes_5m[-1] < avg_vol * 0.3:
+            logger.info(f"[GEO] {symbol} — volume trop bas, skip")
+            return
+
+        # 4. VWAP confluence (bonus — pas bloquant)
+        vwap           = self.geometry.calculate_vwap(bars_5m)
+        vwap_conf      = vwap > 0 and abs(chosen_level - vwap) / vwap < 0.002
+        if vwap_conf:
+            logger.info(f"[GEO] {symbol} ✨ confluence VWAP @ {vwap:.6f}")
+
+        # ── PASS 4: Stop ──────────────────────────────────────────────────────
+        stop_price = self.geometry.find_5min_stop(bars_5m, chosen_side, chosen_level)
+
+        # ── PASS 5: Target ────────────────────────────────────────────────────
+        swing_5m     = self.geometry.find_swing_levels(bars_5m, min_tests=1)
+        target_price = None
+
+        res_candidates = swing_5m["resistances"] if chosen_side == "long" else swing_5m["supports"]
+        for lvl_info in res_candidates:
+            lvl      = lvl_info["level"]
+            dist_pct = (
+                (lvl - chosen_level) / chosen_level if chosen_side == "long"
+                else (chosen_level - lvl) / chosen_level
+            )
+            # Target naturel entre +0.3% et +1.5% du niveau d'entrée
+            if 0.003 <= dist_pct <= 0.015:
+                target_price = lvl
+                break
+
+        # Fallback +0.5%
+        if not target_price:
+            target_price = _smart_round(
+                chosen_level * 1.005 if chosen_side == "long" else chosen_level * 0.995
+            )
+
+        # Vérification R:R minimum 1.2:1
+        risk   = abs(chosen_level - stop_price)
+        reward = abs(float(target_price) - chosen_level)
+        if risk <= 0 or reward / risk < 1.2:
+            rr_val = round(reward / risk, 1) if risk > 0 else 0
+            logger.info(f"[GEO] {symbol} — R:R={rr_val}x insuffisant, skip")
+            return
+
+        rr_val = round(reward / risk, 1)
+
+        # ── Capital et sizing ─────────────────────────────────────────────────
+        available = self.get_available_capital()
+        if available < 30:
+            logger.info(f"[GEO] {symbol} — capital insuffisant (${available:.0f})")
+            return
+
+        deploy = min(available, config.STRATEGY_CAPITAL["geometric"] * 0.28)
+        deploy *= size_modifier
+        if _regime == "bear":   deploy *= 0.6
+        if _regime == "choppy": deploy *= 0.7
+
+        qty = deploy / chosen_level
         if not is_crypto:
-            try:
-                live_pos_syms = {p.symbol for p in (self.broker.get_positions() or [])}
-                if symbol in live_pos_syms:
-                    logger.info(f"[GEO GUARD] {symbol} already open (Alpaca live) → skip")
-                    return
-            except Exception as _pe:
-                logger.debug(f"[GEO GUARD] Alpaca position check error: {_pe}")
+            qty = max(1, int(qty))
+        else:
+            qty = round(qty, 6)
 
-        # Get bars — 1-min for entry, 1-hour for structure
-        bars_1m = self.broker.get_bars(symbol, "1Min", limit=50)
-        logger.info(f"[GEO] bars_1m: {'OK' if bars_1m is not None and not bars_1m.empty else 'NONE/EMPTY'} for {symbol}")
-        if bars_1m is None or bars_1m.empty or len(bars_1m) < 20:
+        if qty * chosen_level < 20:
+            logger.info(f"[GEO] {symbol} — position trop petite")
             return
 
+        # ── Garde ordre pending doublon ────────────────────────────────────────
+        if symbol in self._pending_orders:
+            existing_level = self._pending_orders[symbol].get("level", 0)
+            if existing_level and abs(existing_level - chosen_level) / chosen_level < 0.005:
+                logger.debug(f"[GEO] {symbol} — pending déjà au niveau {existing_level:.6f}")
+                return
+            # Niveau changé → annuler l'ancien
+            self._cancel_order(self._pending_orders[symbol].get("order_id"), symbol)
+            del self._pending_orders[symbol]
+            logger.info(f"[GEO] {symbol} — niveau déplacé, remplacement du pending")
+
+        # ── Placement de l'ordre limit ────────────────────────────────────────
+        _dec  = _smart_decimals(chosen_level)
+        _pfmt = f".{_dec}f"
+
+        logger.info(
+            f"[GEO] 📋 LIMIT {chosen_side.upper()}: {symbol} @ {chosen_level:{_pfmt}} | "
+            f"stop={stop_price:{_pfmt}} | target={float(target_price):{_pfmt}} | "
+            f"R:R={rr_val}x | 1h={structure_1h} | RSI5m={rsi_5m:.0f} | "
+            f"VWAP={'✨' if vwap_conf else '—'} | regime={_regime}"
+        )
+
+        order_id = None
         try:
-            closes_1m  = bars_1m["close"].tolist()
-            highs_1m   = bars_1m["high"].tolist()
-            lows_1m    = bars_1m["low"].tolist()
-            opens_1m   = bars_1m["open"].tolist()
-            volumes_1m = bars_1m["volume"].tolist()
-            current_price = closes_1m[-1]
-            _momentum_threshold = -0.03 if is_crypto else -0.015
-            momentum_30m = (closes_1m[-1] - closes_1m[-30]) / closes_1m[-30] if len(closes_1m) >= 30 else None
-
-            # STEP 1 — Support/Resistance via geometry.py
-            sr = self.geometry.find_support_resistance(closes_1m, highs_1m, lows_1m)
-            nearest_support    = sr["nearest_support"]
-            nearest_resistance = sr["nearest_resistance"]
-            support_score      = sr["support_score"]
-            resistance_score   = sr["resistance_score"]
-
-            # Determine which level we're near (within 1.5%)
-            dist_to_support    = (current_price - nearest_support) / current_price
-            dist_to_resistance = (nearest_resistance - current_price) / current_price
-
-            _is_crypto_here = "/" in symbol
-            _sr_decimals = 10 if nearest_support < 0.001 else (8 if nearest_support < 0.1 else (4 if nearest_support < 10 else 2))
-            _spfmt = f".{_sr_decimals}f"
-            logger.info(f"[GEO] SR levels: support={nearest_support:{_spfmt}} resistance={nearest_resistance:{_spfmt}} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f}")
-            logger.info(f"[GEO] {symbol} dist_sup={dist_to_support:.3f} dist_res={dist_to_resistance:.3f} (threshold 0.015)")
-
-            if dist_to_support <= 0.015:
-                side        = "long"
-                level       = nearest_support
-                level_score = support_score
-            elif dist_to_resistance <= 0.015:
-                side        = "short"
-                level       = nearest_resistance
-                level_score = resistance_score
-            else:
-                logger.info(f"[GEO] {symbol} — not near any key level, skip")
-                return
-
-            # Crypto shorts not supported on Alpaca spot
-            if side == "short" and is_crypto:
-                logger.debug(f"[GEO] {symbol} — crypto short not supported on Alpaca spot, skip")
-                return
-
-            # ── 4h swing point validation — multi-timeframe confluence gate
-            # The 1-min level must align with a real 4h swing high/low (within 0.5%).
-            # A level that only appears on 1-min bars is noise, not institutional support.
-            # broker.get_bars("4Hour") only returns today's bars (≤3); use direct request
-            # with a 5-day start so we get ~30 bars worth of real swing history.
-            _bars4h = None
-            try:
-                import requests as _rq
-                import datetime as _dt4h
-                import pandas as _pd4h
-                _start_4h = (_dt4h.datetime.utcnow() - _dt4h.timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                _qs4h = f"symbols={symbol}&timeframe=4Hour&limit=30&start={_start_4h}&sort=desc"
-                _r4h = _rq.get(
-                    f"https://data.alpaca.markets/v1beta3/crypto/us/bars?{_qs4h}",
-                    headers=self.broker._headers,
-                    timeout=10,
-                )
-                if _r4h.ok:
-                    _raw4h = _r4h.json().get("bars", {}).get(symbol, [])
-                    if _raw4h and len(_raw4h) >= 5:
-                        _df4h = _pd4h.DataFrame(_raw4h)
-                        _df4h["timestamp"] = _pd4h.to_datetime(_df4h["t"])
-                        _df4h = _df4h.sort_values("timestamp")
-                        _df4h = _df4h.rename(columns={"h": "high", "l": "low"})
-                        _bars4h = _df4h
-            except Exception as _e4h:
-                logger.debug(f"[GEO] 4h bars fetch error: {_e4h}")
-
-            _bars4h_len = len(_bars4h) if _bars4h is not None else 0
-            if _bars4h_len >= 5:
-                _h4r = _bars4h["high"].tolist()
-                _l4r = _bars4h["low"].tolist()
-                _swing_highs_4h = [
-                    _h4r[i] for i in range(1, len(_h4r) - 1)
-                    if _h4r[i] >= _h4r[i - 1] and _h4r[i] >= _h4r[i + 1]
-                ]
-                _swing_lows_4h = [
-                    _l4r[i] for i in range(1, len(_l4r) - 1)
-                    if _l4r[i] <= _l4r[i - 1] and _l4r[i] <= _l4r[i + 1]
-                ]
-                logger.info(
-                    f"[GEO] {symbol} — 4h bars={_bars4h_len} "
-                    f"swing_lows={len(_swing_lows_4h)} swing_highs={len(_swing_highs_4h)}"
-                )
-                if side == "long":
-                    _4h_ok = any(abs(level - sl) / level < 0.005 for sl in _swing_lows_4h)
-                else:
-                    _4h_ok = any(abs(level - sh) / level < 0.005 for sh in _swing_highs_4h)
-                if not _4h_ok:
-                    logger.info(f"[GEO] {symbol} — level not confirmed on 4h, skip")
-                    return
-                logger.info(f"[GEO] {symbol} — level confirmed on 4h ✓")
-            else:
-                logger.info(f"[GEO] {symbol} — 4h bars unavailable ({_bars4h_len} rows), skipping MTF gate")
-
-            # ── Pre-fetch 1D bars and compute HTF confluence levels (4h + daily swings)
-            _htf_bars1d = None
-            try:
-                _htf_bars1d = self.broker.get_bars(symbol, "1Day", limit=30)
-            except Exception:
-                pass
-            _htf_levels = {"htf_supports": [], "htf_resistances": []}
-            try:
-                _h4h = _bars4h["high"].tolist() if (_bars4h is not None and not _bars4h.empty) else None
-                _l4h = _bars4h["low"].tolist() if (_bars4h is not None and not _bars4h.empty) else None
-                _h1d = _htf_bars1d["high"].tolist() if (_htf_bars1d is not None and not _htf_bars1d.empty) else None
-                _l1d = _htf_bars1d["low"].tolist() if (_htf_bars1d is not None and not _htf_bars1d.empty) else None
-                _htf_levels = self.geometry.find_htf_levels(
-                    highs_4h=_h4h, lows_4h=_l4h, highs_1d=_h1d, lows_1d=_l1d
-                )
-                logger.info(
-                    f"[GEO] {symbol} — HTF levels: "
-                    f"{len(_htf_levels['htf_supports'])} supports, "
-                    f"{len(_htf_levels['htf_resistances'])} resistances"
-                )
-            except Exception as _e_htf:
-                logger.debug(f"[GEO] HTF levels error: {_e_htf}")
-
-            # ── RSI (1m) — for current-bar context; divergence uses 1h swings below
-            from strategy import _rsi
-            import numpy as np
-            prices_arr = np.array(closes_1m)
-            rsi_now = _rsi(prices_arr, 14)
-            logger.info(f"[GEO] RSI check OK: rsi_now={rsi_now:.1f}")
-
-            rsi_divergence = False  # overwritten below when 1h swing analysis confirms
-
-            # ── Market structure (1h) — computed first, used by Tier 1 and directional filter
-            bars_1h = self.broker.get_bars(symbol, "1Hour", limit=20)
-            if bars_1h is not None and not bars_1h.empty and len(bars_1h) >= 5:
-                closes_1h = bars_1h["close"].tolist()
-                highs_1h  = bars_1h["high"].tolist()
-                lows_1h   = bars_1h["low"].tolist()
-
-                # ── 1h RSI divergence — full-bar swing scan, 1m fallback if <2 found
-                if side == "long" and len(lows_1h) >= 5:
-                    try:
-                        # collect ALL swing lows across available 1h bars
-                        _sw_all = [
-                            i for i in range(2, len(lows_1h) - 2)
-                            if lows_1h[i] < lows_1h[i - 1] and lows_1h[i] < lows_1h[i + 1]
-                        ]
-                        if len(_sw_all) >= 2:
-                            _sw1, _sw2 = _sw_all[-2], _sw_all[-1]  # sw1=older, sw2=more recent
-                            _gap = _sw2 - _sw1
-                            if _gap >= 3 and lows_1h[_sw2] < lows_1h[_sw1]:
-                                _rsi_sw1 = _rsi(np.array(closes_1h[:_sw1 + 1]), 14)
-                                _rsi_sw2 = _rsi(np.array(closes_1h[:_sw2 + 1]), 14)
-                                if _rsi_sw2 > _rsi_sw1:
-                                    rsi_divergence = True
-                                    logger.info(
-                                        f"[GEO] 1h RSI divergence: price "
-                                        f"{lows_1h[_sw1]:.4f}→{lows_1h[_sw2]:.4f} (lower) "
-                                        f"RSI {_rsi_sw1:.1f}→{_rsi_sw2:.1f} (higher) ✅"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"[GEO] {symbol} — no 1h RSI div "
-                                        f"(RSI {_rsi_sw1:.1f}→{_rsi_sw2:.1f} not higher)"
-                                    )
-                            else:
-                                logger.info(
-                                    f"[GEO] {symbol} — no 1h RSI div "
-                                    f"(gap={_gap} bars, lower_low={lows_1h[_sw2] < lows_1h[_sw1]})"
-                                )
-                        else:
-                            # fewer than 2 swing lows on 1h — fall back to 1m window
-                            _rsi_prev_1m = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
-                            rsi_divergence = (
-                                closes_1m[-1] < closes_1m[-10] and rsi_now > _rsi_prev_1m
-                            )
-                            logger.debug(
-                                f"[GEO] {symbol} — <2 1h swing lows found "
-                                f"({len(_sw_all)}), 1m fallback: rsi_div={rsi_divergence}"
-                            )
-                    except Exception as _e_div:
-                        logger.debug(f"[GEO] 1h divergence error: {_e_div} — using 1m fallback")
-                        try:
-                            _rsi_prev_1m = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
-                            rsi_divergence = (
-                                closes_1m[-1] < closes_1m[-10] and rsi_now > _rsi_prev_1m
-                            )
-                        except Exception:
-                            rsi_divergence = False
-                if rsi_divergence:
-                    logger.info(f"[GEO] {symbol} — RSI divergence detected!")
-
-                hh = highs_1h[-1] > highs_1h[-3]
-                hl = lows_1h[-1]  > lows_1h[-3]
-                lh = highs_1h[-1] < highs_1h[-3]
-                ll = lows_1h[-1]  < lows_1h[-3]
-
-                if hh and hl:
-                    structure = "uptrend"
-                elif lh and ll:
-                    structure = "downtrend"
-                else:
-                    structure = "range"
-
-                if structure == "uptrend" and side == "short":
-                    _current_regime = (regime or "unknown").lower()
-                    if _current_regime in ("bull", "panic"):
-                        logger.info(f"[GEO] SKIP: short in uptrend during {_current_regime}")
-                        return
-                    elif rsi_divergence:
-                        logger.info(f"[GEO] counter-trend short allowed in {_current_regime}")
-                    else:
-                        logger.info(f"[GEO] {symbol} — uptrend without RSI divergence, skip short")
-                        return
-
-                if structure == "downtrend" and side == "long":
-                    _current_regime = (regime or "unknown").lower()
-                    if _current_regime in ("bear", "panic"):
-                        logger.info(f"[GEO] SKIP: long in downtrend during {_current_regime}")
-                        return
-                    elif rsi_divergence:
-                        logger.info(f"[GEO] counter-trend long allowed in {_current_regime}")
-                    else:
-                        logger.info(f"[GEO] {symbol} — downtrend without RSI divergence, skip long")
-                        return
-            else:
-                structure = "unknown"
-
-            # ── TIER 1 — Core geometric quality (max 7)
-            tier1 = 0
-
-            if level_score >= 6:
-                logger.info(f"[GEO] {symbol} — level exhausted ({level_score} tests), skip")
-                return
-            if level_score >= 4:
-                tier1 += 1
-            if level_score >= 2:
-                tier1 += 2
-            if structure != "unknown":
-                tier1 += 2
-            if rsi_divergence:
-                tier1 += 2
-
-            # ── HTF confluence: +2 if level aligns with 4h/daily swing, -1 if not
-            _ref_htf = _htf_levels["htf_supports"] if side == "long" else _htf_levels["htf_resistances"]
-            if _ref_htf:
-                if any(abs(level - htfl) / level < 0.005 for htfl in _ref_htf):
-                    tier1 += 2
-                    logger.info(f"[GEO] {symbol} — level confirmed on HTF (+2)")
-                else:
-                    tier1 -= 1
-                    logger.info(f"[GEO] {symbol} — level not on HTF (-1)")
-
-            if tier1 < 2:
-                logger.info(f"[GEO] {symbol} — Tier 1 too weak ({tier1}), skip")
-                return
-
-            _falling_knife_reduce = False  # resolved after total_score below
-
-            # ── TIER 2 — Precision filters (max 4.0)
-            tier2 = 0.0
-
-            try:
-                _vwap = sum(
-                    ((h + l + c) / 3) * v
-                    for h, l, c, v in zip(highs_1m, lows_1m, closes_1m, volumes_1m)
-                ) / max(sum(volumes_1m), 1)
-                if abs(level - _vwap) / _vwap < 0.003:
-                    tier2 += 1.5
-                    logger.info(f"[GEO] {symbol} — level near VWAP ${_vwap:.4f} (+1.5)")
-            except Exception:
-                pass
-
-            try:
-                if _bars4h is not None and not _bars4h.empty and len(_bars4h) >= 5:
-                    _h4 = _bars4h["high"].tolist()
-                    _l4 = _bars4h["low"].tolist()
-                    _hh4 = _h4[-1] > _h4[-3]
-                    _hl4 = _l4[-1]  > _l4[-3]
-                    _lh4 = _h4[-1] < _h4[-3]
-                    _ll4 = _l4[-1]  < _l4[-3]
-                    _s4 = "uptrend" if (_hh4 and _hl4) else "downtrend" if (_lh4 and _ll4) else "range"
-                    _aligned4 = (
-                        (side == "long"  and _s4 in ("uptrend", "range")) or
-                        (side == "short" and _s4 in ("downtrend", "range"))
-                    )
-                    if _aligned4:
-                        tier2 += 1.5
-                        logger.info(f"[GEO] {symbol} — 4h structure {_s4} aligns with {side} (+1.5)")
-            except Exception:
-                pass
-
-            try:
-                indicators = compute_indicators(closes_1m, volumes_1m)
-                if indicators.get("volume_ratio", 1) > 1.5:
-                    tier2 += 1
-                    logger.info(f"[GEO] {symbol} — volume ratio elevated (+1)")
-            except Exception:
-                pass
-
-            # ── TIER 3 — Context bonuses (max 3)
-            tier3 = 0
-
-            try:
-                magnitude = 10 ** max(0, len(str(int(level))) - 2)
-                if abs(level % magnitude) < magnitude * 0.02:
-                    tier3 += 1
-                    logger.info(f"[GEO] {symbol} — round number level (+1)")
-            except Exception:
-                pass
-
-            try:
-                _bars1d = _htf_bars1d if (_htf_bars1d is not None and not _htf_bars1d.empty) else self.broker.get_bars(symbol, "1Day", limit=3)
-                if _bars1d is not None and not _bars1d.empty and len(_bars1d) >= 2:
-                    _prev_high = float(_bars1d["high"].iloc[-2])
-                    _prev_low  = float(_bars1d["low"].iloc[-2])
-                    if (abs(level - _prev_high) / _prev_high < 0.005 or
-                            abs(level - _prev_low)  / _prev_low  < 0.005):
-                        tier3 += 1
-                        logger.info(f"[GEO] {symbol} — level near prev-day H/L (+1)")
-            except Exception:
-                pass
-
-            if structure == "range":
-                tier3 += 1
-                logger.info(f"[GEO] {symbol} — ranging market, optimal for geo (+1)")
-
-            # ── Sentiment bonus: very bullish news confirms longs
-            if sentiment_score >= 3 and side == "long":
-                tier3 += 1
-                logger.info(f"[GEO] {symbol} — very bullish sentiment score={sentiment_score} (+1)")
-
-            # ── Total score
-            total_score = tier1 + tier2 + tier3
-            logger.info(
-                f"[GEO] {symbol} — Score {total_score:.1f} "
-                f"(T1={tier1} T2={tier2:.1f} T3={tier3}) side={side}"
-            )
-
-            # ── Momentum filter: avoid falling knives (uses total_score)
-            if side == "long" and momentum_30m is not None and momentum_30m < _momentum_threshold:
-                if total_score >= 6 and rsi_divergence:
-                    _falling_knife_reduce = True
-                    logger.info(
-                        f"[GEO] {symbol} — counter-momentum long allowed, size ×0.6 "
-                        f"(30m={momentum_30m*100:.1f}%, score={total_score:.1f})"
-                    )
-                else:
-                    logger.info(
-                        f"[GEO] {symbol} — falling knife: {momentum_30m*100:.1f}% in 30m, skip "
-                        f"(score={total_score:.1f}, rsi_div={rsi_divergence})"
-                    )
-                    return
-
-            # ── Regime-aware parameters ───────────────────────────────────────
-            _regime = (regime or "unknown").lower()
-            if _regime == "bull":
-                _threshold        = 4 if side == "long" else 6
-                _regime_size_mult = 1.2 if side == "long" else 0.7
-                _stop_pct         = 0.005
-            elif _regime == "choppy":
-                _threshold        = 4
-                _regime_size_mult = 1.0
-                _stop_pct         = 0.005
-            elif _regime == "bear":
-                _threshold        = 6 if side == "long" else 3
-                _regime_size_mult = 0.7 if side == "long" else 1.2
-                _stop_pct         = 0.003
-            elif _regime == "panic":
-                if side == "long":
-                    logger.info(f"[GEO] {symbol} — regime=PANIC → no longs, skip")
-                    return
-                _threshold        = 7
-                _regime_size_mult = 0.5
-                _stop_pct         = 0.005
-            else:  # unknown / default
-                _threshold        = 4
-                _regime_size_mult = 1.0
-                _stop_pct         = 0.005 if is_crypto else 0.003
-
-            # Exceptional setup: score ≥ 8 restores normal size (keep tight stop for BEAR)
-            if total_score >= 8:
-                _regime_size_mult = 1.0
-
-            logger.info(
-                f"[GEO] {symbol} — regime={_regime} side={side} → "
-                f"size_mult={_regime_size_mult:.1f}x stop_pct={_stop_pct:.3f} threshold={_threshold}"
-            )
-
-            # ── VIX override: tighten stop when fear is elevated
-            if vix is not None and vix > 25:
-                _stop_pct = 0.003
-                logger.info(f"[GEO] VIX={vix:.1f} > 25 → stop tightened to 0.3%")
-
-            # ── News sentiment gate
-            if sentiment_alerts:
-                logger.info(f"[GEO] {symbol} — high-alert news detected → pause all entries")
-                return
-            if sentiment_score <= -3 and side == "long":
-                logger.info(f"[GEO] {symbol} — very_bearish news sentiment → no longs")
-                return
-
-            if total_score < _threshold:
-                logger.info(
-                    f"[GEO] {symbol} — score {total_score:.1f} < threshold {_threshold} "
-                    f"(regime={_regime}), skip"
-                )
-                return
-
-            requires_candle = total_score < 6
-
-            # ── Rejection candle check
-            candles = self.geometry.detect_candlestick_patterns(
-                opens_1m, highs_1m, lows_1m, closes_1m, volumes_1m
-            )
-            bullish_candles = {"HAMMER", "BULLISH_ENGULFING", "THREE_WHITE_SOLDIERS", "PIN_BAR"}
-            bearish_candles = {"SHOOTING_STAR", "BEARISH_ENGULFING", "THREE_BLACK_CROWS"}
-            detected_names  = {p["name"] for p in candles["patterns"]}
-
-            if requires_candle:
-                if side == "long" and not detected_names.intersection(bullish_candles):
-                    logger.info(
-                        f"[GEO] {symbol} — no bullish candle, "
-                        f"score {total_score:.1f} requires confirmation, skip"
-                    )
-                    return
-                if side == "short" and not detected_names.intersection(bearish_candles):
-                    logger.info(
-                        f"[GEO] {symbol} — no bearish candle, "
-                        f"score {total_score:.1f} requires confirmation, skip"
-                    )
-                    return
-            else:
-                logger.info(
-                    f"[GEO] {symbol} — score {total_score:.1f} ≥ 6, "
-                    f"candle requirement waived. Detected: {detected_names or 'none'}"
-                )
-
-            # STEP 6 — Level-based stop (the level holds or it doesn't — geometric principle)
-            # ATR on 1-min bars produces 5%+ wide stops; instead anchor to the level itself.
-            atr = self.geometry.calculate_atr(highs_1m, lows_1m, closes_1m, period=14)
-            is_crypto = "/" in symbol
-            # _stop_decimals drives the log format string only; _smart_round() handles actual rounding
-            _stop_decimals = _smart_decimals(level) if is_crypto else 2
-
-            if side == "long":
-                stop_price   = _smart_round(level * (1.0 - _stop_pct))
-                # Target must be at least 2× risk above entry; use resistance as ceiling
-                _min_target  = _smart_round(current_price + 2.0 * abs(current_price - stop_price))
-                _res_target  = _smart_round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1)
-                target_price = max(_min_target, _res_target)
-            else:
-                stop_price   = _smart_round(level * (1.0 + _stop_pct))
-                # Target must be at least 2× risk below entry; use support as floor
-                _min_target  = _smart_round(current_price - 2.0 * abs(stop_price - current_price))
-                _sup_target  = _smart_round(nearest_support + (nearest_resistance - nearest_support) * 0.1)
-                target_price = min(_min_target, _sup_target)
-
-            # R:R check — minimum 1:2
-            risk   = abs(current_price - stop_price)
-            reward = abs(target_price - current_price)
-            _pfmt = f".{_stop_decimals}f"
-            logger.info(
-                f"[GEO] {symbol} — stop={stop_price:{_pfmt}} "
-                f"({abs(1 - stop_price/level)*100:.2f}% from level) "
-                f"risk={risk:{_pfmt}} reward={reward:{_pfmt}} RR={reward/risk:.1f}x"
-            )
-            if risk <= 0 or reward / risk < 2.0:
-                rr_val = round(reward / risk, 1) if risk > 0 else 0
-                logger.info(f"[GEO] {symbol} — R:R too low ({rr_val}x), skip")
-                # Log WATCH signal when score is strong despite bad R:R
-                if total_score >= 5 and self.memory:
-                    try:
-                        _base = min(int(total_score * 8), 70)
-                        _geo  = int(total_score * 2)
-                        _radj = +5 if structure in ("range", "uptrend") else -5
-                        _final = min(100, _base + max(0, _radj) + _geo)
-                        _regime_word = "CHOPPY" if _radj < 0 else ("BULL_MARKET" if structure == "uptrend" else "CHOPPY")
-                        _rsn = (
-                            f"GEO V2 WATCH: {symbol} {side} | structure={structure} | score={total_score:.1f} | R:R={rr_val}x (below 2:1 threshold)\n"
-                            f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
-                            f"{_regime_word}"
-                        )
-                        _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "total_score": total_score, "rr": rr_val})
-                        self.memory.log_decision("WATCH", _rsn, symbol=symbol, confidence=round(min(total_score / 10.0, 1.0), 2), market_data=_md)
-                    except Exception as _le:
-                        logger.debug(f"[GEO] log_decision (watch) error: {_le}")
-                return
-
-            # STEP 7 — Correlation check (no 2 correlated positions)
-            open_trades = self.memory.get_open_trades()
-            geo_open = []
-            for t in open_trades:
-                ctx = t.get("market_context") or {}
-                if isinstance(ctx, str):
-                    try: ctx = json.loads(ctx)
-                    except: ctx = {}
-                if ctx.get("strategy_source") == "geometric":
-                    geo_open.append(t.get("symbol", ""))
-
-            corr_check = self.correlations.check_correlation_conflict(symbol, geo_open)
-            if corr_check.get("conflict") and corr_check.get("score_adjustment", 0) <= -20:
-                logger.info(f"[GEO] {symbol} — correlation conflict with open positions, skip")
-                return
-
-            # STEP 8 — Position sizing
-            available = self.get_available_capital()
-            if available < 50:
-                logger.info(f"[GEO] {symbol} — no capital available (${available:.0f})")
-                return
-
-            deploy_pct     = 0.95 if total_score >= 8 else 0.90 if total_score >= 6 else 0.80
-            max_capital    = config.STRATEGY_CAPITAL["geometric"] * deploy_pct
-            position_pct   = 0.35 if total_score >= 8 else 0.28 if total_score >= 6 else 0.20
-            capital_to_use = min(available, config.STRATEGY_CAPITAL["geometric"] * position_pct)
-            capital_to_use = min(capital_to_use, max_capital - self.get_deployed_capital())
-            # Apply calendar event size reduction if active
-            capital_to_use *= size_modifier
-            if size_modifier != 1.0:
-                logger.info(f"[GEO] 📅 Calendar modifier ×{size_modifier:.2f}")
-            # Apply regime size multiplier
-            capital_to_use *= _regime_size_mult
-            if _regime_size_mult != 1.0:
-                logger.info(f"[GEO] 📊 Regime multiplier ×{_regime_size_mult:.2f} → capital=${capital_to_use:.0f}")
-
-            # ── DXY rising: reduce crypto long size (dollar strength headwind)
-            if dxy == "rising" and is_crypto and side == "long":
-                capital_to_use *= 0.7
-                logger.info(f"[GEO] DXY rising → crypto long size ×0.7 → capital=${capital_to_use:.0f}")
-
-            # ── Falling knife: reduce size for counter-momentum longs with RSI divergence
-            if _falling_knife_reduce:
-                capital_to_use *= 0.6
-                logger.info(f"[GEO] {symbol} — counter-momentum: size ×0.60 (falling knife + RSI div) → capital=${capital_to_use:.0f}")
-
-            if capital_to_use < 30:
-                logger.info(f"[GEO] {symbol} — capital deployment limit reached")
-                return
-
-            qty = capital_to_use / current_price
-            if "/" not in symbol:
-                qty = max(1, int(qty))   # whole shares for stocks
-            else:
-                qty = round(qty, 6)      # fractional for crypto
-
-            logger.info(
-                f"[GEO] 📐 ENTERING: {symbol} {side.upper()} | "
-                f"level=${level:.4f} | score={total_score:.1f} (T1={tier1} T2={tier2:.1f} T3={tier3}) | "
-                f"stop=${stop_price:.4f} | target=${target_price:.4f} | "
-                f"R:R={reward/risk:.1f}x | structure={structure} | "
-                f"candles={detected_names} | capital=${capital_to_use:.0f}"
-            )
-
-            # Log decision to populate Signals page on the dashboard
-            if self.memory:
-                try:
-                    _rr     = round(reward / risk, 1)
-                    _base   = min(int(total_score * 8), 70)
-                    _geo    = int(total_score * 2)
-                    _radj   = +5 if structure in ("range", "uptrend") else -5
-                    _final  = min(100, _base + max(0, _radj) + _geo)
-                    _regime_word = "BULL_MARKET" if structure == "uptrend" else ("BEAR_MARKET" if structure == "downtrend" else "CHOPPY")
-                    _rsn = (
-                        f"GEO V2: {symbol} {side} | structure={structure} | score={total_score:.1f} | R:R={_rr}x | capital=${capital_to_use:.0f}\n"
-                        f"Breakdown: Base: {_base} | Regime: {_radj:+d} | RelStr: 0 | DXY: 0 | Corr: 0 | Geo: {_geo} | News: 0 | FINAL: {_final}\n"
-                        f"{_regime_word}"
-                    )
-                    _md = json.dumps({"patterns_detected": sorted(detected_names), "structure": structure, "total_score": round(total_score, 1), "rr": _rr})
-                    _decision = "BUY" if side == "long" else "SELL"
-                    self.memory.log_decision(_decision, _rsn, symbol=symbol, confidence=round(min(total_score / 10.0, 1.0), 2), market_data=_md)
-                except Exception as _le:
-                    logger.debug(f"[GEO] log_decision error: {_le}")
-
-            order = self.broker.place_order(
-                symbol, qty,
-                "buy" if side == "long" else "sell",
-            )
-
-            if order and self.memory:
-                # Place a real Alpaca stop order for stocks; crypto doesn't support stop orders
-                # — the watchdog handles software-based stops for crypto positions.
-                stop_order_id = None
-                if not is_crypto:
-                    try:
-                        _stop_side = "sell" if side == "long" else "buy"
-                        _sp = _smart_round(stop_price)
-                        _stop_ord = self.broker.api.submit_order(
-                            symbol=symbol, qty=qty, side=_stop_side,
-                            type="stop", stop_price=_sp, time_in_force="gtc",
-                        )
-                        stop_order_id = getattr(_stop_ord, "id", None)
-                        logger.info(f"[GEO] 🛑 Stop order placed: {symbol} stop=${_sp} id={stop_order_id}")
-                    except Exception as _se:
-                        logger.error(f"[GEO] stop order error for {symbol}: {_se}")
-                else:
-                    _sp = _smart_round(stop_price)
-                    _sl = _smart_round(stop_price * 0.998)
-                    _stop_side = "sell" if side == "long" else "buy"
-                    try:
-                        _stop_ord = self.broker.api.submit_order(
-                            symbol=symbol, qty=qty, side=_stop_side,
-                            type="stop_limit", stop_price=_sp, limit_price=_sl,
-                            time_in_force="gtc",
-                        )
-                        stop_order_id = getattr(_stop_ord, "id", None)
-                        logger.info(
-                            f"[GEO] 🛑 Crypto stop_limit placed: {symbol} "
-                            f"stop={_sp:{_pfmt}} limit={_sl:{_pfmt}} id={stop_order_id}"
-                        )
-                    except Exception as _cse:
-                        stop_order_id = None
-                        logger.warning(
-                            f"[GEO] ⚠️ Crypto stop_limit rejected for {symbol} ({_cse}) "
-                            f"— falling back to watchdog at {_sp:{_pfmt}}"
-                        )
-
-                self.memory.log_trade_open(
-                    trade_id=str(uuid.uuid4()),
+            if not is_crypto:
+                # Stocks: bracket complet (Alpaca gère stop + TP)
+                order = self.broker.api.submit_order(
                     symbol=symbol,
-                    side="buy" if side == "long" else "sell",
                     qty=qty,
-                    entry_price=current_price,
-                    stop_loss=stop_price,
-                    take_profit=target_price,
-                    alpaca_order_id=getattr(order, "id", None),
-                    market_context={
-                        "strategy_source": "geometric",
-                        "side": side,
-                        "level": float(level),
-                        "total_score": round(total_score, 1),
-                        "tier1": tier1,
-                        "tier2": round(tier2, 1),
-                        "tier3": tier3,
-                        "structure": structure,
-                        "atr": float(atr),
-                        "target_midpoint": float(target_price),
-                        "rsi_divergence": bool(rsi_divergence),
-                        "patterns": list(detected_names),
-                        "alpaca_stop_order_id": stop_order_id,
-                        "regime": _regime,
-                        "regime_size_mult": _regime_size_mult,
-                        "stop_pct": _stop_pct,
-                    }
+                    side="buy" if chosen_side == "long" else "sell",
+                    type="limit",
+                    limit_price=round(chosen_level, 2),
+                    time_in_force="day",
+                    order_class="bracket",
+                    take_profit={"limit_price": round(float(target_price), 2)},
+                    stop_loss={"stop_price": round(float(stop_price), 2)},
                 )
-
+            else:
+                # Crypto: limit simple, stop/TP gérés par watchdog
+                order = self.broker.api.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side="buy",
+                    type="limit",
+                    limit_price=_smart_round(chosen_level),
+                    time_in_force="gtc",
+                )
+            order_id = getattr(order, "id", None)
+            logger.info(f"[GEO] ✅ Ordre placé: {symbol} id={order_id}")
         except Exception as e:
-            logger.error(f"[GEO] evaluate({symbol}) error: {e}")
+            logger.error(f"[GEO] Erreur ordre {symbol}: {e}")
+            return
+
+        # Enregistrer le pending
+        self._pending_orders[symbol] = {
+            "order_id":    order_id,
+            "level":       chosen_level,
+            "side":        chosen_side,
+            "stop":        stop_price,
+            "target":      float(target_price),
+            "qty":         qty,
+            "structure":   structure_1h,
+            "is_crypto":   is_crypto,
+            "regime":      _regime,
+            "vwap_conf":   vwap_conf,
+        }
+
+        # Log dashboard Signals
+        if self.memory:
+            try:
+                _rsn = (
+                    f"GEO 3TF: {symbol} {chosen_side} @ {chosen_level:{_pfmt}} | "
+                    f"stop={stop_price:{_pfmt}} target={float(target_price):{_pfmt}} R:R={rr_val}x\n"
+                    f"1h={structure_1h} | RSI5m={rsi_5m:.0f} | "
+                    f"VWAP={'confluence' if vwap_conf else 'absent'} | regime={_regime}\n"
+                    f"{'BULL_MARKET' if structure_1h == 'uptrend' else 'CHOPPY'}"
+                )
+                self.memory.log_decision(
+                    "BUY" if chosen_side == "long" else "SELL", _rsn,
+                    symbol=symbol,
+                    confidence=round(min(rr_val / 3.0, 1.0), 2),
+                    market_data=json.dumps({
+                        "level":        chosen_level,
+                        "structure_1h": structure_1h,
+                        "rsi_5m":       round(rsi_5m, 1),
+                        "vwap_conf":    vwap_conf,
+                        "rr":           rr_val,
+                        "pending":      True,
+                    })
+                )
+            except Exception as _le:
+                logger.debug(f"[GEO] log_decision: {_le}")
+
+    # ── Gestion des ordres pending ────────────────────────────────────────────
+
+    def manage_pending_orders(self):
+        """
+        Appelé toutes les 30s depuis le fast loop.
+        - Filled → enregistre le trade comme ouvert en DB
+        - Annulé/expiré → retire du dict
+        - Niveau cassé (prix traversé) → annule l'ordre
+        """
+        if not self._pending_orders:
+            return
+
+        for symbol in list(self._pending_orders.keys()):
+            pending  = self._pending_orders[symbol]
+            order_id = pending.get("order_id")
+            level    = pending.get("level")
+            side     = pending.get("side")
+            is_crypto = pending.get("is_crypto", "/" in symbol)
+
+            try:
+                order  = self.broker.api.get_order(order_id)
+                status = order.status
+
+                if status == "filled":
+                    fill_price = float(order.filled_avg_price or level)
+                    qty        = float(order.filled_qty or pending["qty"])
+                    logger.info(f"[GEO] ✅ FILLED: {symbol} {side} @ ${fill_price:.6f}")
+
+                    if self.memory:
+                        self.memory.log_trade_open(
+                            trade_id=str(uuid.uuid4()),
+                            symbol=symbol,
+                            side="buy" if side == "long" else "sell",
+                            qty=qty,
+                            entry_price=fill_price,
+                            stop_loss=pending["stop"],
+                            take_profit=pending["target"],
+                            alpaca_order_id=order_id,
+                            market_context={
+                                "strategy_source": "geometric",
+                                "side":            side,
+                                "level":           float(level),
+                                "stop_pct":        round(abs(fill_price - pending["stop"]) / fill_price, 4),
+                                "target_pct":      round(abs(pending["target"] - fill_price) / fill_price, 4),
+                                "structure":       pending.get("structure", "unknown"),
+                                "regime":          pending.get("regime", "unknown"),
+                                "is_crypto":       is_crypto,
+                                "vwap_conf":       pending.get("vwap_conf", False),
+                                "order_type":      "bracket" if not is_crypto else "limit_manual",
+                            }
+                        )
+                    del self._pending_orders[symbol]
+
+                elif status in ("canceled", "expired", "rejected"):
+                    logger.info(f"[GEO] 🗑 Ordre {status}: {symbol}")
+                    del self._pending_orders[symbol]
+
+                else:
+                    # Vérifier si le niveau a été cassé
+                    bars = self.broker.get_bars(symbol, "1Min", limit=3)
+                    if bars is not None and not bars.empty:
+                        current = float(bars["close"].iloc[-1])
+                        broken  = (
+                            (side == "long"  and current < level * 0.997) or
+                            (side == "short" and current > level * 1.003)
+                        )
+                        if broken:
+                            logger.info(
+                                f"[GEO] 🚫 Niveau cassé {symbol} {side} "
+                                f"@ {level:.6f} (current {current:.6f}) — annulation"
+                            )
+                            self._cancel_order(order_id, symbol)
+                            del self._pending_orders[symbol]
+
+            except Exception as e:
+                logger.debug(f"[GEO] manage_pending {symbol}: {e}")
+
+    # ── Gestion des positions ouvertes ────────────────────────────────────────
 
     def manage_open_positions(self):
-        """Manage trailing stop for geometric positions."""
+        """
+        Stocks avec bracket: Alpaca gère stop/TP automatiquement.
+        Crypto: stop et target logiciels (watchdog).
+        """
         try:
-            positions = self.broker.get_positions()
+            positions   = self.broker.get_positions()
             open_trades = self.memory.get_open_trades()
 
             for pos in (positions or []):
-                match = None
+                match    = None
                 ctx_data = {}
                 for t in open_trades:
                     ctx = t.get("market_context") or {}
@@ -842,143 +524,51 @@ class GeometricExpert:
                     if (ctx.get("strategy_source") == "geometric"
                             and t.get("symbol") == pos.symbol
                             and t.get("status") == "open"):
-                        match = t
+                        match    = t
                         ctx_data = ctx
                         break
 
                 if not match:
                     continue
 
+                symbol        = pos.symbol
                 current_price = float(pos.current_price)
                 entry_price   = float(match.get("entry_price", current_price))
                 qty           = float(pos.qty)
                 side          = ctx_data.get("side", "long")
-                target_mid    = ctx_data.get("target_midpoint")
-                partial_taken = ctx_data.get("partial_taken", False)
-                symbol        = pos.symbol
+                stop_price    = float(match.get("stop_loss")  or 0)
+                target_price  = float(match.get("take_profit") or 0)
+                is_crypto_pos = ctx_data.get("is_crypto", "/" in symbol)
+                order_type    = ctx_data.get("order_type", "bracket")
 
-                if side == "long":
-                    gain_pct = (current_price - entry_price) / entry_price * 100
-                else:
-                    gain_pct = (entry_price - current_price) / entry_price * 100
+                # Stocks bracket: Alpaca gère tout, on ne touche pas
+                if not is_crypto_pos and order_type == "bracket":
+                    continue
 
-                stop_order_id = ctx_data.get("alpaca_stop_order_id")
-                _is_crypto = "/" in symbol
+                # Crypto: stop/target logiciels
+                if not stop_price or not target_price:
+                    continue
 
-                # ── Thesis invalidation: level broken ─────────────────────────────────
-                # "The level holds or it doesn't." Exit if the 5-min close bar has moved
-                # THROUGH the entry level, but only after 15-min minimum hold and only if
-                # the trade has not already moved more than 50% toward the target (in which
-                # case the trailing stop manages it).
-                _level = ctx_data.get("level")
-                _entry_at_str = match.get("entry_at") or match.get("created_at")
-                if _level and _entry_at_str and not partial_taken:
-                    try:
-                        from datetime import datetime, timezone as _tz
-                        _entry_dt = datetime.fromisoformat(str(_entry_at_str).replace("Z", "+00:00"))
-                        _hold_min = (datetime.now(_tz.utc) - _entry_dt).total_seconds() / 60
-                    except Exception:
-                        _hold_min = 99  # can't parse → assume old enough
+                stop_hit   = (side == "long"  and current_price <= stop_price) or \
+                             (side == "short" and current_price >= stop_price)
+                target_hit = (side == "long"  and current_price >= target_price) or \
+                             (side == "short" and current_price <= target_price)
 
-                    if _hold_min >= 15:
-                        # Skip if already past 50% of target distance (trade is working)
-                        _target_dist = abs(target_mid - entry_price) if target_mid else None
-                        _unrealized = abs(current_price - entry_price)
-                        _toward_target = (
-                            (side == "long" and current_price > entry_price) or
-                            (side == "short" and current_price < entry_price)
-                        )
-                        _well_in_profit = (
-                            _target_dist and _toward_target and
-                            _unrealized > _target_dist * 0.50
-                        )
+                if stop_hit:
+                    logger.info(f"[GEO] 🔴 STOP: {symbol} @ {current_price:.6f}")
+                    self.broker.close_position(symbol)
+                    if self.memory:
+                        mult = 1 if side == "long" else -1
+                        pnl  = (current_price - entry_price) * mult * qty
+                        self.memory.log_trade_close(match["trade_id"], current_price, "stop", pnl=pnl)
 
-                        if not _well_in_profit:
-                            # Fetch the latest 5-min bar close for confirmation
-                            _bars5 = self.broker.get_bars(symbol, "5Min", limit=2)
-                            if _bars5 is not None and not _bars5.empty:
-                                _close5 = float(_bars5["close"].iloc[-1])
-                                _broken = (
-                                    (side == "long" and _close5 < _level) or
-                                    (side == "short" and _close5 > _level)
-                                )
-                                if _broken:
-                                    _dir = "below support" if side == "long" else "above resistance"
-                                    logger.info(
-                                        f"[GEO] 🔴 LEVEL BROKEN: {symbol} closed ${_close5:.4f} "
-                                        f"{_dir} ${_level:.4f} — thesis invalid, exiting"
-                                    )
-                                    self._cancel_stop_order(stop_order_id, symbol)
-                                    self.broker.close_position(symbol)
-                                    if self.memory:
-                                        _pnl = (current_price - entry_price) * qty * (
-                                            1 if side == "long" else -1)
-                                        self.memory.log_trade_close(
-                                            match["trade_id"], current_price,
-                                            "level_broken", pnl=_pnl
-                                        )
-                                    continue
-
-                # Partial at midpoint target → sell 50%, cancel old stop, re-place at breakeven
-                if target_mid and not partial_taken:
-                    if (side == "long" and current_price >= target_mid) or \
-                       (side == "short" and current_price <= target_mid):
-                        sell_qty = max(1, int(abs(qty) * 0.50)) if not _is_crypto else round(abs(qty) * 0.50, 6)
-                        logger.info(f"[GEO] 💰 PARTIAL: {symbol} reached midpoint target ${target_mid:.4f}")
-                        self._cancel_stop_order(stop_order_id, symbol)
-                        self.broker.place_order(symbol, sell_qty, "sell" if side == "long" else "buy")
-                        if self.memory:
-                            pnl = (current_price - entry_price) * sell_qty * (1 if side == "long" else -1)
-                            self.memory.log_trade_close(match["trade_id"], current_price, "partial_geo", pnl=pnl)
-                            remaining = abs(qty) - sell_qty
-                            if remaining > 0:
-                                import uuid
-                                # Re-place stop at breakeven for the remaining position
-                                new_stop_id = None
-                                try:
-                                    _be = round(entry_price * (0.995 if _is_crypto else 0.997), 4 if _is_crypto else 2)
-                                    _stop_side = "sell" if side == "long" else "buy"
-                                    _ord = self.broker.api.submit_order(
-                                        symbol=symbol, qty=remaining, side=_stop_side,
-                                        type="stop", stop_price=_be, time_in_force="gtc",
-                                    )
-                                    new_stop_id = getattr(_ord, "id", None)
-                                    logger.info(f"[GEO] 🛑 Breakeven stop placed for remaining {remaining} {symbol} @ ${_be} id={new_stop_id}")
-                                except Exception as _rse:
-                                    logger.error(f"[GEO] replace stop after partial error: {_rse}")
-                                self.memory.log_trade_open(
-                                    trade_id=str(uuid.uuid4()),
-                                    symbol=symbol, side=match.get("side"),
-                                    qty=remaining, entry_price=entry_price,
-                                    market_context={**ctx_data, "partial_taken": True, "alpaca_stop_order_id": new_stop_id}
-                                )
-
-                # Trailing stop -1% from best price (after partial)
-                if partial_taken:
-                    if side == "long":
-                        if symbol not in self._high_water:
-                            self._high_water[symbol] = current_price
-                        self._high_water[symbol] = max(self._high_water[symbol], current_price)
-                        trail_stop = self._high_water[symbol] * 0.99
-                        if current_price <= trail_stop:
-                            logger.info(f"[GEO] 🔴 TRAIL STOP (long): {symbol} ${current_price:.4f}")
-                            self._cancel_stop_order(stop_order_id, symbol)
-                            self.broker.close_position(symbol)
-                            if self.memory:
-                                pnl = (current_price - entry_price) * qty
-                                self.memory.log_trade_close(match["trade_id"], current_price, "geo_trailing_stop", pnl=pnl)
-                    else:
-                        if symbol not in self._low_water:
-                            self._low_water[symbol] = current_price
-                        self._low_water[symbol] = min(self._low_water[symbol], current_price)
-                        trail_stop = self._low_water[symbol] * 1.01
-                        if current_price >= trail_stop:
-                            logger.info(f"[GEO] 🔴 TRAIL STOP (short): {symbol} ${current_price:.4f}")
-                            self._cancel_stop_order(stop_order_id, symbol)
-                            self.broker.close_position(symbol)
-                            if self.memory:
-                                pnl = (entry_price - current_price) * abs(qty)
-                                self.memory.log_trade_close(match["trade_id"], current_price, "geo_trailing_stop", pnl=pnl)
+                elif target_hit:
+                    logger.info(f"[GEO] 💰 TARGET: {symbol} @ {current_price:.6f}")
+                    self.broker.close_position(symbol)
+                    if self.memory:
+                        mult = 1 if side == "long" else -1
+                        pnl  = (current_price - entry_price) * mult * qty
+                        self.memory.log_trade_close(match["trade_id"], current_price, "target", pnl=pnl)
 
         except Exception as e:
-            logger.error(f"[GEO] manage_open_positions error: {e}")
+            logger.error(f"[GEO] manage_open_positions: {e}")
