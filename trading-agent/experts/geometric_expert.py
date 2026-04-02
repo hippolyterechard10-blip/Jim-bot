@@ -583,7 +583,25 @@ class GeometricExpert:
                         logger.error(f"[GEO] stop order error for {symbol}: {_se}")
                 else:
                     _sp = _smart_round(stop_price)
-                    logger.info(f"[GEO] 🛑 Crypto stop monitored by watchdog: {symbol} stop={_sp:{_pfmt}}")
+                    _sl = _smart_round(stop_price * 0.998)
+                    _stop_side = "sell" if side == "long" else "buy"
+                    try:
+                        _stop_ord = self.broker.api.submit_order(
+                            symbol=symbol, qty=qty, side=_stop_side,
+                            type="stop_limit", stop_price=_sp, limit_price=_sl,
+                            time_in_force="gtc",
+                        )
+                        stop_order_id = getattr(_stop_ord, "id", None)
+                        logger.info(
+                            f"[GEO] 🛑 Crypto stop_limit placed: {symbol} "
+                            f"stop={_sp:{_pfmt}} limit={_sl:{_pfmt}} id={stop_order_id}"
+                        )
+                    except Exception as _cse:
+                        stop_order_id = None
+                        logger.warning(
+                            f"[GEO] ⚠️ Crypto stop_limit rejected for {symbol} ({_cse}) "
+                            f"— falling back to watchdog at {_sp:{_pfmt}}"
+                        )
 
                 self.memory.log_trade_open(
                     trade_id=str(uuid.uuid4()),
