@@ -271,6 +271,13 @@ def backtest_symbol(symbol: str) -> dict:
         if len(closes_5m) >= 4 and not (closes_5m[-1] <= closes_5m[-4]):
             continue
 
+        # Pass 3b — Le niveau doit avoir été touché ET le prix doit être remonté dessus
+        # Evite d'attraper un couteau qui tombe
+        touched_level = any(bars_5m_past["low"].values[-8:] <= chosen_level * 1.001)
+        closed_above  = closes_5m[-1] > chosen_level * 1.001
+        if not (touched_level and closed_above):
+            continue
+
         rsi_5m = _rsi(closes_5m, RSI_PERIOD)
         if not (25 <= rsi_5m <= 55):
             continue
