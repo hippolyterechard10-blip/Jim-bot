@@ -316,21 +316,16 @@ class GeometricExpert:
                 highs_1h  = bars_1h["high"].tolist()
                 lows_1h   = bars_1h["low"].tolist()
 
-                # ── Proper 1h RSI divergence — swing-low comparison (not 10-min noise)
+                # ── 1h RSI divergence — full-bar swing scan, 1m fallback if <2 found
                 if side == "long" and len(lows_1h) >= 5:
                     try:
-                        _lb = min(10, len(lows_1h) - 2)
-                        _sw_idx = []
-                        for _i in range(1, _lb + 1):
-                            _idx = len(lows_1h) - 1 - _i
-                            if (_idx > 0 and
-                                    lows_1h[_idx] < lows_1h[_idx - 1] and
-                                    lows_1h[_idx] < lows_1h[_idx + 1]):
-                                _sw_idx.append(_idx)
-                            if len(_sw_idx) == 2:
-                                break
-                        if len(_sw_idx) == 2:
-                            _sw2, _sw1 = _sw_idx[0], _sw_idx[1]  # sw2=recent sw1=older
+                        # collect ALL swing lows across available 1h bars
+                        _sw_all = [
+                            i for i in range(2, len(lows_1h) - 2)
+                            if lows_1h[i] < lows_1h[i - 1] and lows_1h[i] < lows_1h[i + 1]
+                        ]
+                        if len(_sw_all) >= 2:
+                            _sw1, _sw2 = _sw_all[-2], _sw_all[-1]  # sw1=older, sw2=more recent
                             _gap = _sw2 - _sw1
                             if _gap >= 3 and lows_1h[_sw2] < lows_1h[_sw1]:
                                 _rsi_sw1 = _rsi(np.array(closes_1h[:_sw1 + 1]), 14)
@@ -352,8 +347,25 @@ class GeometricExpert:
                                     f"[GEO] {symbol} — no 1h RSI div "
                                     f"(gap={_gap} bars, lower_low={lows_1h[_sw2] < lows_1h[_sw1]})"
                                 )
+                        else:
+                            # fewer than 2 swing lows on 1h — fall back to 1m window
+                            _rsi_prev_1m = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
+                            rsi_divergence = (
+                                closes_1m[-1] < closes_1m[-10] and rsi_now > _rsi_prev_1m
+                            )
+                            logger.debug(
+                                f"[GEO] {symbol} — <2 1h swing lows found "
+                                f"({len(_sw_all)}), 1m fallback: rsi_div={rsi_divergence}"
+                            )
                     except Exception as _e_div:
-                        logger.debug(f"[GEO] 1h divergence error: {_e_div}")
+                        logger.debug(f"[GEO] 1h divergence error: {_e_div} — using 1m fallback")
+                        try:
+                            _rsi_prev_1m = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
+                            rsi_divergence = (
+                                closes_1m[-1] < closes_1m[-10] and rsi_now > _rsi_prev_1m
+                            )
+                        except Exception:
+                            rsi_divergence = False
                 if rsi_divergence:
                     logger.info(f"[GEO] {symbol} — RSI divergence detected!")
 
