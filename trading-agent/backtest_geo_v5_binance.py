@@ -27,13 +27,12 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 ASSETS = {
-    "ETHUSDT":  {"start": "2023-01-01", "end": "2023-12-31", "target": 0.009, "pos_pct": 0.28, "max_sim": 2},
-    "XRPUSDT":  {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
-    "LINKUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
-    "AVAXUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1},
+    "ETHUSDT":  {"start": "2023-01-01", "end": "2023-12-31", "target": 0.009, "pos_pct": 0.28, "max_sim": 2, "pool": 700},
+    "AVAXUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1, "pool": 200},
+    "LINKUSDT": {"start": "2023-01-01", "end": "2023-12-31", "target": 0.010, "pos_pct": 0.20, "max_sim": 1, "pool": 100},
 }
 
-CAPITAL      = 500.0
+CAPITAL      = 1000.0
 ZONE_PCT     = 0.003       # Zone ±0.3%
 MAX_TOUCHES  = 2           # Skip zone si touchée > 2 fois
 RSI_LOW      = 20
@@ -353,7 +352,7 @@ def backtest_one_year(df_5m_year, df_15m, df_1h, cfg):
             # Fill
             if float(next_b["low"]) <= zone["high"]:
                 fill = min(float(next_b["open"]), zone["center"])
-                qty  = (CAPITAL * cfg["pos_pct"]) / fill
+                qty  = (cfg["pool"] * cfg["pos_pct"]) / fill
                 touches[zk] += 1
                 open_pos[zk] = {
                     "entry": fill, "stop": stop, "target": target,
