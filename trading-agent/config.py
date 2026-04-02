@@ -1,91 +1,31 @@
+"""
+config.py — Jim Bot Geo-Only ETH
+Configuration simplifiée : un seul asset, une seule stratégie.
+"""
 import os
 
-# Anthropic
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-
-# Alpaca
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+# ── Alpaca ────────────────────────────────────────────────────────────────────
+ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"
 
-# Trading rules
-
-MAX_POSITION_PCT = 0.30
-GLOBAL_STOP_LOSS_PCT = 0.20
-TRADE_STOP_LOSS_PCT = 0.05
-MAX_POSITIONS = 5
-
-# Trailing stop distances — LONG positions (fraction below highest price)
-TRAILING_STOP_CRYPTO = 0.03   # 3% for crypto longs
-TRAILING_STOP_STOCK  = 0.05   # 5% for stocks/ETFs longs
-
-# Trailing stop distances — SHORT positions (fraction above lowest price)
-TRAILING_STOP_SHORT_CRYPTO = 0.03  # 3% for crypto shorts (paper only)
-TRAILING_STOP_SHORT_STOCK  = 0.06  # 6% for stocks/ETF shorts
-
-# Short selling rules
-ALLOW_SHORTS         = False  # Set True only if Alpaca account has shorting enabled
-MAX_SHORT_SIZE_PCT   = 0.15   # Max 15% of portfolio per short position
-SHORT_ENTRY_RSI_MIN  = 70     # RSI must be above this to short
-SHORT_ENTRY_CONF_MAX = 0.50   # Claude confidence must be below this
-
-# Partial profit taking
-PARTIAL_PROFIT_PCT   = 0.03   # Take partial profits at +3% unrealised gain
-PARTIAL_PROFIT_RATIO = 0.50   # Sell / cover this fraction of the position (50%)
-
-# Universe
-CRYPTO_SYMBOLS   = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOGE/USD", "XRP/USD", "LINK/USD"]
-STOCK_SYMBOLS    = ["AAPL", "NVDA", "TSLA", "META", "GOOGL", "MSFT", "AMD"]
-ETF_SYMBOLS      = ["QQQ", "SPY", "ARKK"]
-# Fixed blue-chip list always evaluated every cycle regardless of top movers
-BLUECHIP_SYMBOLS = ["AAPL", "NVDA", "TSLA", "META", "GOOGL", "MSFT", "AMD", "QQQ", "SPY"]
-ALL_SYMBOLS      = CRYPTO_SYMBOLS + STOCK_SYMBOLS + ETF_SYMBOLS
-
-# Loop speeds
-LOOP_INTERVAL_SECONDS      = 300   # Slow loop: full synthesis + movers refresh
-FAST_LOOP_INTERVAL_SECONDS = 30    # Fast loop: position stops + score triggers
+# ── Capital ───────────────────────────────────────────────────────────────────
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
+GEO_CAPITAL     = INITIAL_CAPITAL   # Tout en geo, pas de split
 
-# Mastermind V2
-_CAPITAL_LOCK_FILE = os.path.join(os.path.dirname(__file__), "capital_lock.json")
+# ── Geo V4 — Paramètres validés par backtest 2022-2025 ───────────────────────
+GEO_SYMBOL        = "ETH/USD"
+GEO_ZONE_PCT      = 0.003    # Zone ±0.3% autour du pivot
+GEO_MAX_SIM       = 2        # Max 2 positions simultanées
+GEO_POS_PCT       = 0.28     # 28% du capital par position
+GEO_TARGET_PCT    = 0.009    # Target +0.9%
+GEO_MAX_TOUCHES   = 2        # Skip zone si touchée > 2 fois
+GEO_RSI_LOW       = 20
+GEO_RSI_HIGH      = 65
 
-def _get_strategy_capital():
-    import json
-    if os.path.exists(_CAPITAL_LOCK_FILE):
-        try:
-            with open(_CAPITAL_LOCK_FILE) as f:
-                data = json.load(f)
-            if "gapper" in data and "geometric" in data:
-                g = float(data["gapper"])
-                geo = float(data["geometric"])
-                return {"gapper": g, "geometric": geo}
-        except Exception:
-            pass
-    try:
-        import alpaca_trade_api as tradeapi
-        api = tradeapi.REST(
-            os.getenv("ALPACA_API_KEY"),
-            os.getenv("ALPACA_SECRET_KEY"),
-            "https://paper-api.alpaca.markets"
-        )
-        total = float(api.get_account().equity)
-        half = round(total / 2, 2)
-        result = {"gapper": half, "geometric": half}
-        try:
-            import datetime
-            with open(_CAPITAL_LOCK_FILE, "w") as f:
-                json.dump({**result, "locked_at": datetime.datetime.utcnow().isoformat()}, f)
-        except Exception:
-            pass
-        return result
-    except Exception:
-        return {"gapper": 500.0, "geometric": 500.0}
+# ── Boucles ───────────────────────────────────────────────────────────────────
+FAST_LOOP_SECONDS = 30     # manage_pending + manage_positions
+SLOW_LOOP_SECONDS = 300    # evaluate() — nouveau signal
 
-STRATEGY_CAPITAL = _get_strategy_capital()
-GAPPER_MAX_TRADES_PER_DAY = 3
-GAPPER_MAX_CONSECUTIVE_LOSSES = 2
-GEOMETRIC_MAX_CAPITAL_PCT = 0.80
-VIX_PANIC_THRESHOLD = 35
-FLASH_CRASH_THRESHOLD = -0.02
-
-TRADING_ENGINE = "V2"  # "V1" = agent.py trades, "V2" = mastermind experts trade
+# ── Sécurité ──────────────────────────────────────────────────────────────────
+MONTHLY_LOSS_CAP_PCT = 0.15   # Pause si -15% dans le mois
