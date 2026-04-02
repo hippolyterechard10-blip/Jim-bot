@@ -185,6 +185,7 @@ class GeometricExpert:
             opens_1m   = bars_1m["open"].tolist()
             volumes_1m = bars_1m["volume"].tolist()
             current_price = closes_1m[-1]
+            momentum_30m = (closes_1m[-1] - closes_1m[-30]) / closes_1m[-30] if len(closes_1m) >= 30 else None
 
             # STEP 1 — Support/Resistance via geometry.py
             sr = self.geometry.find_support_resistance(closes_1m, highs_1m, lows_1m)
@@ -350,6 +351,22 @@ class GeometricExpert:
             if tier1 < 2:
                 logger.info(f"[GEO] {symbol} — Tier 1 too weak ({tier1}), skip")
                 return
+
+            # ── Momentum filter: avoid falling knives
+            _falling_knife_reduce = False
+            if side == "long" and momentum_30m is not None and momentum_30m < -0.02:
+                if tier1 >= 4 and rsi_divergence:
+                    _falling_knife_reduce = True
+                    logger.info(
+                        f"[GEO] {symbol} — counter-momentum long allowed with RSI divergence, "
+                        f"size reduced 40% (30m={momentum_30m*100:.1f}%)"
+                    )
+                else:
+                    logger.info(
+                        f"[GEO] {symbol} — falling knife: {momentum_30m*100:.1f}% in 30m, "
+                        f"tier1={tier1} too weak to fight momentum"
+                    )
+                    return
 
             # ── TIER 2 — Precision filters (max 4.0)
             tier2 = 0.0
@@ -606,6 +623,11 @@ class GeometricExpert:
             if dxy == "rising" and is_crypto and side == "long":
                 capital_to_use *= 0.7
                 logger.info(f"[GEO] DXY rising → crypto long size ×0.7 → capital=${capital_to_use:.0f}")
+
+            # ── Falling knife: reduce size for counter-momentum longs with RSI divergence
+            if _falling_knife_reduce:
+                capital_to_use *= 0.6
+                logger.info(f"[GEO] {symbol} — counter-momentum: size ×0.60 (falling knife + RSI div) → capital=${capital_to_use:.0f}")
 
             if capital_to_use < 30:
                 logger.info(f"[GEO] {symbol} — capital deployment limit reached")
