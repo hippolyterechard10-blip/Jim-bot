@@ -834,8 +834,9 @@ def api_experts_stats():
         from datetime import datetime as _dt
         EXCLUDE = ("synced_close", "orphan_close", "position_reconciled")
 
-        # ── Equity réelle Alpaca = capital de base ──────────────────────────
-        capital_start = _get_alpaca_equity()
+        # ── Capital de référence (fixe au reset) et equity live Alpaca ─────────
+        capital_start = config.GEO_CAPITAL          # valeur fixe au moment du reset
+        capital_now   = _get_alpaca_equity()         # equity Alpaca live — source de vérité
 
         # ── Trades geo_v4 — uniquement APRÈS GEO_RESET_DATE ─────────────────
         all_trades = _memory.get_recent_trades(limit=500)
@@ -864,8 +865,8 @@ def api_experts_stats():
             float(t.get("entry_price", 0)) * float(t.get("qty", 0))
             for t in geo_trades if t.get("status") == "open"
         )
-        total_pnl   = round(sum(pnls), 4)
-        capital_now = round(capital_start + total_pnl, 2)
+        total_pnl     = round(sum(pnls), 4)
+        capital_return = round((capital_now - capital_start) / capital_start * 100, 2) if capital_start else 0
 
         return jsonify({
             "geo_v4": {
@@ -876,8 +877,8 @@ def api_experts_stats():
                 "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
                 "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
                 "capital_start":   round(capital_start, 2),
-                "capital_now":     max(0.0, capital_now),
-                "capital_return":  round(total_pnl / capital_start * 100, 2) if capital_start else 0,
+                "capital_now":     round(capital_now, 2),
+                "capital_return":  capital_return,
                 "open_trades":     len([t for t in geo_trades if t.get("status") == "open"]),
                 "live_unrealized": 0.0,
                 "deployed":        round(deployed, 2),
