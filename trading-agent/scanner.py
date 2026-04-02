@@ -286,18 +286,17 @@ class MarketScanner:
 
             _add(gapper_symbols)          # 1. GAPPERS — absolute priority
             _add(regular_symbols)         # 2. Regular top movers
-            _add(config.BLUECHIP_SYMBOLS) # 3. Blue chips — always present
+            # Blue chips removed: large-caps produce meaningless micro S/R levels
+            # on 50 bars of 1-min data — they only appear if organically in movers
 
-        _add(config.CRYPTO_SYMBOLS)       # 4. Crypto — always present
+        _add(config.CRYPTO_SYMBOLS)       # 3. Crypto — always present
 
         gappers_in = [s for s in watchlist if s in {m["symbol"] for m in self._movers_cache.get("symbols", []) if m.get("is_gapper")}]
-        bc_in_list  = [s for s in config.BLUECHIP_SYMBOLS if s in seen]
-        mover_only  = [s for s in watchlist if s not in config.BLUECHIP_SYMBOLS and s not in config.CRYPTO_SYMBOLS and s not in gappers_in]
+        mover_only  = [s for s in watchlist if s not in config.CRYPTO_SYMBOLS and s not in gappers_in]
         logger.info(
             f"📋 Watchlist ({len(watchlist)}): "
             f"gappers={gappers_in} | "
             f"movers={mover_only} | "
-            f"bluechips={bc_in_list} | "
             f"crypto={[s for s in watchlist if s in config.CRYPTO_SYMBOLS]}"
         )
         return watchlist
