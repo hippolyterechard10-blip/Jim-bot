@@ -299,19 +299,14 @@ class GeometricExpert:
             except Exception as _e_htf:
                 logger.debug(f"[GEO] HTF levels error: {_e_htf}")
 
-            # ── RSI divergence — computed first, used by Tier 1 and structure filter
+            # ── RSI (1m) — for current-bar context; divergence uses 1h swings below
             from strategy import _rsi
             import numpy as np
             prices_arr = np.array(closes_1m)
-            rsi_now  = _rsi(prices_arr, 14)
+            rsi_now = _rsi(prices_arr, 14)
             logger.info(f"[GEO] RSI check OK: rsi_now={rsi_now:.1f}")
-            rsi_prev = _rsi(prices_arr[:-10], 14) if len(prices_arr) > 24 else rsi_now
 
-            price_lower    = closes_1m[-1] < closes_1m[-10]
-            rsi_higher     = rsi_now > rsi_prev
-            rsi_divergence = (side == "long" and price_lower and rsi_higher)
-            if rsi_divergence:
-                logger.info(f"[GEO] {symbol} — RSI divergence detected!")
+            rsi_divergence = False  # overwritten below when 1h swing analysis confirms
 
             # ── Market structure (1h) — computed first, used by Tier 1 and directional filter
             bars_1h = self.broker.get_bars(symbol, "1Hour", limit=20)
@@ -319,6 +314,47 @@ class GeometricExpert:
                 closes_1h = bars_1h["close"].tolist()
                 highs_1h  = bars_1h["high"].tolist()
                 lows_1h   = bars_1h["low"].tolist()
+
+                # ── Proper 1h RSI divergence — swing-low comparison (not 10-min noise)
+                if side == "long" and len(lows_1h) >= 5:
+                    try:
+                        _lb = min(10, len(lows_1h) - 2)
+                        _sw_idx = []
+                        for _i in range(1, _lb + 1):
+                            _idx = len(lows_1h) - 1 - _i
+                            if (_idx > 0 and
+                                    lows_1h[_idx] < lows_1h[_idx - 1] and
+                                    lows_1h[_idx] < lows_1h[_idx + 1]):
+                                _sw_idx.append(_idx)
+                            if len(_sw_idx) == 2:
+                                break
+                        if len(_sw_idx) == 2:
+                            _sw2, _sw1 = _sw_idx[0], _sw_idx[1]  # sw2=recent sw1=older
+                            _gap = _sw2 - _sw1
+                            if _gap >= 3 and lows_1h[_sw2] < lows_1h[_sw1]:
+                                _rsi_sw1 = _rsi(np.array(closes_1h[:_sw1 + 1]), 14)
+                                _rsi_sw2 = _rsi(np.array(closes_1h[:_sw2 + 1]), 14)
+                                if _rsi_sw2 > _rsi_sw1:
+                                    rsi_divergence = True
+                                    logger.info(
+                                        f"[GEO] 1h RSI divergence: price "
+                                        f"{lows_1h[_sw1]:.4f}→{lows_1h[_sw2]:.4f} (lower) "
+                                        f"RSI {_rsi_sw1:.1f}→{_rsi_sw2:.1f} (higher) ✅"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"[GEO] {symbol} — no 1h RSI div "
+                                        f"(RSI {_rsi_sw1:.1f}→{_rsi_sw2:.1f} not higher)"
+                                    )
+                            else:
+                                logger.info(
+                                    f"[GEO] {symbol} — no 1h RSI div "
+                                    f"(gap={_gap} bars, lower_low={lows_1h[_sw2] < lows_1h[_sw1]})"
+                                )
+                    except Exception as _e_div:
+                        logger.debug(f"[GEO] 1h divergence error: {_e_div}")
+                if rsi_divergence:
+                    logger.info(f"[GEO] {symbol} — RSI divergence detected!")
 
                 hh = highs_1h[-1] > highs_1h[-3]
                 hl = lows_1h[-1]  > lows_1h[-3]
