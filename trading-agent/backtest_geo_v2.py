@@ -33,7 +33,7 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 SYMBOLS       = ["ETH-USD", "XRP-USD", "AVAX-USD", "LINK-USD"]
-LOOKBACK_DAYS = 30
+LOOKBACK_DAYS = 58
 CAPITAL       = 500.0
 POSITION_PCT  = 0.28
 MIN_POSITION  = 20.0
@@ -135,7 +135,7 @@ def _bias_1h(highs, lows):
 
 def backtest_symbol(symbol: str) -> dict:
     end   = datetime.now(timezone.utc)
-    start = end - timedelta(days=LOOKBACK_DAYS + 5)
+    start = end - timedelta(days=LOOKBACK_DAYS)
 
     print(f"\n{'─'*60}")
     print(f"  {symbol}  —  {LOOKBACK_DAYS} jours  —  5min bars")
