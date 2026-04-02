@@ -11,9 +11,9 @@ import config
 logger = logging.getLogger(__name__)
 
 ECONOMIC_EVENTS = [
-    {"date": "2026-04-02", "event": "Fed Meeting"},
     {"date": "2026-04-03", "event": "Jobs Report (NFP)"},
     {"date": "2026-04-14", "event": "CPI Inflation"},
+    {"date": "2026-04-28", "event": "Fed Meeting"},
     {"date": "2026-04-29", "event": "Fed Meeting"},
     {"date": "2026-05-08", "event": "Jobs Report"},
     {"date": "2026-05-13", "event": "CPI Inflation"},
