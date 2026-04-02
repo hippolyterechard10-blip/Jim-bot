@@ -128,6 +128,14 @@ interface AnalysisData {
   by_reason: { reason: string; trades: number; pnl: number }[];
 }
 
+// ── Analysis geo-v4 interfaces ────────────────────────────────────────────────
+interface RollingStats   { n_trades: number; win_rate: number; profit_factor: number; avg_hold_min: number; }
+interface ExitCat        { n: number; pct: number; }
+interface ExitStats      { total: number; stop: ExitCat; target: ExitCat; timeout: ExitCat; other: ExitCat; }
+interface PeriodStats    { period: string; n_trades: number; total_pnl: number; win_rate: number; profit_factor: number; }
+interface EquityPoint    { date: string; capital: number; }
+interface EquityCurveData { capital_start: number; capital_now: number; points: EquityPoint[]; }
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtTime(s: string) {
   const d = new Date(s.includes("T") ? s : s.replace(" ", "T") + "Z");
@@ -453,453 +461,317 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
   );
 }
 
+// ── SVG Equity Curve ──────────────────────────────────────────────────────────
+function GeoEquityCurve({ data }: { data: EquityCurveData }) {
+  if (!data.points.length) {
+    return (
+      <div className="flex items-center justify-center h-32 text-slate-500 text-sm italic">
+        Waiting for first closed trades…
+      </div>
+    );
+  }
+  const W = 600; const H = 180;
+  const PL = 56; const PR = 16; const PT = 10; const PB = 28;
+  const CW = W - PL - PR; const CH = H - PT - PB;
+  const { capital_start, points } = data;
+  const allVals = [capital_start, ...points.map(p => p.capital)];
+  const rawMin  = Math.min(...allVals);
+  const rawMax  = Math.max(...allVals);
+  const pad     = Math.max((rawMax - rawMin) * 0.12, 1);
+  const minV    = rawMin - pad;
+  const maxV    = rawMax + pad;
+  const N       = points.length;
+  const toX     = (i: number) => PL + (i / N) * CW;
+  const toY     = (v: number) => PT + ((maxV - v) / (maxV - minV)) * CH;
+  const refY    = toY(capital_start);
+  const pts     = points.map((p, i) => `${toX(i + 1)},${toY(p.capital)}`).join(" ");
+  const startPt = `${toX(0)},${toY(capital_start)}`;
+  const fillPts = `${startPt} ${pts} ${toX(N)},${PT + CH} ${toX(0)},${PT + CH}`;
+  const lastCapital = points[points.length - 1]?.capital ?? capital_start;
+  const isUp    = lastCapital >= capital_start;
+  const lineCol = isUp ? "#34d399" : "#f87171";
+  const fillCol = isUp ? "#34d39920" : "#f8717120";
+  const yLabels = [maxV, capital_start, minV].map((v, i) => (
+    <text key={i} x={PL - 4} y={toY(v) + 3.5} textAnchor="end" fontSize={9} fill="#64748b">
+      ${v.toFixed(0)}
+    </text>
+  ));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 180 }}>
+      <polygon points={fillPts} fill={fillCol} />
+      <line x1={PL} y1={refY} x2={PL + CW} y2={refY}
+        stroke="#475569" strokeDasharray="5,3" strokeWidth="1" />
+      <polyline points={`${startPt} ${pts}`}
+        stroke={lineCol} strokeWidth="2.5" fill="none"
+        strokeLinecap="round" strokeLinejoin="round" />
+      {points.map((p, i) => (
+        <circle key={i} cx={toX(i + 1)} cy={toY(p.capital)} r={3}
+          fill={p.capital >= capital_start ? "#34d399" : "#f87171"}
+          stroke="#1e293b" strokeWidth="1" />
+      ))}
+      {yLabels}
+      <text x={PL + CW / 2} y={H - 6} textAnchor="middle" fontSize={9} fill="#475569">
+        {points[0]?.date} → {points[N - 1]?.date}  ·  {N} trade{N !== 1 ? "s" : ""}
+      </text>
+    </svg>
+  );
+}
+
 function AnalysisPage() {
-  const [data,         setData]         = useState<AnalysisData | null>(null);
-  const [periods,      setPeriods]      = useState<PeriodBreakdown | null>(null);
-  const [loading,      setLoading]      = useState(true);
-  const [geoBreakdown, setGeoBreakdown] = useState<AnalysisData | null>(null);
-  const [geoRecentTrades, setGeoRecentTrades] = useState<IndividualTrade[]>([]);
+  const [rolling,     setRolling]     = useState<RollingStats | null>(null);
+  const [exits,       setExits]       = useState<ExitStats | null>(null);
+  const [period,      setPeriod]      = useState<"7d" | "mtd" | "all">("all");
+  const [periodData,  setPeriodData]  = useState<PeriodStats | null>(null);
+  const [equity,      setEquity]      = useState<EquityCurveData | null>(null);
+  const [loading,     setLoading]     = useState(true);
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json()),
-      fetch(`${BASE}/api/stats/periods?expert=geo`).then(r => r.json()),
+      fetch(`${BASE}/api/analysis/rolling`).then(r => r.json()),
+      fetch(`${BASE}/api/analysis/exits`).then(r => r.json()),
+      fetch(`${BASE}/api/analysis/equity-curve`).then(r => r.json()),
     ])
-      .then(([d, p]) => {
-        setData((d as AnalysisData).total_trades !== undefined ? d as AnalysisData : null);
-        setPeriods((p as PeriodBreakdown).week ? p as PeriodBreakdown : null);
+      .then(([r, e, eq]) => {
+        setRolling(r as RollingStats);
+        setExits(e as ExitStats);
+        setEquity(eq as EquityCurveData);
       })
-      .catch(() => { setData(null); setPeriods(null); })
+      .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  // Geo breakdown — fetched once
   useEffect(() => {
-    fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json())
-      .then(geo => {
-        setGeoBreakdown((geo as AnalysisData).total_trades > 0 ? geo as AnalysisData : null);
-      }).catch(() => {});
-  }, []);
+    fetch(`${BASE}/api/analysis/period?period=${period}`)
+      .then(r => r.json())
+      .then(p => setPeriodData(p as PeriodStats))
+      .catch(() => {});
+  }, [period]);
 
-  // Geo recent trades — polls every 30s
-  useEffect(() => {
-    const refresh = () => {
-      fetch(`${BASE}/api/trades/individual?period=week&limit=50`).then(r => r.json())
-        .then(wd => {
-          const week = (wd.trades || []) as IndividualTrade[];
-          setGeoRecentTrades(week.filter(t => t.strategy_source === "geo_v4" || t.strategy_source === "geometric"));
-        }).catch(() => {});
-    };
-    refresh();
-    const id = setInterval(refresh, 30_000);
-    return () => clearInterval(id);
-  }, []);
+  const pfLabel = (pf: number) => pf === 999 ? "∞" : pf.toFixed(2);
 
-  const accentLabel = <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>;
-
-  // ── Hold duration formatter ────────────────────────────────────────────────
-  const fmtHold = (min: number) =>
-    min >= 60 ? `${(min / 60).toFixed(1)}h` : `${min.toFixed(0)}m`;
-
-  // ── Expert Breakdown — always visible ─────────────────────────────────────
-  const ExpertBreakdownSection = () => {
-    const hasAny = geoBreakdown || geoRecentTrades.length > 0;
-    if (!hasAny) return null;
-
-    const fmtP = (p: number | null) => p != null ? `$${p.toFixed(2)}` : "—";
-
-    const ExitBars = ({ d }: { d: AnalysisData }) => {
-      const top = [...d.by_reason]
-        .filter(r => r.reason !== "partial_profit_remainder")
-        .sort((a, b) => b.trades - a.trades)
-        .slice(0, 3);
-      if (!top.length) return null;
-      return (
-        <div>
-          <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Top exits</div>
-          {top.map(r => {
-            const pct = Math.round(r.trades / d.total_trades * 100);
-            return (
-              <div key={r.reason} className="flex items-center gap-2 mb-1">
-                <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full ${r.pnl >= 0 ? "bg-emerald-500/60" : "bg-red-500/60"}`} style={{ width: `${pct}%` }} />
-                </div>
-                <span className="text-[9px] text-slate-400 w-28 truncate shrink-0">{(r.reason || "—").replace(/_/g, " ")}</span>
-                <span className="text-[9px] font-mono text-slate-500 w-7 text-right shrink-0">{pct}%</span>
-              </div>
-            );
-          })}
-        </div>
-      );
-    };
-
-    const StatGrid = ({ d }: { d: AnalysisData }) => {
-      const avg = d.total_trades > 0 ? d.total_pnl / d.total_trades : 0;
-      return (
-        <div className="grid grid-cols-2 gap-2">
-          <div className="bg-slate-900/60 rounded-lg p-2.5">
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Win Rate</div>
-            <div className={`text-base font-bold font-mono ${d.win_rate >= 50 ? "text-emerald-400" : "text-red-400"}`}>{d.win_rate.toFixed(1)}%</div>
-            <div className="text-[9px] text-slate-600">{d.winning_trades}W / {d.losing_trades}L</div>
-          </div>
-          <div className="bg-slate-900/60 rounded-lg p-2.5">
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg P&amp;L</div>
-            <div className={`text-base font-bold font-mono ${avg >= 0 ? "text-emerald-400" : "text-red-400"}`}>{avg >= 0 ? "+" : ""}${avg.toFixed(4)}</div>
-            <div className="text-[9px] text-slate-600">per trade</div>
-          </div>
-          <div className="bg-slate-900/60 rounded-lg p-2.5">
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Hold</div>
-            <div className="text-base font-bold font-mono text-sky-400">{fmtHold(d.avg_hold_min)}</div>
-          </div>
-          <div className="bg-slate-900/60 rounded-lg p-2.5">
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Profit Factor</div>
-            <div className={`text-base font-bold font-mono ${d.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"}`}>
-              {d.profit_factor === 999 ? "∞" : d.profit_factor.toFixed(2)}
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    // ── Geo Expert panel ───────────────────────────────────────────────────
-    const GeoPanel = () => (
-      <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3" style={{ borderColor: "#a78bfa33" }}>
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-bold uppercase tracking-widest text-violet-400">📐 Geo Expert</span>
-          {geoBreakdown && <span className="text-[10px] text-slate-500">{geoBreakdown.total_trades} trades</span>}
-        </div>
-
-        {geoBreakdown && <StatGrid d={geoBreakdown} />}
-
-        {/* Detailed trade cards */}
-        {geoRecentTrades.length > 0 && (
-          <div>
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Recent trades</div>
-            <div className="space-y-2">
-              {geoRecentTrades.slice(0, 5).map(t => {
-                const gc = t.geo_context;
-                const isPos = (t.pnl ?? 0) >= 0;
-                const isLong = t.side === "buy" || t.side === "long";
-                return (
-                  <div key={t.trade_id} className="bg-slate-900/60 rounded-lg p-2.5 space-y-1.5">
-                    {/* Symbol + side + P&L */}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-bold text-white">{t.symbol.replace("/USD", "")}</span>
-                        <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${isLong ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>
-                          {isLong ? "↑L" : "↓S"}
-                        </span>
-                      </div>
-                      <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
-                        {isPos ? "+" : ""}${t.pnl != null ? t.pnl.toFixed(4) : "—"}
-                      </span>
-                    </div>
-                    {/* Entry → exit, hold, reason */}
-                    <div className="text-[10px] text-slate-400 font-mono">
-                      {fmtP(t.entry_price)} → {fmtP(t.exit_price)}
-                      <span className="text-slate-600 mx-1">·</span>{fmtHold(t.hold_min ?? 0)}
-                      <span className="text-slate-600 mx-1">·</span>
-                      <span className="font-sans text-slate-500">{(t.close_reason || "—").replace(/_/g, " ")}</span>
-                    </div>
-                    {/* geo_context badges */}
-                    {gc && (
-                      <div className="flex flex-wrap gap-1">
-                        {gc.confluence != null && (
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
-                            gc.confluence >= 5 ? "bg-emerald-500/20 text-emerald-400"
-                            : gc.confluence >= 3 ? "bg-sky-500/20 text-sky-400"
-                            : "bg-slate-700 text-slate-400"}`}>
-                            Conf {gc.confluence}/5
-                          </span>
-                        )}
-                        {gc.structure && (
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
-                            gc.structure === "uptrend" ? "bg-emerald-500/20 text-emerald-400"
-                            : gc.structure === "downtrend" ? "bg-red-500/20 text-red-400"
-                            : "bg-slate-700/80 text-slate-400"}`}>
-                            {gc.structure}
-                          </span>
-                        )}
-                        {gc.rsi_divergence && (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-400 font-semibold">
-                            RSI div ✓
-                          </span>
-                        )}
-                        {gc.patterns.map((p: string) => (
-                          <span key={p} className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-semibold">{p}</span>
-                        ))}
-                        {gc.atr != null && (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-mono">
-                            ATR {gc.atr.toFixed(4)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {geoBreakdown && <ExitBars d={geoBreakdown} />}
+  if (loading) {
+    return (
+      <div className="p-4 sm:p-6 flex items-center justify-center min-h-[300px] text-slate-500 text-sm">
+        Loading…
       </div>
     );
+  }
 
+  // ── Section 1: Rolling Performance ──────────────────────────────────────
+  const RollingSection = () => {
+    if (!rolling) return null;
+    const { n_trades, win_rate, profit_factor, avg_hold_min } = rolling;
+    const wrCol = n_trades === 0 ? "text-slate-500"
+      : win_rate >= 50 && win_rate <= 53 ? "text-emerald-400"
+      : win_rate > 53                    ? "text-sky-400"
+      : win_rate >= 45                   ? "text-amber-400"
+      : "text-red-400";
+    const pfCol = profit_factor === 999 ? "text-violet-400"
+      : profit_factor >= 4.2 && profit_factor <= 4.5 ? "text-emerald-400"
+      : profit_factor > 4.5                           ? "text-sky-400"
+      : profit_factor >= 1                            ? "text-amber-400"
+      : "text-red-400";
     return (
-      <div className="bg-slate-800/30 rounded-xl border border-slate-700/50 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700/50">
-          <span className="text-sm font-bold text-white">📐 Geo V4 — ETH/USD</span>
-          <span className="text-[10px] text-slate-500 ml-2">Zones ±0.3% · RSI divergence · Pass 3b</span>
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+          <span className="text-sm font-bold text-white">Rolling Performance</span>
+          <span className="text-[11px] text-slate-500">last {Math.min(30, n_trades || 0)} trades · geo_v4</span>
         </div>
         <div className="p-4">
-          <GeoPanel />
+          {n_trades === 0 ? (
+            <div className="text-slate-500 text-sm italic text-center py-6">
+              No closed geo_v4 trades since April 2, 2026
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">N Trades</div>
+                <div className="text-3xl font-bold text-white font-mono">{n_trades}</div>
+              </div>
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Win Rate</div>
+                <div className={`text-3xl font-bold font-mono ${wrCol}`}>{win_rate.toFixed(1)}%</div>
+                <div className="text-[10px] text-slate-600 mt-1">target 50-53%</div>
+              </div>
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Profit Factor</div>
+                <div className={`text-3xl font-bold font-mono ${pfCol}`}>{pfLabel(profit_factor)}</div>
+                <div className="text-[10px] text-slate-600 mt-1">target 4.2-4.5</div>
+              </div>
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Avg Hold</div>
+                <div className="text-3xl font-bold font-mono text-sky-400">{fmtHoldMin(avg_hold_min)}</div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
   };
 
-  if (loading) {
+  // ── Section 2: Exit Breakdown ─────────────────────────────────────────────
+  const ExitsSection = () => {
+    if (!exits) return null;
+    const { total, stop, target, timeout, other } = exits;
+    const cols = [
+      { key: "stop",    label: "Stop",    icon: "🛑", data: stop,    tgt: "< 35%", good: stop.pct < 35,    barCol: "bg-red-500/70"     },
+      { key: "target",  label: "Target",  icon: "🎯", data: target,  tgt: "> 50%", good: target.pct > 50,  barCol: "bg-emerald-500/70" },
+      { key: "timeout", label: "Timeout", icon: "⏱",  data: timeout, tgt: "< 15%", good: timeout.pct < 15, barCol: "bg-amber-500/70"   },
+    ];
     return (
-      <div className="p-4 sm:p-6 space-y-4">
-        <div className="flex items-center gap-3">{accentLabel}</div>
-        <ExpertBreakdownSection />
-        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">Loading…</div>
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+          <span className="text-sm font-bold text-white">Exit Breakdown</span>
+          {total > 0 && (
+            <span className="text-[11px] text-slate-500">{total} trade{total !== 1 ? "s" : ""}</span>
+          )}
+        </div>
+        <div className="p-4">
+          {total === 0 ? (
+            <div className="text-slate-500 text-sm italic text-center py-6">No closed trades yet</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                {cols.map(({ key, label, icon, data, tgt, good, barCol }) => (
+                  <div key={key}
+                    className={`rounded-lg p-3 border ${good
+                      ? "border-emerald-500/30 bg-emerald-500/5"
+                      : "border-slate-700/40 bg-slate-900/60"}`}>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">{icon} {label}</div>
+                    <div className="text-3xl font-bold font-mono text-white">{data.n}</div>
+                    <div className="text-lg font-bold font-mono text-slate-300 mt-0.5">{data.pct.toFixed(1)}%</div>
+                    <div className="text-[10px] text-slate-600 mt-1">target {tgt}</div>
+                    <div className="mt-2 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${barCol}`} style={{ width: `${Math.min(data.pct, 100)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {other.n > 0 && (
+                <div className="mt-2 text-[11px] text-slate-600 text-right">
+                  + {other.n} other ({other.pct.toFixed(1)}%)
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
     );
-  }
+  };
 
-  if (!data || data.total_trades === 0) {
+  // ── Section 3: Period Stats ───────────────────────────────────────────────
+  const PeriodSection = () => {
+    const tabs: { key: "7d" | "mtd" | "all"; label: string }[] = [
+      { key: "7d",  label: "7 days"   },
+      { key: "mtd", label: "MTD"      },
+      { key: "all", label: "All time" },
+    ];
+    const noData = !periodData || periodData.n_trades === 0;
+    const pnlCol = noData ? "text-slate-500"
+      : periodData!.total_pnl > 0 ? "text-emerald-400"
+      : periodData!.total_pnl < 0 ? "text-red-400"
+      : "text-slate-500";
+    const wrCol = noData ? "text-slate-500"
+      : periodData!.win_rate >= 50 ? "text-emerald-400"
+      : periodData!.win_rate >= 40 ? "text-amber-400"
+      : "text-red-400";
+    const pfCol = noData ? "text-slate-500"
+      : periodData!.profit_factor >= 1 ? "text-emerald-400"
+      : "text-red-400";
     return (
-      <div className="p-4 sm:p-6 space-y-4">
-        <div className="flex items-center gap-3">{accentLabel}</div>
-        <ExpertBreakdownSection />
-        <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">
-          No closed trades for Geo V4 ETH/USD — analysis will appear after the first trade.
-        </div>
-      </div>
-    );
-  }
-
-  const pfLabel   = data.profit_factor === 999 ? "∞" : data.profit_factor.toFixed(2);
-  const exSign    = data.expectancy >= 0 ? "+" : "";
-  const holdLabel = data.avg_hold_min >= 60
-    ? `${(data.avg_hold_min / 60).toFixed(1)}h`
-    : `${data.avg_hold_min.toFixed(0)}m`;
-  const streakCol = data.current_streak?.type === "win" ? "text-emerald-400" : "text-red-400";
-  const streakLbl = data.current_streak
-    ? `${data.current_streak.count} ${data.current_streak.type} streak`
-    : "—";
-
-  const maxAssetPnl = Math.max(...data.by_asset.map(a => Math.abs(a.pnl)), 0.01);
-
-  return (
-    <div className="p-4 sm:p-6 space-y-6">
-      <div className="flex items-center gap-3 flex-wrap">
-        {accentLabel}
-      </div>
-      <ExpertBreakdownSection />
-
-      {/* ── KPI Row 1 ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <StatCard label="Win Rate"      value={`${data.win_rate.toFixed(1)}%`}
-          sub={`${data.winning_trades}W / ${data.losing_trades}L`}
-          color={data.win_rate >= 50 ? "text-emerald-400" : "text-red-400"} />
-        <StatCard label="Profit Factor" value={pfLabel}
-          sub={`Gross win $${data.gross_win.toFixed(2)}`}
-          color={data.profit_factor >= 1 ? "text-emerald-400" : "text-red-400"} />
-        <StatCard label="Expectancy"    value={`${exSign}$${data.expectancy.toFixed(4)}`}
-          sub="avg $ per trade"
-          color={data.expectancy >= 0 ? "text-sky-400" : "text-red-400"} />
-        <StatCard label="Avg Hold"      value={holdLabel}
-          sub={`${data.avg_trades_per_day.toFixed(1)} trades/day`} />
-      </div>
-
-      {/* ── KPI Row 2 ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <StatCard label="Total Trades"  value={`${data.total_trades}`}
-          sub={`${data.avg_trades_per_day.toFixed(1)} per active day`} />
-        <StatCard label="Best Trade"
-          value={data.best_trade ? `+$${data.best_trade.pnl.toFixed(4)}` : "—"}
-          sub={data.best_trade?.symbol}  color="text-emerald-400" />
-        <StatCard label="Worst Trade"
-          value={data.worst_trade ? `$${data.worst_trade.pnl.toFixed(4)}` : "—"}
-          sub={data.worst_trade?.symbol} color={data.worst_trade && data.worst_trade.pnl < 0 ? "text-red-400" : "text-emerald-400"} />
-        <StatCard label="Win Streak"    value={streakLbl}
-          sub={`Max: ${data.max_win_streak}W / ${data.max_loss_streak}L`}
-          color={streakCol} />
-      </div>
-
-      {/* ── Win Rate by Period ───────────────────────────────────── */}
-      {periods && (
-        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700/50">
-            <span className="text-sm font-bold text-white">Win Rate by Period</span>
-          </div>
-          <div className="grid grid-cols-3 divide-x divide-slate-700/50">
-            {(["week", "month", "ytd"] as const).map(key => {
-              const p   = periods[key];
-              const wr  = p.win_rate;
-              const col = wr === null ? "text-slate-500"
-                        : wr >= 60   ? "text-emerald-400"
-                        : wr >= 50   ? "text-sky-400"
-                        : "text-red-400";
-              const pnlCol = p.pnl > 0 ? "text-emerald-400" : p.pnl < 0 ? "text-red-400" : "text-slate-500";
-              const label = key === "week" ? "This Week" : key === "month" ? "This Month" : "YTD";
-              return (
-                <div key={key} className="flex flex-col items-center py-4 gap-1">
-                  <span className="text-xs text-slate-500 uppercase tracking-widest">{label}</span>
-                  <span className={`text-2xl font-bold ${col}`}>
-                    {wr !== null ? `${wr.toFixed(1)}%` : "—"}
-                  </span>
-                  <span className="text-xs text-slate-400">{p.wins}W / {p.losses}L</span>
-                  <span className={`text-xs font-semibold ${pnlCol}`}>
-                    {p.pnl >= 0 ? "+" : ""}{p.pnl.toFixed(2)} P&L
-                  </span>
-                  <span className="text-xs text-slate-600">{p.trades} trade{p.trades !== 1 ? "s" : ""}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── P&L by Asset ──────────────────────────────────────────── */}
       <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700/50">
-          <span className="text-sm font-bold text-white">P&L by Asset</span>
+        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+          <span className="text-sm font-bold text-white">Period Stats</span>
+          <div className="flex gap-1">
+            {tabs.map(({ key, label }) => (
+              <button key={key} onClick={() => setPeriod(key)}
+                className={`text-[11px] px-2.5 py-1 rounded-md font-semibold transition-colors
+                  ${period === key
+                    ? "bg-violet-600 text-white"
+                    : "bg-slate-700 text-slate-400 hover:bg-slate-600"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="p-4 space-y-3">
-          {data.by_asset.map(a => {
-            const isPos  = a.pnl >= 0;
-            const barPct = (Math.abs(a.pnl) / maxAssetPnl) * 100;
-            return (
-              <div key={a.symbol}>
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-white">{a.symbol.replace("/USD", "")}</span>
-                    <span className="text-[10px] text-slate-500">{a.trades} trades · avg {a.avg_hold_min >= 60 ? `${(a.avg_hold_min/60).toFixed(1)}h` : `${a.avg_hold_min.toFixed(0)}m`}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className={`text-sm font-bold font-mono ${isPos ? "text-emerald-400" : "text-red-400"}`}>
-                      {isPos ? "+" : ""}${a.pnl.toFixed(4)}
-                    </span>
-                    <span className="text-[10px] text-slate-500 ml-2">avg {isPos ? "+" : ""}${a.avg_pnl.toFixed(4)}</span>
-                  </div>
-                </div>
-                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${isPos ? "bg-emerald-500/70" : "bg-red-500/70"}`}
-                    style={{ width: `${barPct}%` }}
-                  />
+        <div className="p-4">
+          {noData ? (
+            <div className="text-slate-500 text-sm italic text-center py-6">No trades for this period</div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Total P&amp;L</div>
+                <div className={`text-2xl font-bold font-mono ${pnlCol}`}>
+                  {periodData!.total_pnl >= 0 ? "+" : ""}${periodData!.total_pnl.toFixed(2)}
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Win / Loss Profile ────────────────────────────────────── */}
-      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700/50">
-          <span className="text-sm font-bold text-white">Win / Loss Profile</span>
-        </div>
-        <div className="p-4 space-y-3">
-          <div>
-            <div className="flex justify-between text-xs mb-1">
-              <span className="text-emerald-400 font-semibold">Avg Win</span>
-              <span className="text-emerald-400 font-mono font-bold">+${data.avg_win.toFixed(4)}</span>
-            </div>
-            <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-              <div className="h-full bg-emerald-500/70 rounded-full"
-                style={{ width: `${Math.min((data.avg_win / Math.max(data.avg_win, Math.abs(data.avg_loss || 0.0001))) * 100, 100)}%` }} />
-            </div>
-          </div>
-          {data.avg_loss !== 0 && (
-            <div>
-              <div className="flex justify-between text-xs mb-1">
-                <span className="text-red-400 font-semibold">Avg Loss</span>
-                <span className="text-red-400 font-mono font-bold">${data.avg_loss.toFixed(4)}</span>
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">N Trades</div>
+                <div className="text-2xl font-bold font-mono text-white">{periodData!.n_trades}</div>
               </div>
-              <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full bg-red-500/70 rounded-full"
-                  style={{ width: `${Math.min((Math.abs(data.avg_loss) / Math.max(data.avg_win, Math.abs(data.avg_loss))) * 100, 100)}%` }} />
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Win Rate</div>
+                <div className={`text-2xl font-bold font-mono ${wrCol}`}>{periodData!.win_rate.toFixed(1)}%</div>
+              </div>
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Profit Factor</div>
+                <div className={`text-2xl font-bold font-mono ${pfCol}`}>{pfLabel(periodData!.profit_factor)}</div>
               </div>
             </div>
           )}
-          <div className="flex justify-between text-xs text-slate-500 pt-1 border-t border-slate-700/40">
-            <span>
-              Reward/Risk <span className="text-white font-semibold">
-                {data.avg_loss !== 0 ? (data.avg_win / Math.abs(data.avg_loss)).toFixed(2) : "∞"}x
-              </span>
-            </span>
-            <span>
-              Expectancy <span className={`font-semibold ${data.expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {data.expectancy >= 0 ? "+" : ""}${data.expectancy.toFixed(4)}
-              </span>
-            </span>
-          </div>
         </div>
       </div>
+    );
+  };
 
-      {/* ── Equity Curve ──────────────────────────────────────────── */}
-      {data.daily_pnl.length >= 2 && (
-        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
-            <span className="text-sm font-bold text-white">Equity Curve</span>
-            <span className={`text-sm font-bold font-mono ${data.total_pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {data.total_pnl >= 0 ? "+" : ""}${data.total_pnl.toFixed(4)} cumulative
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>
+        <span className="text-[11px] text-slate-500">· filtered from April 2, 2026</span>
+      </div>
+
+      <RollingSection />
+      <ExitsSection />
+      <PeriodSection />
+
+      {/* ── Section 4: Equity Curve ──────────────────────────────────────── */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+          <span className="text-sm font-bold text-white">Equity Curve</span>
+          {equity && (
+            <span className={`text-sm font-bold font-mono ${equity.capital_now >= equity.capital_start ? "text-emerald-400" : "text-red-400"}`}>
+              ${equity.capital_now.toFixed(2)}
+              <span className="text-slate-500 font-normal text-xs ml-1.5">
+                ({equity.capital_now >= equity.capital_start ? "+" : ""}
+                {(equity.capital_now - equity.capital_start).toFixed(2)})
+              </span>
             </span>
-          </div>
-          <div className="p-4">
-            <EquityCurve data={data.daily_pnl} />
-          </div>
+          )}
         </div>
-      )}
-
-      {/* ── Close Reason + Daily P&L side-by-side ─────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {/* Close Reasons */}
-        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700/50">
-            <span className="text-sm font-bold text-white">Exit Reasons</span>
-          </div>
-          <div className="p-3 space-y-2">
-            {data.by_reason.map(r => (
-              <div key={r.reason} className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ReasonBadge reasons={r.reason} />
-                  <span className="text-xs text-slate-400">{r.trades} trades</span>
-                </div>
-                <span className={`text-xs font-mono font-bold ${r.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {r.pnl >= 0 ? "+" : ""}${r.pnl.toFixed(4)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Daily P&L */}
-        <div className="bg-slate-800 rounded-xl border border-slate-700/50 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700/50">
-            <span className="text-sm font-bold text-white">Daily P&L</span>
-          </div>
-          <div className="divide-y divide-slate-700/30">
-            {data.daily_pnl.length === 0 ? (
-              <div className="p-4 text-xs text-slate-600">No data</div>
-            ) : data.daily_pnl.map(d => (
-              <div key={d.date} className="flex items-center justify-between px-4 py-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-400">{d.date}</span>
-                  <span className="text-[10px] text-slate-600">{d.trades} trades</span>
-                </div>
-                <span className={`text-xs font-mono font-bold ${d.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(4)}
-                </span>
-              </div>
-            ))}
-          </div>
+        <div className="p-4">
+          {equity ? (
+            <GeoEquityCurve data={equity} />
+          ) : (
+            <div className="flex items-center justify-center h-32 text-slate-500 text-sm">Loading…</div>
+          )}
+          {equity && equity.points.length > 0 && (
+            <div className="mt-3 flex items-center gap-4 text-[11px] text-slate-600">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-6 border-t border-dashed border-slate-500" />
+                Start ${equity.capital_start.toFixed(2)}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 rounded-full bg-emerald-400" />
+                Win
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 rounded-full bg-red-400" />
+                Loss
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>

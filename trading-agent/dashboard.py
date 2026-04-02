@@ -496,6 +496,162 @@ def api_analysis():
         logger.error(f"api_analysis error: {e}")
         return jsonify({"error": str(e)})
 
+
+# ── Helpers communs pour les 4 endpoints Analysis Geo V4 ──────────────────────
+_GEO_V4_SRC = "json_extract(market_context, '$.strategy_source') = 'geo_v4'"
+_GEO_EXCLUDE = "close_reason NOT IN ('synced_close', 'orphan_close', 'position_reconciled')"
+
+def _geo_filter(extra: str = "") -> str:
+    """Clause WHERE complète pour trades geo_v4 depuis GEO_RESET_DATE."""
+    return (
+        f"status = 'closed' "
+        f"AND exit_at >= '{config.GEO_RESET_DATE}' "
+        f"AND {_GEO_V4_SRC} "
+        f"AND {_GEO_EXCLUDE} "
+        f"{extra}"
+    )
+
+def _categorise_reason(r: str) -> str:
+    r = (r or "").lower()
+    if any(k in r for k in ("stop", "sl_", "stop_loss")):
+        return "stop"
+    if any(k in r for k in ("target", "tp", "profit", "take_profit")):
+        return "target"
+    if any(k in r for k in ("timeout", "time", "expir", "max_hold")):
+        return "timeout"
+    return "other"
+
+
+@app.route("/api/analysis/rolling")
+def api_analysis_rolling():
+    """Section 1 — Rolling stats des 30 derniers trades geo_v4."""
+    if not _memory:
+        return jsonify({"n_trades": 0})
+    try:
+        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        rows = conn.execute(f"""
+            SELECT pnl, hold_duration_min FROM trades
+            WHERE {_geo_filter()}
+            ORDER BY exit_at DESC LIMIT 30
+        """).fetchall()
+        conn.close()
+        pnls  = [r[0] or 0 for r in rows]
+        holds = [r[1] for r in rows if r[1] is not None]
+        wins  = [p for p in pnls if p > 0]
+        losses= [p for p in pnls if p < 0]
+        total = len(pnls)
+        pf    = round(sum(wins) / abs(sum(losses)), 2) if losses else 999
+        return jsonify({
+            "n_trades":      total,
+            "win_rate":      round(len(wins) / total * 100, 1) if total else 0,
+            "profit_factor": pf,
+            "avg_hold_min":  round(sum(holds) / len(holds), 1) if holds else 0,
+        })
+    except Exception as e:
+        logger.error(f"api_analysis_rolling error: {e}")
+        return jsonify({"error": str(e), "n_trades": 0})
+
+
+@app.route("/api/analysis/exits")
+def api_analysis_exits():
+    """Section 2 — Breakdown par type de sortie (stop/target/timeout)."""
+    if not _memory:
+        return jsonify({"total": 0})
+    try:
+        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        rows = conn.execute(f"""
+            SELECT close_reason, COUNT(*) as n FROM trades
+            WHERE {_geo_filter()}
+            GROUP BY close_reason
+        """).fetchall()
+        conn.close()
+        cats = {"stop": 0, "target": 0, "timeout": 0, "other": 0}
+        for reason, cnt in rows:
+            cats[_categorise_reason(reason)] += cnt
+        total = sum(cats.values())
+        def pct(n): return round(n / total * 100, 1) if total else 0
+        return jsonify({
+            "total":   total,
+            "stop":    {"n": cats["stop"],    "pct": pct(cats["stop"])},
+            "target":  {"n": cats["target"],  "pct": pct(cats["target"])},
+            "timeout": {"n": cats["timeout"], "pct": pct(cats["timeout"])},
+            "other":   {"n": cats["other"],   "pct": pct(cats["other"])},
+        })
+    except Exception as e:
+        logger.error(f"api_analysis_exits error: {e}")
+        return jsonify({"error": str(e), "total": 0})
+
+
+@app.route("/api/analysis/period")
+def api_analysis_period():
+    """Section 3 — Stats par période : 7d / mtd / all."""
+    if not _memory:
+        return jsonify({"n_trades": 0})
+    period = request.args.get("period", "all")
+    try:
+        from datetime import timedelta
+        now   = datetime.now(timezone.utc).date()
+        since = None
+        if period == "7d":
+            since = (now - timedelta(days=7)).isoformat()
+        elif period == "mtd":
+            since = now.replace(day=1).isoformat()
+        # "all" → already covered by _geo_filter (>= GEO_RESET_DATE)
+        extra = f"AND exit_at >= '{since}'" if since else ""
+        conn  = sqlite3.connect(_memory.db_path, timeout=5)
+        rows  = conn.execute(f"""
+            SELECT pnl FROM trades WHERE {_geo_filter(extra)}
+        """).fetchall()
+        conn.close()
+        pnls  = [r[0] or 0 for r in rows]
+        wins  = [p for p in pnls if p > 0]
+        losses= [p for p in pnls if p < 0]
+        total = len(pnls)
+        pf    = round(sum(wins) / abs(sum(losses)), 2) if losses else 999
+        return jsonify({
+            "period":        period,
+            "n_trades":      total,
+            "total_pnl":     round(sum(pnls), 2),
+            "win_rate":      round(len(wins) / total * 100, 1) if total else 0,
+            "profit_factor": pf,
+        })
+    except Exception as e:
+        logger.error(f"api_analysis_period error: {e}")
+        return jsonify({"error": str(e), "n_trades": 0})
+
+
+@app.route("/api/analysis/equity-curve")
+def api_analysis_equity_curve():
+    """Section 4 — Courbe d'équité cumulée depuis GEO_RESET_DATE."""
+    if not _memory:
+        return jsonify({"capital_start": 0, "points": []})
+    try:
+        capital_start = _get_alpaca_equity()
+        conn  = sqlite3.connect(_memory.db_path, timeout=5)
+        rows  = conn.execute(f"""
+            SELECT exit_at, pnl FROM trades
+            WHERE {_geo_filter()}
+            ORDER BY exit_at
+        """).fetchall()
+        conn.close()
+        points     = []
+        cumulative = capital_start
+        for exit_at, pnl in rows:
+            cumulative += (pnl or 0)
+            points.append({
+                "date":    (exit_at or "")[:10],
+                "capital": round(cumulative, 2),
+            })
+        return jsonify({
+            "capital_start": round(capital_start, 2),
+            "capital_now":   round(cumulative, 2),
+            "points":        points,
+        })
+    except Exception as e:
+        logger.error(f"api_analysis_equity_curve error: {e}")
+        return jsonify({"capital_start": 0, "points": [], "error": str(e)})
+
+
 @app.route("/api/account")
 def api_account():
     try:
