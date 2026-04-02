@@ -71,8 +71,10 @@ class GeometricExpert:
             return config.GEO_CAPITAL
 
     def get_available(self) -> float:
+        """Utilise buying_power Alpaca — déjà net des ordres GTC en attente."""
         try:
-            return max(0.0, self._live_capital() - self.get_deployed())
+            bp = float(self.broker.api.get_account().buying_power)
+            return max(0.0, bp)
         except Exception as e:
             logger.error(f"[GEO] get_available: {e}")
             return max(0.0, config.GEO_CAPITAL - self.get_deployed())

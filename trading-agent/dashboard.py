@@ -44,6 +44,9 @@ def _verify_token(token: str) -> bool:
     return hmac.compare_digest(expected, sig)
 
 def _is_authenticated() -> bool:
+    # Requêtes internes depuis localhost (proxy api-server) → toujours autorisées
+    if request.remote_addr in ("127.0.0.1", "::1"):
+        return True
     token = request.cookies.get(_AUTH_COOKIE, "")
     return bool(token) and _verify_token(token)
 
