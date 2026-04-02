@@ -7,7 +7,7 @@ Simule exactement la nouvelle logique :
   Pass 2 — 15min: niveau S/R testé >= 2x dans la zone 0.1%-1.5%
   Pass 3 — 5min : momentum + RSI[25-55] + volume > 0.3x
   Pass 4 — stop : swing low 5min + 0.2% buffer, fallback -0.3%
-  Pass 5 — target: prochain swing high 5min [+0.3%-1.5%], fallback +0.5%
+  Pass 5 — target: prochain swing high 5min [+0.7%-2.0%], fallback +0.9%
 
 Aucun look-ahead : toutes les données utilisées à l'instant T
 sont strictement antérieures à T.
