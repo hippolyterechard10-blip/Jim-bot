@@ -75,7 +75,7 @@ def main():
     logger.info(f"💰 Capital : ${config.GEO_CAPITAL} | Asset : {config.GEO_SYMBOL}")
 
     # Dashboard
-    start_dashboard(memory, scanner=None, regime=regime, port=5000)
+    start_dashboard(memory, regime=regime, port=5000)
 
     # Fast loop
     fast_thread = make_fast_thread(geo, broker)

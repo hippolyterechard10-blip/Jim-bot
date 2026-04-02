@@ -14,18 +14,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 _memory: Optional[TradingMemory] = None
-_analyzer = None
-_scanner = None
 _regime  = None
-_agent   = None
 
-def init_dashboard(memory, analyzer=None, scanner=None, regime=None, agent=None):
-    global _memory, _analyzer, _scanner, _regime, _agent
+def init_dashboard(memory, regime=None, **kwargs):
+    global _memory, _regime
     _memory  = memory
-    _analyzer = analyzer
-    _scanner = scanner
     _regime  = regime
-    _agent   = agent
 
 @app.route("/api/stats")
 def api_stats():
@@ -130,56 +124,29 @@ def api_recent_analyses():
 
 @app.route("/api/anomalies")
 def api_anomalies():
-    if not _analyzer: return jsonify([])
-    return jsonify(_analyzer.detect_performance_anomalies())
+    return jsonify([])
 
 @app.route("/api/movers")
 def api_movers():
-    if not _scanner:
-        return jsonify({"movers": [], "error": "scanner not initialized"})
-    try:
-        movers = _scanner.get_top_movers(top_n=6)
-        return jsonify({"movers": movers, "ts": datetime.now(timezone.utc).isoformat()})
-    except Exception as e:
-        return jsonify({"movers": [], "error": str(e)})
+    return jsonify({"movers": [], "note": "geo-only mode"})
 
 @app.route("/api/sentiment")
 def api_sentiment():
-    if not _scanner:
-        return jsonify({"sentiment": "neutral", "score": 0, "headlines": [], "alerts": []})
-    try:
-        result = _scanner.analyze_sentiment()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"sentiment": "neutral", "score": 0, "headlines": [], "alerts": [], "error": str(e)})
+    return jsonify({"sentiment": "neutral", "score": 0, "headlines": [], "alerts": []})
 
 @app.route("/api/calendar")
 def api_calendar():
-    if not _scanner:
-        return jsonify({"event": None, "note": ""})
-    try:
-        result = _scanner.check_economic_calendar()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"event": None, "note": "", "error": str(e)})
+    return jsonify({"event": None, "note": ""})
 
 @app.route("/api/regime")
 def api_regime():
     if not _regime:
-        return jsonify({"regime": "UNKNOWN", "vix": None, "dxy": None, "score_long_threshold": 60, "score_short_threshold": 30})
+        return jsonify({"regime": "UNKNOWN", "vix": None})
     try:
-        import re as _re
-        params  = _regime.get_params()
-        context = _regime.build_regime_context()
-        # Inject VIX into params if present in context string
-        vix_m = _re.search(r"VIX:\s*([\d.]+)", context)
-        if vix_m:
-            params = dict(params)
-            params["vix"] = float(vix_m.group(1))
+        cache = _regime.get_cache()
         return jsonify({
-            "regime":   params.get("regime", "UNKNOWN"),
-            "params":   params,
-            "context":  context,
+            "regime": cache.get("regime", "UNKNOWN").upper(),
+            "vix":    cache.get("vix"),
         })
     except Exception as e:
         return jsonify({"regime": "UNKNOWN", "error": str(e)})
@@ -531,61 +498,19 @@ def api_analysis():
 
 @app.route("/api/account")
 def api_account():
-    if not _agent:
-        return jsonify({"equity": 0, "cash": 0, "buying_power": 0, "portfolio_value": 0})
     try:
-        account = _agent.broker.get_account()
-        cash = float(account.cash)
-
-        # Compute live equity using our own price feed (bypasses Alpaca's ~15-min delayed marks)
-        live_equity = cash
-        live_unrealized = 0.0
-        positions_live = []
-        try:
-            positions = _agent.broker.get_positions()
-            for p in positions:
-                qty   = float(p.qty)
-                entry = float(p.avg_entry_price)
-                sym_raw = p.symbol  # e.g. LINKUSD
-                # Convert LINKUSD → LINK/USD for bar lookup
-                if sym_raw.endswith("USD") and "/" not in sym_raw:
-                    sym = sym_raw[:-3] + "/USD"
-                elif sym_raw.endswith("USDT") and "/" not in sym_raw:
-                    sym = sym_raw[:-4] + "/USDT"
-                else:
-                    sym = sym_raw
-                live_price = _agent.broker.get_live_price(sym) if "/" in sym else None
-                if live_price is None:
-                    bars = _agent.broker.get_bars(sym, "1Min", limit=2)
-                    if bars is not None and not bars.empty:
-                        live_price = float(bars["close"].iloc[-1])
-                    else:
-                        live_price = float(p.current_price)  # fallback to Alpaca mark
-                side_m = 1.0 if p.side == "long" else -1.0
-                unrealized = (live_price - entry) * qty * side_m
-                live_unrealized += unrealized
-                live_equity += qty * live_price
-                positions_live.append({
-                    "symbol":      sym,
-                    "qty":         qty,
-                    "entry_price": round(entry, 6),
-                    "live_price":  round(live_price, 6),
-                    "alpaca_mark": round(float(p.current_price), 6),
-                    "unrealized":  round(unrealized, 4),
-                })
-        except Exception as pe:
-            logger.warning(f"live equity calc error: {pe}")
-            live_equity = float(account.portfolio_value)
-
+        import alpaca_trade_api as tradeapi
+        api = tradeapi.REST(
+            os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
+            "https://paper-api.alpaca.markets"
+        )
+        account = api.get_account()
         return jsonify({
-            "equity":           float(account.equity),
-            "cash":             cash,
-            "buying_power":     float(account.buying_power),
-            "portfolio_value":  float(account.portfolio_value),
-            "last_equity":      float(account.last_equity),
-            "live_equity":      round(live_equity, 4),
-            "live_unrealized":  round(live_unrealized, 4),
-            "positions_live":   positions_live,
+            "equity":          float(account.equity),
+            "cash":            float(account.cash),
+            "buying_power":    float(account.buying_power),
+            "portfolio_value": float(account.portfolio_value),
+            "last_equity":     float(account.last_equity),
         })
     except Exception as e:
         logger.error(f"api_account error: {e}")
@@ -593,22 +518,7 @@ def api_account():
 
 @app.route("/api/stops")
 def api_stops():
-    """Return trailing stop prices per symbol from agent's in-memory state."""
-    if not _agent:
-        return jsonify({"stops": {}})
-    try:
-        stops = {}
-        high  = getattr(_agent, "_high_water", {})
-        trail = getattr(_agent, "_trail_pcts", {})
-        low   = getattr(_agent, "_low_water",  {})
-        for sym, h in high.items():
-            pct = trail.get(sym, 0.05)
-            stops[sym] = round(h * (1 - pct), 4)
-        for sym, l in low.items():
-            stops[sym] = round(l * (1 + 0.03), 4)
-        return jsonify({"stops": stops})
-    except Exception as e:
-        return jsonify({"stops": {}, "error": str(e)})
+    return jsonify({"stops": {}})
 
 @app.route("/api/health")
 def api_health():
@@ -629,15 +539,10 @@ def api_source():
         "trading-agent/main.py",
         "trading-agent/config.py",
         "trading-agent/broker.py",
-        "trading-agent/risk.py",
         "trading-agent/memory.py",
-        "trading-agent/strategy.py",
         "trading-agent/regime.py",
-        "trading-agent/scanner.py",
-        "trading-agent/correlations.py",
         "trading-agent/geometry.py",
-        "trading-agent/synthesis.py",
-        "trading-agent/agent.py",
+        "trading-agent/experts/geometric_expert.py",
         "trading-agent/dashboard.py",
     ]
 
@@ -661,7 +566,7 @@ def api_source():
     chunks.append(f"\n{SEP}\nTotal: {len(PYTHON_FILES)} files, {total_lines} lines\n{SEP}\n")
     return Response("".join(chunks), mimetype="text/plain; charset=utf-8")
 
-AGENT_FILES = ["agent", "analyzer", "dashboard", "notifier", "news_intelligence", "synthesis"]
+AGENT_FILES = ["main", "config", "broker", "memory", "regime", "geometry", "dashboard"]
 
 @app.route("/api/source/<filename>")
 def source_file(filename):
@@ -679,124 +584,55 @@ def source_file(filename):
 
 @app.route("/api/experts/stats")
 def api_experts_stats():
-    """Returns independent P&L and capital for each expert.
-
-    Capital source of truth = Alpaca account equity (not DB PnL, which can contain
-    mis-priced synced_close entries).
-
-    Logic:
-      - capital_start = initial per expert (from capital_lock.json initial_ keys, default 513)
-      - gap_capital_now  = capital_start + sum(V2 gap pnl from DB)   [gap trades are reliable]
-      - geo_capital_now  = alpaca_equity - gap_capital_now            [derived from real account]
-      - total_pnl        = capital_now - capital_start                [always consistent]
-    """
+    """Geo-Only ETH — capital et stats de la stratégie geo_v4."""
     if not _memory:
         return jsonify({})
     try:
         import json as _json
-
-        # ── Read initial capital from capital_lock.json ────────────────────────
-        lock = {}
-        try:
-            with open(config._CAPITAL_LOCK_FILE) as f:
-                lock = _json.load(f)
-        except Exception:
-            pass
-
-        # ── Fetch real account equity from Alpaca ──────────────────────────────
-        alpaca_equity = None
-        if _agent:
-            try:
-                alpaca_equity = float(_agent.broker.api.get_account().equity)
-            except Exception as e:
-                logger.warning(f"api_experts_stats: could not fetch Alpaca equity: {e}")
-
+        EXCLUDE = ("synced_close", "orphan_close", "position_reconciled")
         all_trades = _memory.get_recent_trades(limit=500)
-
-        # ── Per-source trade filtering ─────────────────────────────────────────
-        by_source = {"gapper": [], "geometric": []}
+        geo_trades = []
         for t in all_trades:
             ctx = t.get("market_context") or {}
             if isinstance(ctx, str):
                 try: ctx = _json.loads(ctx)
                 except: ctx = {}
-            src = ctx.get("strategy_source")
-            if src in by_source:
-                by_source[src].append(t)
-
-        # ── Stats filter (V2-only, for win-rate / avg-win / avg-loss) ─────────
-        V2_EXCLUDE = ("partial_profit_remainder", "synced_close", "orphan_close", "position_reconciled")
-
-        # ── Gap capital: DB PnL is reliable (V2 closes only, few trades) ──────
-        gap_initial = lock.get("initial_gapper", 513.0)
-        gap_v2_closed = [t for t in by_source["gapper"]
-                         if t.get("status") == "closed"
-                         and t.get("close_reason") not in V2_EXCLUDE]
-        gap_v2_pnl   = sum(t.get("pnl") or 0 for t in gap_v2_closed)
-        gap_capital_now = round(gap_initial + gap_v2_pnl, 2)
-
-        result = {}
-        for source in ["gapper", "geometric"]:
-            trades     = by_source[source]
-            v2_closed  = [t for t in trades if t.get("status") == "closed"
-                          and t.get("close_reason") not in V2_EXCLUDE]
-            pnls   = [t.get("pnl") or 0 for t in v2_closed]
-            wins   = [p for p in pnls if p > 0]
-            losses = [p for p in pnls if p < 0]
-
-            capital_start = lock.get(f"initial_{source}", 513.0)
-
-            if source == "gapper":
-                capital_now = gap_capital_now
-            else:
-                # Geo = real account equity minus what gap holds
-                # Falls back to gap_initial + total_v2_pnl if Alpaca unavailable
-                if alpaca_equity is not None:
-                    capital_now = round(alpaca_equity - gap_capital_now, 2)
-                else:
-                    geo_v2_pnl  = sum(t.get("pnl") or 0 for t in v2_closed)
-                    capital_now = round(capital_start + geo_v2_pnl, 2)
-
-            total_pnl = round(capital_now - capital_start, 4)
-
-            open_trades = [t for t in trades if t.get("status") == "open"]
-            live_unrealized = 0.0
-            if _agent:
-                for ot in open_trades:
-                    sym  = ot.get("symbol", "")
-                    qty  = float(ot.get("qty") or 0)
-                    entry = float(ot.get("entry_price") or 0)
-                    if not sym or not qty or not entry:
-                        continue
-                    try:
-                        lp = _agent.broker.get_live_price(sym) if "/" in sym else None
-                        if lp:
-                            side_m = 1.0 if ot.get("side") == "buy" else -1.0
-                            live_unrealized += (lp - entry) * qty * side_m
-                    except Exception:
-                        pass
-
-            result[source] = {
-                "total_trades":    len(v2_closed),
-                "total_pnl":       round(total_pnl, 4),
-                "win_rate":        round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
-                "avg_win":         round(sum(wins) / len(wins), 4) if wins else 0,
-                "avg_loss":        round(sum(losses) / len(losses), 4) if losses else 0,
-                "capital_start":   capital_start,
-                "capital_now":     capital_now,
-                "capital_return":  round(total_pnl / capital_start * 100, 2)
-                                   if capital_start > 0 else 0,
-                "open_trades":     len(open_trades),
-                "live_unrealized": round(live_unrealized, 4),
+            if ctx.get("strategy_source") == "geo_v4":
+                geo_trades.append(t)
+        closed = [t for t in geo_trades if t.get("status") == "closed"
+                  and t.get("close_reason") not in EXCLUDE]
+        pnls   = [t.get("pnl") or 0 for t in closed]
+        wins   = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        pf     = round(sum(wins) / abs(sum(losses)), 2) if losses else 999
+        deployed = sum(
+            float(t.get("entry_price", 0)) * float(t.get("qty", 0))
+            for t in geo_trades if t.get("status") == "open"
+        )
+        capital_now = round(config.GEO_CAPITAL + sum(pnls) - deployed, 2)
+        total_pnl   = round(sum(pnls), 4)
+        return jsonify({
+            "geo_v4": {
+                "total_trades":   len(closed),
+                "total_pnl":      total_pnl,
+                "win_rate":       round(len(wins) / len(pnls) * 100, 1) if pnls else 0,
+                "profit_factor":  pf,
+                "avg_win":        round(sum(wins) / len(wins), 4) if wins else 0,
+                "avg_loss":       round(sum(losses) / len(losses), 4) if losses else 0,
+                "capital_start":  config.GEO_CAPITAL,
+                "capital_now":    max(0.0, capital_now),
+                "capital_return": round(total_pnl / config.GEO_CAPITAL * 100, 2),
+                "open_trades":    len([t for t in geo_trades if t.get("status") == "open"]),
+                "deployed":       round(deployed, 2),
             }
-        return jsonify(result)
+        })
     except Exception as e:
         logger.error(f"api_experts_stats error: {e}")
         return jsonify({"error": str(e)})
 
-def start_dashboard(memory, analyzer=None, scanner=None, regime=None, agent=None, port=8080):
+def start_dashboard(memory, regime=None, port=8080, **kwargs):
     import subprocess, time as _time
-    init_dashboard(memory, analyzer, scanner=scanner, regime=regime, agent=agent)
+    init_dashboard(memory, regime=regime)
     # Release port from any lingering previous process (daemon thread didn't exit fast enough)
     try:
         subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=3)
@@ -886,24 +722,21 @@ header{display:flex;justify-content:space-between;align-items:center;padding:16p
   <div class="stat-card"><div class="stat-label">Max Drawdown</div><div class="stat-value neg" id="kpi-dd">—</div></div>
   <div class="stat-card"><div class="stat-label">Positions Open</div><div class="stat-value neu" id="kpi-open">—</div></div>
 </div>
-<div class="experts-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-bottom:1px">
-  <div style="background:var(--surface);padding:20px">
-    <div class="panel-title">🚀 Gapper Expert</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div><div class="stat-label">Capital</div><div class="stat-value pos" id="gap-capital">—</div></div>
-      <div><div class="stat-label">Return</div><div class="stat-value pos" id="gap-return">—</div></div>
-      <div><div class="stat-label">Trades</div><div class="stat-value neu" id="gap-trades">—</div></div>
-      <div><div class="stat-label">Win Rate</div><div class="stat-value neu" id="gap-wr">—</div></div>
-    </div>
+<div class="experts-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--border);margin-bottom:1px">
+  <div style="background:var(--surface);padding:20px;text-align:center">
+    <div class="stat-label">📐 Capital</div><div class="stat-value pos" id="geo-capital">—</div>
   </div>
-  <div style="background:var(--surface);padding:20px">
-    <div class="panel-title">📐 Geometric Expert</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-      <div><div class="stat-label">Capital</div><div class="stat-value pos" id="geo-capital">—</div></div>
-      <div><div class="stat-label">Return</div><div class="stat-value pos" id="geo-return">—</div></div>
-      <div><div class="stat-label">Trades</div><div class="stat-value neu" id="geo-trades">—</div></div>
-      <div><div class="stat-label">Win Rate</div><div class="stat-value neu" id="geo-wr">—</div></div>
-    </div>
+  <div style="background:var(--surface);padding:20px;text-align:center">
+    <div class="stat-label">Return</div><div class="stat-value pos" id="geo-return">—</div>
+  </div>
+  <div style="background:var(--surface);padding:20px;text-align:center">
+    <div class="stat-label">Trades</div><div class="stat-value neu" id="geo-trades">—</div>
+  </div>
+  <div style="background:var(--surface);padding:20px;text-align:center">
+    <div class="stat-label">Win Rate</div><div class="stat-value neu" id="geo-wr">—</div>
+  </div>
+  <div style="background:var(--surface);padding:20px;text-align:center">
+    <div class="stat-label">Profit Factor</div><div class="stat-value neu" id="geo-pf">—</div>
   </div>
 </div>
 <div class="main">
@@ -946,24 +779,20 @@ setInterval(updateClock,1000);updateClock();
 async function updateExpertStats() {
   const d = await fetchJSON('/api/experts/stats');
   if (!d) return;
-  const g = d.gapper || {};
-  const geo = d.geometric || {};
+  const geo = d.geo_v4 || {};
   const fmt$ = v => '$' + Math.abs(v).toFixed(2);
-  const fmtPct2 = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-
-  document.getElementById('gap-capital').textContent = fmt$(g.capital_now || 500);
-  document.getElementById('gap-capital').className = 'stat-value ' + ((g.capital_now || 500) >= 500 ? 'pos' : 'neg');
-  document.getElementById('gap-return').textContent = fmtPct2(g.capital_return || 0);
-  document.getElementById('gap-return').className = 'stat-value ' + ((g.capital_return || 0) >= 0 ? 'pos' : 'neg');
-  document.getElementById('gap-trades').textContent = g.total_trades || 0;
-  document.getElementById('gap-wr').textContent = (g.win_rate || 0).toFixed(1) + '%';
-
-  document.getElementById('geo-capital').textContent = fmt$(geo.capital_now || 500);
-  document.getElementById('geo-capital').className = 'stat-value ' + ((geo.capital_now || 500) >= 500 ? 'pos' : 'neg');
-  document.getElementById('geo-return').textContent = fmtPct2(geo.capital_return || 0);
-  document.getElementById('geo-return').className = 'stat-value ' + ((geo.capital_return || 0) >= 0 ? 'pos' : 'neg');
-  document.getElementById('geo-trades').textContent = geo.total_trades || 0;
-  document.getElementById('geo-wr').textContent = (geo.win_rate || 0).toFixed(1) + '%';
+  const fmtPct2 = v => (v >= 0 ? '+' : '') + parseFloat(v).toFixed(2) + '%';
+  const cap = geo.capital_now ?? 1000;
+  const ret = geo.capital_return ?? 0;
+  document.getElementById('geo-capital').textContent = fmt$(cap);
+  document.getElementById('geo-capital').className = 'stat-value ' + (cap >= 1000 ? 'pos' : 'neg');
+  document.getElementById('geo-return').textContent = fmtPct2(ret);
+  document.getElementById('geo-return').className = 'stat-value ' + (ret >= 0 ? 'pos' : 'neg');
+  document.getElementById('geo-trades').textContent = geo.total_trades ?? 0;
+  document.getElementById('geo-wr').textContent = (geo.win_rate ?? 0).toFixed(1) + '%';
+  const pf = geo.profit_factor ?? 0;
+  document.getElementById('geo-pf').textContent = pf >= 999 ? '∞' : parseFloat(pf).toFixed(2);
+  document.getElementById('geo-pf').className = 'stat-value ' + (pf >= 1 ? 'pos' : 'neg');
 }
 async function updateStats(){
   const s=await fetchJSON('/api/stats');
