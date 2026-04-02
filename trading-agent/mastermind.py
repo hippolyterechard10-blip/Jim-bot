@@ -536,8 +536,13 @@ class Mastermind:
                 logger.info(f"[MASTERMIND] 📊 Regime for geo evaluation: {_regime_str.upper()}")
                 _vix = self.regime._cache.get("vix")
                 _dxy = self.regime._cache.get("dxy")
+                _sentiment = self.scanner.analyze_sentiment()
+                _sentiment_score = _sentiment.get("score", 0)
+                _sentiment_alerts = _sentiment.get("alerts", [])
+                if _sentiment_alerts:
+                    logger.warning(f"[MASTERMIND] ⚡ Sentiment alerts: {_sentiment_alerts}")
                 for symbol in candidates:
-                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str, vix=_vix, dxy=_dxy)
+                    self.geometric.evaluate(symbol, size_modifier=_eff_modifier, regime=_regime_str, vix=_vix, dxy=_dxy, sentiment_score=_sentiment_score, sentiment_alerts=_sentiment_alerts)
             else:
                 self.geometric.flush_candidates()  # Clear queue
 

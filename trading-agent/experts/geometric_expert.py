@@ -109,7 +109,7 @@ class GeometricExpert:
         if confluence_score >= 4: return 0.90
         return 0.80
 
-    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown", vix=None, dxy=None):
+    def evaluate(self, symbol: str, size_modifier: float = 1.0, regime: str = "unknown", vix=None, dxy=None, sentiment_score: int = 0, sentiment_alerts=None):
         import uuid
         from strategy import compute_indicators, is_good_stock_window, is_crypto_good_hours
 
@@ -419,6 +419,11 @@ class GeometricExpert:
                 tier3 += 1
                 logger.info(f"[GEO] {symbol} — ranging market, optimal for geo (+1)")
 
+            # ── Sentiment bonus: very bullish news confirms longs
+            if sentiment_score >= 3 and side == "long":
+                tier3 += 1
+                logger.info(f"[GEO] {symbol} — very bullish sentiment score={sentiment_score} (+1)")
+
             # ── Total score
             total_score = tier1 + tier2 + tier3
             logger.info(
@@ -465,6 +470,14 @@ class GeometricExpert:
             if vix is not None and vix > 25:
                 _stop_pct = 0.003
                 logger.info(f"[GEO] VIX={vix:.1f} > 25 → stop tightened to 0.3%")
+
+            # ── News sentiment gate
+            if sentiment_alerts:
+                logger.info(f"[GEO] {symbol} — high-alert news detected → pause all entries")
+                return
+            if sentiment_score <= -3 and side == "long":
+                logger.info(f"[GEO] {symbol} — very_bearish news sentiment → no longs")
+                return
 
             if total_score < _threshold:
                 logger.info(
