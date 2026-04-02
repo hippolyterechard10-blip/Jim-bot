@@ -121,7 +121,8 @@ class GeometricExpert:
         if is_crypto and not is_crypto_good_hours():
             return
 
-        # Stocks: block entries within 10 minutes of 16:00 ET close
+        # Stocks: block entries within 10 minutes of 16:00 ET close,
+        # and before 9:35 ET (first complete 1-min candle not yet formed)
         if not is_crypto:
             import datetime as _dt
             try:
@@ -133,6 +134,9 @@ class GeometricExpert:
             _now_et = _dt.datetime.now(_ET)
             if _now_et.hour == 15 and _now_et.minute >= 50:
                 logger.info(f"[GEO] {symbol} — within 10 min of close (15:{_now_et.minute} ET), skip")
+                return
+            if _now_et.hour == 9 and _now_et.minute < 35:
+                logger.info(f"[GEO] {symbol} — pre-open (9:{_now_et.minute:02d} ET), skip stocks")
                 return
 
         logger.info(f"[GEO] ✅ Session OK: {symbol}, evaluating...")
