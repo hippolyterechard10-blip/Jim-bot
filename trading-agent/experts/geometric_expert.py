@@ -79,8 +79,11 @@ class GeometricExpert:
                 if sym not in open_db and any(s in sym for s in config.GEO_SYMBOLS):
                     entry  = float(pos.avg_entry_price)
                     qty    = float(pos.qty)
-                    stop   = round(entry * 0.997, 4)
-                    target = round(entry * 1.009, 4)
+                    # Reconstituer zone_center (entry est zone_high = center × 1.003)
+                    # et stop = zone_low × 0.999 = (center × 0.997) × 0.999
+                    center = entry / (1 + config.GEO_ZONE_PCT)
+                    stop   = round(center * (1 - config.GEO_ZONE_PCT) * 0.999, 4)
+                    target = round(entry * (1 + config.GEO_TARGET_PCT), 4)
                     self.memory.log_trade_open(
                         trade_id=str(uuid.uuid4()),
                         symbol=sym, side="buy",

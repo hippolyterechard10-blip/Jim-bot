@@ -817,7 +817,18 @@ def api_orders_pending():
 
 @app.route("/api/stops")
 def api_stops():
-    return jsonify({"stops": {}})
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(_memory.db_path, timeout=3)
+        rows = conn.execute(
+            "SELECT symbol, stop_loss FROM trades WHERE status='open' AND stop_loss IS NOT NULL"
+        ).fetchall()
+        conn.close()
+        stops = {r[0]: float(r[1]) for r in rows if r[1]}
+        return jsonify({"stops": stops})
+    except Exception as e:
+        logger.error(f"api_stops error: {e}")
+        return jsonify({"stops": {}})
 
 @app.route("/api/health")
 def api_health():
