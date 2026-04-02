@@ -185,6 +185,7 @@ class GeometricExpert:
             opens_1m   = bars_1m["open"].tolist()
             volumes_1m = bars_1m["volume"].tolist()
             current_price = closes_1m[-1]
+            _momentum_threshold = -0.03 if is_crypto else -0.015
             momentum_30m = (closes_1m[-1] - closes_1m[-30]) / closes_1m[-30] if len(closes_1m) >= 30 else None
 
             # STEP 1 — Support/Resistance via geometry.py
@@ -421,21 +422,7 @@ class GeometricExpert:
                 logger.info(f"[GEO] {symbol} — Tier 1 too weak ({tier1}), skip")
                 return
 
-            # ── Momentum filter: avoid falling knives
-            _falling_knife_reduce = False
-            if side == "long" and momentum_30m is not None and momentum_30m < -0.02:
-                if tier1 >= 4 and rsi_divergence:
-                    _falling_knife_reduce = True
-                    logger.info(
-                        f"[GEO] {symbol} — counter-momentum long allowed with RSI divergence, "
-                        f"size reduced 40% (30m={momentum_30m*100:.1f}%)"
-                    )
-                else:
-                    logger.info(
-                        f"[GEO] {symbol} — falling knife: {momentum_30m*100:.1f}% in 30m, "
-                        f"tier1={tier1} too weak to fight momentum"
-                    )
-                    return
+            _falling_knife_reduce = False  # resolved after total_score below
 
             # ── TIER 2 — Precision filters (max 4.0)
             tier2 = 0.0
@@ -516,6 +503,21 @@ class GeometricExpert:
                 f"[GEO] {symbol} — Score {total_score:.1f} "
                 f"(T1={tier1} T2={tier2:.1f} T3={tier3}) side={side}"
             )
+
+            # ── Momentum filter: avoid falling knives (uses total_score)
+            if side == "long" and momentum_30m is not None and momentum_30m < _momentum_threshold:
+                if total_score >= 6 and rsi_divergence:
+                    _falling_knife_reduce = True
+                    logger.info(
+                        f"[GEO] {symbol} — counter-momentum long allowed, size ×0.6 "
+                        f"(30m={momentum_30m*100:.1f}%, score={total_score:.1f})"
+                    )
+                else:
+                    logger.info(
+                        f"[GEO] {symbol} — falling knife: {momentum_30m*100:.1f}% in 30m, skip "
+                        f"(score={total_score:.1f}, rsi_div={rsi_divergence})"
+                    )
+                    return
 
             # ── Regime-aware parameters ───────────────────────────────────────
             _regime = (regime or "unknown").lower()
