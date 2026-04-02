@@ -305,21 +305,25 @@ class GeometricExpert:
                     structure = "range"
 
                 if structure == "uptrend" and side == "short":
-                    _reg_now = (regime or "unknown").lower()
-                    if _reg_now in ("bull", "panic"):
-                        logger.info(f"[GEO] SKIP: short in uptrend during {_reg_now} — double counter-trend")
-                    else:
-                        logger.info(f"[GEO] {symbol} — uptrend, skipping short")
-                    return
-                if structure == "downtrend" and side == "long":
-                    _reg_now = (regime or "unknown").lower()
-                    if _reg_now in ("bear", "panic"):
-                        logger.info(f"[GEO] SKIP: long in downtrend during {_reg_now} — double counter-trend")
+                    _current_regime = (regime or "unknown").lower()
+                    if _current_regime in ("bull", "panic"):
+                        logger.info(f"[GEO] SKIP: short in uptrend during {_current_regime} — double counter-trend")
                         return
-                    if _reg_now in ("choppy", "bull") and rsi_divergence:
-                        logger.info(f"[GEO] {symbol} — downtrend BUT RSI divergence confirmed in {_reg_now} → allowing counter-trend long")
+                    elif _current_regime in ("choppy", "bear") and rsi_divergence:
+                        logger.info(f"[GEO] {symbol} — uptrend BUT RSI divergence confirmed in {_current_regime} → allowing counter-trend short")
                     else:
-                        logger.info(f"[GEO] {symbol} — downtrend without RSI divergence in {_reg_now}, skip long")
+                        logger.info(f"[GEO] {symbol} — uptrend without RSI divergence, skip short")
+                        return
+
+                if structure == "downtrend" and side == "long":
+                    _current_regime = (regime or "unknown").lower()
+                    if _current_regime in ("bear", "panic"):
+                        logger.info(f"[GEO] SKIP: long in downtrend during {_current_regime} — double counter-trend")
+                        return
+                    elif _current_regime in ("choppy", "bull") and rsi_divergence:
+                        logger.info(f"[GEO] {symbol} — downtrend BUT RSI divergence confirmed in {_current_regime} → allowing counter-trend long")
+                    else:
+                        logger.info(f"[GEO] {symbol} — downtrend without RSI divergence, skip long")
                         return
             else:
                 structure = "unknown"
