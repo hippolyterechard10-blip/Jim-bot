@@ -61,17 +61,7 @@ class GeometricExpert:
 
     def get_available(self) -> float:
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.memory.db_path, timeout=5)
-            row  = conn.execute("""
-                SELECT COALESCE(SUM(pnl), 0.0) FROM trades
-                WHERE status = 'closed'
-                  AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
-                  AND close_reason != 'synced_close'
-            """).fetchone()
-            conn.close()
-            closed_pnl = float(row[0]) if row and row[0] is not None else 0.0
-            return max(0.0, config.GEO_CAPITAL + closed_pnl - self.get_deployed())
+            return max(0.0, (config.GEO_CAPITAL + self._closed_pnl()) - self.get_deployed())
         except Exception as e:
             logger.error(f"[GEO] get_available: {e}")
             return max(0.0, config.GEO_CAPITAL - self.get_deployed())

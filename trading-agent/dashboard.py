@@ -149,7 +149,7 @@ def api_stats_periods():
         if expert == "gap":
             src_filter = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
         elif expert == "geo":
-            src_filter = "AND json_extract(market_context, '$.strategy_source') = 'geometric'"
+            src_filter = "AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
 
         def _pstats(since):
             date_clause = f"AND exit_at >= '{since}'" if since else ""
@@ -495,7 +495,7 @@ def api_analysis():
         if expert == "gap":
             ef = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
         elif expert == "geo":
-            ef = "AND json_extract(market_context, '$.strategy_source') = 'geometric'"
+            ef = "AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
         else:
             ef = ""
 
