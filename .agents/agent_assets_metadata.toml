@@ -18,3 +18,9 @@ id = "kLyEljESrB6l9RP43LVij"
 uri = "file://jimbot_source_20260401.zip"
 type = "unspecified"
 title = "jimbot_source_20260401.zip — Code source à jour"
+
+[[outputs]]
+id = "lS8UIr4qtEw42ZGk3Cb5N"
+uri = "file://jimbot_source.zip"
+type = "unspecified"
+title = "Jim Bot — Code source (trading-agent/)"
