@@ -60,6 +60,11 @@ interface StatsResponse {
 interface PartialProfits { [symbol: string]: { secured_pnl: number; count: number } }
 interface Stops { [symbol: string]: number }
 interface OpenDbTrade { symbol: string; strategy_source: string | null; deployed: number; qty: number; entry_price: number; }
+interface PendingOrder {
+  id: string; symbol: string; side: string; qty: number;
+  limit_price: number | null; estimated_value: number | null;
+  status: string; created_at: string; time_in_force: string;
+}
 interface PositionLive {
   symbol: string; qty: number; entry_price: number;
   live_price: number; alpaca_mark: number; unrealized: number;
@@ -922,6 +927,68 @@ function TradeDetailModal({ tradeId, onClose }: { tradeId: string; onClose: () =
 }
 
 // ── TRADES PAGE ───────────────────────────────────────────────────────────────
+function PendingOrdersSection({ orders }: { orders: PendingOrder[] }) {
+  if (orders.length === 0) return null;
+  const fmtAge = (created_at: string) => {
+    try {
+      const ms = Date.now() - new Date(created_at).getTime();
+      const h = Math.floor(ms / 3_600_000);
+      const m = Math.floor((ms % 3_600_000) / 60_000);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    } catch { return "—"; }
+  };
+  return (
+    <div className="mb-6">
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-base font-bold text-white">Pending Orders</h2>
+        <span className="text-[10px] font-semibold bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded px-1.5 py-0.5">
+          ⏳ {orders.length} GTC
+        </span>
+      </div>
+      <div className="bg-slate-800/60 rounded-xl border border-slate-700/40 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-slate-700">
+                {["Asset","Side","Qty","Limit","~Value","TIF","Age"].map(h => (
+                  <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700/40">
+              {orders.map(o => {
+                const ticker = o.symbol.replace("/USD","");
+                const isBuy  = o.side === "buy";
+                return (
+                  <tr key={o.id} className="hover:bg-slate-800/40 transition-colors">
+                    <td className="px-3 py-2.5 font-bold text-white text-sm">{ticker}</td>
+                    <td className="px-3 py-2.5">
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isBuy ? "bg-emerald-900/50 text-emerald-400 border border-emerald-700/50" : "bg-red-900/50 text-red-400 border border-red-700/50"}`}>
+                        {o.side.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs font-mono text-slate-300">{o.qty.toFixed(4)}</td>
+                    <td className="px-3 py-2.5 text-xs font-mono text-sky-300">
+                      {o.limit_price != null ? `$${o.limit_price.toFixed(4)}` : "—"}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs font-mono text-slate-300">
+                      {o.estimated_value != null ? `$${o.estimated_value.toFixed(2)}` : "—"}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-[10px] text-slate-500 uppercase font-semibold">{o.time_in_force}</span>
+                    </td>
+                    <td className="px-3 py-2.5 text-[10px] text-slate-500 font-mono">{fmtAge(o.created_at)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TradesPage({ positions, decisions, partialProfits, stops, totalPortfolio, closedToday, closedPeriod, setClosedPeriod, experts = {} }: {
   positions: Position[]; decisions: Decision[];
   partialProfits: PartialProfits; stops: Stops; totalPortfolio: number;
@@ -946,6 +1013,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
   const [expertFilter] = useState<ExpertFilter>("geo");
   const [selectedTradeId,  setSelectedTradeId]  = useState<string | null>(null);
   const [openDbTrades,     setOpenDbTrades]     = useState<OpenDbTrade[]>([]);
+  const [pendingOrders,    setPendingOrders]    = useState<PendingOrder[]>([]);
 
   useEffect(() => {
     const load = async () => {
@@ -964,6 +1032,18 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
       try {
         const r = await fetch(`${BASE}/api/trades/open`);
         if (r.ok) setOpenDbTrades(await r.json() as OpenDbTrade[]);
+      } catch { /* silent */ }
+    };
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch(`${BASE}/api/orders/pending`);
+        if (r.ok) setPendingOrders(await r.json() as PendingOrder[]);
       } catch { /* silent */ }
     };
     load();
@@ -1079,6 +1159,9 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
           ))}
         </div>
       )}
+
+      {/* ── Pending Orders ────────────────────────────────────────── */}
+      <PendingOrdersSection orders={pendingOrders} />
 
       {/* ── Closed Trades ─────────────────────────────────────────── */}
       <div>

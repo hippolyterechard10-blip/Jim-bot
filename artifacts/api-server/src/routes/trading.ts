@@ -280,6 +280,10 @@ router.get("/trades/:trade_id", async (req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/trades/${trade_id}`, { error: "not found" }));
 });
 
+router.get("/orders/pending", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/orders/pending`, []));
+});
+
 router.get("/source", async (_req, res) => {
   try {
     const r = await fetch(`${FLASK_BASE}/source`);

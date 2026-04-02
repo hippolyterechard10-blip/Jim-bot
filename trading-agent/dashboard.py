@@ -785,6 +785,36 @@ def api_account():
         logger.error(f"api_account error: {e}")
         return jsonify({"equity": 0, "cash": 0, "buying_power": 0, "portfolio_value": 0, "error": str(e)})
 
+@app.route("/api/orders/pending")
+def api_orders_pending():
+    try:
+        import alpaca_trade_api as tradeapi
+        api = tradeapi.REST(
+            os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
+            "https://paper-api.alpaca.markets"
+        )
+        orders = api.list_orders(status="open")
+        result = []
+        for o in orders:
+            qty        = float(o.qty or 0)
+            lim        = float(o.limit_price) if o.limit_price else None
+            est_value  = round(qty * lim, 2) if lim else None
+            result.append({
+                "id":              o.id,
+                "symbol":          o.symbol,
+                "side":            o.side,
+                "qty":             qty,
+                "limit_price":     lim,
+                "estimated_value": est_value,
+                "status":          o.status,
+                "created_at":      str(o.created_at),
+                "time_in_force":   o.time_in_force,
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"api_orders_pending error: {e}")
+        return jsonify([])
+
 @app.route("/api/stops")
 def api_stops():
     return jsonify({"stops": {}})
