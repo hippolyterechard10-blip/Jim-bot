@@ -250,13 +250,22 @@ class GeometricExpert:
                     structure = "range"
 
                 if structure == "uptrend" and side == "short":
-                    logger.info(f"[GEO] {symbol} — uptrend, skipping short")
+                    _reg_now = (regime or "unknown").lower()
+                    if _reg_now in ("bull", "panic"):
+                        logger.info(f"[GEO] SKIP: short in uptrend during {_reg_now} — double counter-trend")
+                    else:
+                        logger.info(f"[GEO] {symbol} — uptrend, skipping short")
                     return
-                if structure == "downtrend" and side == "long" and not rsi_divergence:
-                    logger.info(f"[GEO] {symbol} — downtrend without RSI divergence, skip long")
-                    return
-                if structure == "downtrend" and side == "long" and rsi_divergence:
-                    logger.info(f"[GEO] {symbol} — downtrend BUT RSI divergence confirmed → allowing counter-trend long")
+                if structure == "downtrend" and side == "long":
+                    _reg_now = (regime or "unknown").lower()
+                    if _reg_now in ("bear", "panic"):
+                        logger.info(f"[GEO] SKIP: long in downtrend during {_reg_now} — double counter-trend")
+                        return
+                    if _reg_now in ("choppy", "bull") and rsi_divergence:
+                        logger.info(f"[GEO] {symbol} — downtrend BUT RSI divergence confirmed in {_reg_now} → allowing counter-trend long")
+                    else:
+                        logger.info(f"[GEO] {symbol} — downtrend without RSI divergence in {_reg_now}, skip long")
+                        return
             else:
                 structure = "unknown"
 
