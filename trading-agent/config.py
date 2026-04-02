@@ -19,10 +19,10 @@ GEO_CAPITAL     = INITIAL_CAPITAL   # Tout en geo, pas de split
 GEO_RESET_DATE  = "2026-04-02"   # YYYY-MM-DD — mettre à jour à chaque reset
 
 # ── Geo V4 — Paramètres validés par backtest 2022-2025 ───────────────────────
-GEO_SYMBOL        = "ETH/USD"
+GEO_SYMBOLS       = ["ETH/USD", "SOL/USD"]
 GEO_ZONE_PCT      = 0.003    # Zone ±0.3% autour du pivot
-GEO_MAX_SIM       = 2        # Max 2 positions simultanées
-GEO_POS_PCT       = 0.28     # 28% du capital par position
+GEO_MAX_SIM       = 2        # Max 2 positions simultanées (pool global ETH+SOL)
+GEO_POS_PCT       = 0.50     # 50% du capital par position
 GEO_TARGET_PCT    = 0.009    # Target +0.9%
 GEO_MAX_TOUCHES   = 2        # Skip zone si touchée > 2 fois
 GEO_RSI_LOW       = 20

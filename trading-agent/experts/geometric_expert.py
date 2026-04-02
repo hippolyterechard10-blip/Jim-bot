@@ -79,6 +79,22 @@ class GeometricExpert:
     def has_capital(self) -> bool:
         return self.get_available() >= 30.0
 
+    def _closed_pnl(self) -> float:
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+            row = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0.0) FROM trades
+                WHERE status = 'closed'
+                  AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+                  AND close_reason != 'synced_close'
+            """).fetchone()
+            conn.close()
+            return float(row[0]) if row and row[0] else 0.0
+        except Exception as e:
+            logger.debug(f"[GEO] _closed_pnl: {e}")
+            return 0.0
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _ctx(self, trade: dict) -> dict:
@@ -148,7 +164,7 @@ class GeometricExpert:
     # ── EVALUATE ──────────────────────────────────────────────────────────────
 
     def evaluate(self, symbol: str = None, regime: str = "unknown"):
-        symbol = symbol or config.GEO_SYMBOL
+        symbol = symbol or config.GEO_SYMBOLS[0]
         logger.info(f"[GEO] evaluating {symbol} | régime={regime}")
 
         # Gate régime
@@ -157,13 +173,11 @@ class GeometricExpert:
             logger.info(f"[GEO] 🔴 Régime {_r} — pas d'entrée")
             return
 
-        # Double-entrée guard
-        open_syms = {
-            t["symbol"] for t in self.memory.get_open_trades()
-            if self._ctx(t).get("strategy_source") == "geo_v4"
-        }
-        if len([s for s in open_syms if s == symbol]) >= config.GEO_MAX_SIM:
-            logger.debug(f"[GEO] {symbol} — max_sim={config.GEO_MAX_SIM} atteint")
+        # Double-entrée guard — pool global ETH+SOL
+        open_count_global = len([t for t in self.memory.get_open_trades()
+                                 if self._ctx(t).get("strategy_source") == "geo_v4"])
+        if open_count_global >= config.GEO_MAX_SIM:
+            logger.debug(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM})")
             return
 
         # Capital
@@ -239,7 +253,8 @@ class GeometricExpert:
             # Sizing
             available = self.get_available()
             if available < 30: break
-            deploy = min(available, config.GEO_CAPITAL * config.GEO_POS_PCT)
+            current_capital = config.GEO_CAPITAL + self._closed_pnl()
+            deploy = min(available, current_capital * config.GEO_POS_PCT)
             qty    = round(deploy / zone["center"], 6)
             if qty * zone["center"] < 20: continue
 

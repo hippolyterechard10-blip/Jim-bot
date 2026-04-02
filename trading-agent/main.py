@@ -72,7 +72,7 @@ def main():
         regime=regime,
     )
 
-    logger.info(f"💰 Capital : ${config.GEO_CAPITAL} | Asset : {config.GEO_SYMBOL}")
+    logger.info(f"💰 Capital : ${config.GEO_CAPITAL} | Assets : {config.GEO_SYMBOLS}")
 
     # Dashboard
     start_dashboard(memory, regime=regime, port=5000)
@@ -92,7 +92,7 @@ def main():
 
     logger.info(f"✅ Prêt — fast:{config.FAST_LOOP_SECONDS}s slow:{config.SLOW_LOOP_SECONDS}s")
 
-    # Slow loop — évalue ETH toutes les 5 min
+    # Slow loop — évalue ETH+SOL toutes les 5 min
     cycle = 0
     while True:
         try:
@@ -104,10 +104,8 @@ def main():
             if current_regime in ("bear", "panic"):
                 logger.info(f"[SLOW] 🔴 Régime {current_regime.upper()} — pas de nouveaux signaux")
             else:
-                geo.evaluate(
-                    symbol=config.GEO_SYMBOL,
-                    regime=current_regime,
-                )
+                for symbol in config.GEO_SYMBOLS:
+                    geo.evaluate(symbol=symbol, regime=current_regime)
 
             time.sleep(config.SLOW_LOOP_SECONDS)
 
