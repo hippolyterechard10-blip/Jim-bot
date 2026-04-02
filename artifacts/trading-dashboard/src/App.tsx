@@ -34,7 +34,7 @@ interface Decision {
 interface Signal {
   id: number;
   symbol: string;
-  source: "mastermind" | "gap" | "geo";
+  source: "geo";
   decision: string;
   detail: string;
   confidence: number;
@@ -77,8 +77,7 @@ interface ExpertStats {
   open_trades: number; live_unrealized: number;
 }
 interface ExpertsResponse {
-  gapper?: ExpertStats;
-  geometric?: ExpertStats;
+  geo_v4?: ExpertStats;
 }
 interface ClosedTodayItem {
   symbol: string; pnl: number; trade_count: number;
@@ -104,9 +103,9 @@ interface TradeDetail extends IndividualTrade {
   analysis: { outcome: string | null; text: string | null; lessons: string | null; mistakes: string | null } | null;
 }
 
-type Page = "HOME" | "MARKET" | "SIGNALS" | "TRADES" | "ANALYSIS";
+type Page = "HOME" | "TRADES" | "ANALYSIS";
 type ClosedPeriod = "today" | "week" | "month" | "ytd" | "all";
-type ExpertFilter = "all" | "gap" | "geo";
+type ExpertFilter = "all" | "geo";
 
 interface PeriodStat {
   trades: number; wins: number; losses: number;
@@ -231,7 +230,7 @@ function TopNav({ activePage, setActivePage, regime, portfolioValue, portfolioDe
   positionsCount: number; lastRefresh: Date; error: boolean;
 }) {
   const rb   = regimeBadgeStyle(regime);
-  const tabs: Page[] = ["HOME", "MARKET", "SIGNALS", "TRADES", "ANALYSIS"];
+  const tabs: Page[] = ["HOME", "TRADES", "ANALYSIS"];
   const pPos = portfolioDelta >= 0;
 
   return (
@@ -459,9 +458,7 @@ function AnalysisPage() {
   const [data,         setData]         = useState<AnalysisData | null>(null);
   const [periods,      setPeriods]      = useState<PeriodBreakdown | null>(null);
   const [loading,      setLoading]      = useState(true);
-  const [gapBreakdown, setGapBreakdown] = useState<AnalysisData | null>(null);
   const [geoBreakdown, setGeoBreakdown] = useState<AnalysisData | null>(null);
-  const [gapTodayTrades,  setGapTodayTrades]  = useState<IndividualTrade[]>([]);
   const [geoRecentTrades, setGeoRecentTrades] = useState<IndividualTrade[]>([]);
 
   // Filtered data — re-fetches when expert tab changes
@@ -479,40 +476,31 @@ function AnalysisPage() {
       .finally(() => setLoading(false));
   }, [expert]);
 
-  // Per-expert breakdown — fetched once, always shown regardless of filter
+  // Geo breakdown — fetched once
   useEffect(() => {
-    Promise.all([
-      fetch(`${BASE}/api/analysis?expert=gap`).then(r => r.json()),
-      fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json()),
-    ]).then(([g, geo]) => {
-      setGapBreakdown((g as AnalysisData).total_trades > 0 ? g as AnalysisData : null);
-      setGeoBreakdown((geo as AnalysisData).total_trades > 0 ? geo as AnalysisData : null);
-    }).catch(() => {});
+    fetch(`${BASE}/api/analysis?expert=geo`).then(r => r.json())
+      .then(geo => {
+        setGeoBreakdown((geo as AnalysisData).total_trades > 0 ? geo as AnalysisData : null);
+      }).catch(() => {});
   }, []);
 
-  // Individual trades for expert panels — polls every 30s
+  // Geo recent trades — polls every 30s
   useEffect(() => {
     const refresh = () => {
-      Promise.all([
-        fetch(`${BASE}/api/trades/individual?period=today&limit=50`).then(r => r.json()),
-        fetch(`${BASE}/api/trades/individual?period=week&limit=50`).then(r => r.json()),
-      ]).then(([td, wd]) => {
-        const today = (td.trades || []) as IndividualTrade[];
-        const week  = (wd.trades  || []) as IndividualTrade[];
-        setGapTodayTrades(today.filter(t => t.strategy_source === "gapper"));
-        setGeoRecentTrades(week.filter(t => t.strategy_source === "geometric"));
-      }).catch(() => {});
+      fetch(`${BASE}/api/trades/individual?period=week&limit=50`).then(r => r.json())
+        .then(wd => {
+          const week = (wd.trades || []) as IndividualTrade[];
+          setGeoRecentTrades(week.filter(t => t.strategy_source === "geo_v4" || t.strategy_source === "geometric"));
+        }).catch(() => {});
     };
     refresh();
     const id = setInterval(refresh, 30_000);
     return () => clearInterval(id);
   }, []);
 
-  const accentLabel = expert === "gap"
-    ? <span className="text-amber-400 font-semibold">🚀 Gap — Stocks</span>
-    : expert === "geo"
-    ? <span className="text-violet-400 font-semibold">📐 Geo — Crypto</span>
-    : <span className="text-slate-400">Tous les experts</span>;
+  const accentLabel = expert === "geo"
+    ? <span className="text-violet-400 font-semibold">📐 Geo V4 — ETH/USD</span>
+    : <span className="text-slate-400">Tous les trades</span>;
 
   // ── Hold duration formatter ────────────────────────────────────────────────
   const fmtHold = (min: number) =>
@@ -520,7 +508,7 @@ function AnalysisPage() {
 
   // ── Expert Breakdown — always visible ─────────────────────────────────────
   const ExpertBreakdownSection = () => {
-    const hasAny = gapBreakdown || geoBreakdown || gapTodayTrades.length > 0 || geoRecentTrades.length > 0;
+    const hasAny = geoBreakdown || geoRecentTrades.length > 0;
     if (!hasAny) return null;
 
     const fmtP = (p: number | null) => p != null ? `$${p.toFixed(2)}` : "—";
@@ -577,67 +565,6 @@ function AnalysisPage() {
         </div>
       );
     };
-
-    // ── Gap Expert panel ───────────────────────────────────────────────────
-    const GapPanel = () => (
-      <div className="flex-1 min-w-0 p-4 border rounded-xl bg-slate-800/60 space-y-3" style={{ borderColor: "#f59e0b33" }}>
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-bold uppercase tracking-widest text-amber-400">🚀 Gap Expert — Stocks</span>
-          {gapBreakdown && <span className="text-[10px] text-slate-500">{gapBreakdown.total_trades} total</span>}
-        </div>
-
-        {/* Daily quota dots */}
-        <div className="bg-slate-900/60 rounded-lg p-3 flex items-center gap-3">
-          <span className="text-xl font-bold font-mono text-white">
-            {gapTodayTrades.length}<span className="text-slate-500 text-sm">/3</span>
-          </span>
-          <div className="flex gap-1.5">
-            {[0, 1, 2].map(i => (
-              <div key={i} className={`w-3.5 h-3.5 rounded-full transition-all ${
-                i < gapTodayTrades.length
-                  ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]"
-                  : "bg-slate-600"
-              }`} />
-            ))}
-          </div>
-          <span className="text-[10px] text-slate-500">trades today</span>
-          {gapTodayTrades.length >= 3 && (
-            <span className="text-[10px] font-bold text-amber-400 ml-auto">QUOTA REACHED</span>
-          )}
-        </div>
-
-        {/* Aggregated stats */}
-        {gapBreakdown && <StatGrid d={gapBreakdown} />}
-
-        {/* Today's trade log */}
-        {gapTodayTrades.length > 0 && (
-          <div>
-            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1.5">Today's trades</div>
-            <div className="space-y-1">
-              {gapTodayTrades.map(t => {
-                const isPos = (t.pnl ?? 0) >= 0;
-                return (
-                  <div key={t.trade_id} className="flex items-center gap-2 py-1.5 px-2 bg-slate-900/40 rounded-lg">
-                    <span className="text-[9px] text-slate-500 font-mono w-10 shrink-0">{t.exit_at ? fmtTime(t.exit_at) : "—"}</span>
-                    <span className="text-xs font-bold text-white shrink-0">{t.symbol}</span>
-                    <span className="text-[9px] text-slate-500 font-mono truncate flex-1">
-                      {fmtP(t.entry_price)} → {fmtP(t.exit_price)}
-                      <span className="text-slate-700 mx-1">·</span>{fmtHold(t.hold_min ?? 0)}
-                      <span className="text-slate-700 mx-1">·</span>{(t.close_reason || "—").replace(/_/g, " ")}
-                    </span>
-                    <span className={`text-xs font-bold font-mono shrink-0 ${isPos ? "text-emerald-400" : "text-red-400"}`}>
-                      {isPos ? "+" : ""}${t.pnl != null ? Math.abs(t.pnl).toFixed(4) : "—"}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {gapBreakdown && <ExitBars d={gapBreakdown} />}
-      </div>
-    );
 
     // ── Geo Expert panel ───────────────────────────────────────────────────
     const GeoPanel = () => (
@@ -727,11 +654,10 @@ function AnalysisPage() {
     return (
       <div className="bg-slate-800/30 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-700/50">
-          <span className="text-sm font-bold text-white">Expert Breakdown</span>
-          <span className="text-[10px] text-slate-500 ml-2">Gap vs Geo — independent stats</span>
+          <span className="text-sm font-bold text-white">📐 Geo V4 — ETH/USD</span>
+          <span className="text-[10px] text-slate-500 ml-2">Zones ±0.3% · RSI divergence · Pass 3b</span>
         </div>
-        <div className="p-4 flex flex-col sm:flex-row gap-3">
-          <GapPanel />
+        <div className="p-4">
           <GeoPanel />
         </div>
       </div>
@@ -754,7 +680,7 @@ function AnalysisPage() {
         <div className="flex items-center gap-3"><ExpertPills value={expert} onChange={setExpert} />{accentLabel}</div>
         <ExpertBreakdownSection />
         <div className="p-6 flex items-center justify-center min-h-[200px] text-slate-600 text-sm">
-          Aucun trade fermé pour {expert === "all" ? "ce portefeuille" : expert === "gap" ? "l'expert Gap" : "l'expert Geo"} — l'analyse apparaîtra après le premier trade.
+          Aucun trade fermé pour {expert === "all" ? "ce portefeuille" : "Geo V4 ETH/USD"} — l'analyse apparaîtra après le premier trade.
         </div>
       </div>
     );
@@ -1028,8 +954,7 @@ function TradeDetailModal({ tradeId, onClose }: { tradeId: string; onClose: () =
           <div className="flex items-center gap-3">
             <span className="text-xl font-bold text-white">{d?.symbol ?? "—"}</span>
             {d && <span className={`text-xs font-bold px-2 py-0.5 rounded ${isLong ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>{isLong ? "↑ LONG" : "↓ SHORT"}</span>}
-            {d?.strategy_source === "gapper"   && <span className="text-xs font-bold px-2 py-0.5 rounded bg-orange-500/15 text-orange-400">Gap</span>}
-            {d?.strategy_source === "geometric" && <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Geo</span>}
+            {(d?.strategy_source === "geo_v4" || d?.strategy_source === "geometric") && <span className="text-xs font-bold px-2 py-0.5 rounded bg-violet-500/15 text-violet-400">Geo V4</span>}
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-white text-lg leading-none">✕</button>
         </div>
@@ -1181,17 +1106,13 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
   // Split positions by expert source (matched via DB open trades)
   const srcMap = Object.fromEntries(openDbTrades.map(t => [t.symbol, t.strategy_source]));
-  const gapPositions  = positions.filter(p => srcMap[p.symbol] === "gapper");
-  const geoPositions  = positions.filter(p => srcMap[p.symbol] === "geometric");
-  const otherPositions = positions.filter(p => srcMap[p.symbol] !== "gapper" && srcMap[p.symbol] !== "geometric");
-  const gapDeployed   = openDbTrades.filter(t => t.strategy_source === "gapper").reduce((s, t) => s + t.deployed, 0);
-  const geoDeployed   = openDbTrades.filter(t => t.strategy_source === "geometric").reduce((s, t) => s + t.deployed, 0);
-  const gapPool       = experts?.gapper?.capital_now   ?? 512.83;
-  const geoPool       = experts?.geometric?.capital_now ?? 512.83;
+  const geoPositions   = positions.filter(p => srcMap[p.symbol] === "geo_v4" || srcMap[p.symbol] === "geometric");
+  const otherPositions = positions.filter(p => srcMap[p.symbol] !== "geo_v4" && srcMap[p.symbol] !== "geometric");
+  const geoDeployed    = openDbTrades.filter(t => t.strategy_source === "geo_v4" || t.strategy_source === "geometric").reduce((s, t) => s + t.deployed, 0);
+  const geoPool        = experts?.geo_v4?.capital_now ?? 1000;
 
   const filteredIndividual = closedIndividual.filter(t => {
-    if (expertFilter === "gap") return t.strategy_source === "gapper";
-    if (expertFilter === "geo") return t.strategy_source === "geometric";
+    if (expertFilter === "geo") return t.strategy_source === "geo_v4" || t.strategy_source === "geometric";
     return true;
   });
 
@@ -1214,8 +1135,7 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
       ) : (
         <div className="space-y-4">
           {([
-            { label: "🚀 Gap Expert",   key: "gap",   accent: "text-amber-400",  bar: "bg-amber-500",  posns: gapPositions,  deployed: gapDeployed,  pool: gapPool  },
-            { label: "📐 Geo Expert",   key: "geo",   accent: "text-violet-400", bar: "bg-violet-500", posns: geoPositions,  deployed: geoDeployed,  pool: geoPool  },
+            { label: "📐 Geo V4 — ETH/USD", key: "geo",   accent: "text-violet-400", bar: "bg-violet-500", posns: geoPositions,  deployed: geoDeployed,  pool: geoPool  },
             ...(otherPositions.length > 0 ? [{ label: "❓ Unclassified", key: "other", accent: "text-slate-400", bar: "bg-slate-500", posns: otherPositions, deployed: 0, pool: 0 }] : []),
           ] as { label: string; key: string; accent: string; bar: string; posns: Position[]; deployed: number; pool: number }[]).map(({ label, key, accent, bar, posns, deployed, pool }) => (
             <div key={key} className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700/50">
@@ -1311,12 +1231,11 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
 
           {/* Expert filter pills */}
           <div className="flex items-center gap-0.5 bg-slate-800 rounded-lg p-0.5 border border-slate-700/50">
-            {([["all","All"],["gap","Gap"],["geo","Geo"]] as [ExpertFilter,string][]).map(([key,label]) => (
+            {([["all","All"],["geo","Geo V4"]] as [ExpertFilter,string][]).map(([key,label]) => (
               <button key={key} onClick={() => setExpertFilter(key)}
                 className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
                   expertFilter === key
-                    ? key === "gap" ? "bg-orange-600/30 text-orange-400"
-                    : key === "geo" ? "bg-emerald-600/30 text-emerald-400"
+                    ? key === "geo" ? "bg-violet-600/30 text-violet-400"
                     : "bg-slate-600/40 text-slate-300"
                     : "text-slate-500 hover:text-slate-300"
                 }`}>
@@ -1389,10 +1308,8 @@ function TradesPage({ positions, decisions, partialProfits, stops, totalPortfoli
                             </span>
                           </td>
                           <td className="px-3 py-2">
-                            {t.strategy_source === "gapper"
-                              ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400">Gap</span>
-                              : t.strategy_source === "geometric"
-                              ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Geo</span>
+                            {(t.strategy_source === "geo_v4" || t.strategy_source === "geometric")
+                              ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">Geo V4</span>
                               : <span className="text-[10px] text-slate-600">—</span>}
                           </td>
                           <td className="px-3 py-2">
@@ -1803,14 +1720,13 @@ function SignalRow({ dec }: { dec: Decision }) {
 function ExpertPills({ value, onChange }: { value: ExpertFilter; onChange: (v: ExpertFilter) => void }) {
   return (
     <div className="flex items-center gap-1 bg-slate-800/60 border border-slate-700/50 rounded-lg p-0.5">
-      {(["all", "gap", "geo"] as ExpertFilter[]).map(e => (
+      {(["all", "geo"] as ExpertFilter[]).map(e => (
         <button key={e} onClick={() => onChange(e)}
           className={`px-3 py-1 text-xs font-semibold rounded transition-colors ${value === e
-            ? e === "gap" ? "bg-amber-900/60 text-amber-400 shadow-sm"
-            : e === "geo" ? "bg-violet-900/60 text-violet-400 shadow-sm"
+            ? e === "geo" ? "bg-violet-900/60 text-violet-400 shadow-sm"
             : "bg-slate-700 text-slate-200"
             : "text-slate-500 hover:text-slate-300"}`}>
-          {e === "all" ? "Tous" : e === "gap" ? "🚀 Gap" : "📐 Geo"}
+          {e === "all" ? "Tous" : "📐 Geo V4"}
         </button>
       ))}
     </div>
@@ -2191,14 +2107,12 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
     },
   ];
 
-  const gapCap  = experts.gapper?.capital_now   ?? 0;
-  const geoCap  = experts.geometric?.capital_now ?? 0;
-  // Use Alpaca live equity as the ground-truth total (avoids double-counting unrealized P&L)
+  const geoCap  = experts.geo_v4?.capital_now ?? 0;
   const totalCap = (account?.live_equity && account.live_equity > 0)
     ? account.live_equity
     : (account?.equity && account.equity > 0)
     ? account.equity
-    : gapCap + geoCap;
+    : geoCap;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -2207,8 +2121,8 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
       <div>
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h2 className="text-sm font-bold text-slate-200">🧠 Mastermind V2</h2>
-            <p className="text-[10px] text-slate-600 mt-0.5">Deux comptes indépendants · capital qui compound séparément</p>
+            <h2 className="text-sm font-bold text-slate-200">📈 Jim Bot — Geo V4</h2>
+            <p className="text-[10px] text-slate-600 mt-0.5">ETH/USD · Zones S/R · Limit orders · 5min bars</p>
           </div>
           {totalCap > 0 && (
             <div className="text-right">
@@ -2219,15 +2133,10 @@ function HomePage({ trades, decisions, stats, positions, portfolioValue, account
             </div>
           )}
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4">
           <ExpertCard
-            name="Gap" icon="🚀" data={experts.gapper}
-            tagline="Stocks gappers · 9h35–10h45 ET · max 3 trades/j"
-            accent="amber"
-          />
-          <ExpertCard
-            name="Geo" icon="📐" data={experts.geometric}
-            tagline="Crypto · RSI divergence · patterns 24/7"
+            name="Geo V4 — ETH/USD" icon="📐" data={experts.geo_v4}
+            tagline="ETH/USD · Zones ±0.3% · RSI divergence · Pass 3b"
             accent="violet"
           />
         </div>
@@ -2479,8 +2388,6 @@ export default function App() {
       {/* Page content — push below fixed nav */}
       <div className="pt-14">
         {activePage === "HOME"     && <HomePage trades={allTrades} decisions={decisions} stats={stats} positions={positions} portfolioValue={portfolioValue} account={account} analysis={analysis} experts={experts} />}
-        {activePage === "MARKET"   && <MarketPage movers={movers} sentiment={sentiment} regime={regime} />}
-        {activePage === "SIGNALS"  && <SignalsPage decisions={decisions} />}
         {activePage === "TRADES"   && <TradesPage positions={positions} decisions={decisions} partialProfits={partialProfits} stops={stops} totalPortfolio={portfolioValue} closedToday={closedToday} closedPeriod={closedPeriod} setClosedPeriod={setClosedPeriod} experts={experts} />}
         {activePage === "ANALYSIS" && <AnalysisPage />}
       </div>
