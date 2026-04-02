@@ -10,7 +10,8 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"
 
 # ── Capital ───────────────────────────────────────────────────────────────────
-INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.0"))
+# Mis à jour le 2026-04-02 après clôture résidus DOGE/SHIB — equity réelle Alpaca
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "984.15"))
 GEO_CAPITAL     = INITIAL_CAPITAL   # Tout en geo, pas de split
 
 # ── Nouveau départ — reset P&L à partir de cette date ─────────────────────────
