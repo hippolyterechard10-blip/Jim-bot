@@ -6,6 +6,20 @@ import config
 
 logger = logging.getLogger(__name__)
 
+
+def _smart_round(price: float) -> float:
+    """Precision-aware rounding — handles micro-priced tokens like SHIB ($0.000009)."""
+    if price >= 100:
+        return round(price, 2)
+    elif price >= 1:
+        return round(price, 4)
+    elif price >= 0.01:
+        return round(price, 6)
+    elif price >= 0.0001:
+        return round(price, 8)
+    else:
+        return round(price, 10)
+
 _DATA_BASE = "https://data.alpaca.markets/v1beta3/crypto/us"
 
 class AlpacaBroker:

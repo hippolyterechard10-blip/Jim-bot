@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
 
 
+def _smart_round(price: float) -> float:
+    """Precision-aware rounding — handles micro-priced tokens like SHIB ($0.000009)."""
+    if price >= 100:
+        return round(price, 2)
+    elif price >= 1:
+        return round(price, 4)
+    elif price >= 0.01:
+        return round(price, 6)
+    elif price >= 0.0001:
+        return round(price, 8)
+    else:
+        return round(price, 10)
+
+
 class Mastermind:
     def __init__(self, broker, memory, scanner, regime, geometry, correlations, agent):
         self.broker = broker
@@ -50,6 +64,7 @@ class Mastermind:
             f"Total=${sum(config.STRATEGY_CAPITAL.values()):.2f}"
         )
         self._place_missing_stops()
+        self._correct_micro_stops()
 
     # ── Retroactive stop placement ─────────────────────────────────────────
 
@@ -96,21 +111,8 @@ class Mastermind:
                     continue
                 live_qty = abs(float(alpaca_pos.qty))
 
-                # Decimal precision by price magnitude (matches geometric_expert logic)
-                if is_crypto:
-                    if stop_price < 0.001:
-                        _dp = 10
-                    elif stop_price < 0.1:
-                        _dp = 8
-                    elif stop_price < 1.0:
-                        _dp = 6
-                    else:
-                        _dp = 4
-                else:
-                    _dp = 2
-
-                _sp  = round(stop_price, _dp)
-                _lmt = round(stop_price * 0.995, _dp)  # 0.5% below for guaranteed fill
+                _sp  = _smart_round(stop_price)
+                _lmt = _smart_round(stop_price * 0.995)  # 0.5% below for guaranteed fill
 
                 try:
                     if is_crypto:
@@ -152,6 +154,108 @@ class Mastermind:
 
         except Exception as e:
             logger.error(f"[MASTERMIND] _place_missing_stops error: {e}")
+
+    def _correct_micro_stops(self):
+        """
+        One-shot at startup: find open geo trades where stop_loss is a micro-price
+        (< $0.001, e.g. SHIB/USD at ~$0.0000092) and whose existing Alpaca stop order
+        may have been placed with insufficient decimal precision (rounded to $0.0000).
+        Cancels the bad order and replaces it with a correctly-rounded one.
+        """
+        if not self.memory or not self.broker:
+            return
+        try:
+            open_trades = self.memory.get_open_trades()
+            alpaca_positions = {
+                p.symbol.replace("/", "").upper(): p
+                for p in (self.broker.get_positions() or [])
+            }
+
+            for trade in open_trades:
+                ctx = trade.get("market_context") or {}
+                if isinstance(ctx, str):
+                    try:
+                        ctx = json.loads(ctx)
+                    except Exception:
+                        ctx = {}
+
+                if ctx.get("strategy_source") != "geometric":
+                    continue
+
+                symbol    = trade["symbol"]
+                stop_loss = trade.get("stop_loss")
+
+                # Only check micro-priced symbols (SHIB etc.)
+                if not stop_loss or stop_loss >= 0.001:
+                    continue
+
+                correct_sp  = _smart_round(stop_loss)
+                correct_lmt = _smart_round(stop_loss * 0.995)
+
+                # Fetch existing stop order to check its stored price
+                stop_order_id = ctx.get("alpaca_stop_order_id")
+                old_stop = None
+                if stop_order_id:
+                    try:
+                        existing = self.broker.api.get_order(stop_order_id)
+                        old_stop = float(getattr(existing, "stop_price", None) or 0)
+                    except Exception as _fe:
+                        logger.debug(f"[MASTERMIND] get_order {stop_order_id}: {_fe}")
+                        old_stop = None
+
+                # If the stop is already correct (within floating-point tolerance), skip
+                if old_stop is not None and abs(old_stop - correct_sp) < 1e-12:
+                    continue
+
+                logger.info(
+                    f"[GEO] {symbol} stop corrected: {old_stop} → {correct_sp} "
+                    f"(limit={correct_lmt})"
+                )
+
+                # Cancel the bad stop order
+                if stop_order_id:
+                    try:
+                        self.broker.api.cancel_order(stop_order_id)
+                    except Exception as _ce:
+                        logger.debug(f"[MASTERMIND] cancel old stop {stop_order_id}: {_ce}")
+
+                # Get live qty from Alpaca
+                sym_key    = symbol.replace("/", "").upper()
+                alpaca_pos = alpaca_positions.get(sym_key)
+                if not alpaca_pos:
+                    logger.warning(f"[MASTERMIND] ⚠️ No Alpaca position for {symbol}, cannot replace stop")
+                    continue
+                live_qty = abs(float(alpaca_pos.qty))
+
+                # Place corrected stop_limit order
+                try:
+                    order = self.broker.api.submit_order(
+                        symbol=symbol,
+                        qty=live_qty,
+                        side="sell",
+                        type="stop_limit",
+                        stop_price=correct_sp,
+                        limit_price=correct_lmt,
+                        time_in_force="gtc",
+                    )
+                    new_stop_id = getattr(order, "id", None)
+                    logger.info(
+                        f"[GEO] {symbol} corrected stop placed: {correct_sp} "
+                        f"(limit={correct_lmt}) qty={live_qty} id={new_stop_id}"
+                    )
+
+                    ctx["alpaca_stop_order_id"] = new_stop_id
+                    with sqlite3.connect(self.memory.db_path, timeout=15) as _conn:
+                        _conn.execute(
+                            "UPDATE trades SET market_context=? WHERE trade_id=?",
+                            (json.dumps(ctx), trade["trade_id"]),
+                        )
+
+                except Exception as _oe:
+                    logger.error(f"[MASTERMIND] ❌ Micro stop correction failed for {symbol}: {_oe}")
+
+        except Exception as e:
+            logger.error(f"[MASTERMIND] _correct_micro_stops error: {e}")
 
     # ── Daily reset ────────────────────────────────────────────────────────
 

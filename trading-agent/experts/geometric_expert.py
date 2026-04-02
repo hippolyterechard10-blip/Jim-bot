@@ -8,6 +8,29 @@ import config
 
 logger = logging.getLogger(__name__)
 
+
+def _smart_round(price: float) -> float:
+    """Precision-aware rounding — handles micro-priced tokens like SHIB ($0.000009)."""
+    if price >= 100:
+        return round(price, 2)
+    elif price >= 1:
+        return round(price, 4)
+    elif price >= 0.01:
+        return round(price, 6)
+    elif price >= 0.0001:
+        return round(price, 8)
+    else:
+        return round(price, 10)
+
+
+def _smart_decimals(price: float) -> int:
+    """Returns the decimal places _smart_round would use — for log format strings."""
+    if price >= 100:    return 2
+    elif price >= 1:    return 4
+    elif price >= 0.01: return 6
+    elif price >= 0.0001: return 8
+    else: return 10
+
 class GeometricExpert:
     def __init__(self, broker, memory, geometry, regime, correlations):
         self.broker = broker
@@ -407,30 +430,20 @@ class GeometricExpert:
             # ATR on 1-min bars produces 5%+ wide stops; instead anchor to the level itself.
             atr = self.geometry.calculate_atr(highs_1m, lows_1m, closes_1m, period=14)
             is_crypto = "/" in symbol
-            # Determine decimal precision for stop — micro-priced crypto needs more places
-            if is_crypto:
-                if level < 0.001:
-                    _stop_decimals = 10
-                elif level < 0.1:
-                    _stop_decimals = 8
-                elif level < 1.0:
-                    _stop_decimals = 6
-                else:
-                    _stop_decimals = 4
-            else:
-                _stop_decimals = 2
+            # _stop_decimals drives the log format string only; _smart_round() handles actual rounding
+            _stop_decimals = _smart_decimals(level) if is_crypto else 2
 
             if side == "long":
-                stop_price = round(level * (1.0 - _stop_pct), _stop_decimals)
+                stop_price   = _smart_round(level * (1.0 - _stop_pct))
                 # Target must be at least 2× risk above entry; use resistance as ceiling
-                _min_target = round(current_price + 2.0 * abs(current_price - stop_price), _stop_decimals + 2)
-                _res_target = round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
+                _min_target  = _smart_round(current_price + 2.0 * abs(current_price - stop_price))
+                _res_target  = _smart_round(nearest_resistance - (nearest_resistance - nearest_support) * 0.1)
                 target_price = max(_min_target, _res_target)
             else:
-                stop_price = round(level * (1.0 + _stop_pct), _stop_decimals)
+                stop_price   = _smart_round(level * (1.0 + _stop_pct))
                 # Target must be at least 2× risk below entry; use support as floor
-                _min_target = round(current_price - 2.0 * abs(stop_price - current_price), _stop_decimals + 2)
-                _sup_target = round(nearest_support + (nearest_resistance - nearest_support) * 0.1, _stop_decimals + 2)
+                _min_target  = _smart_round(current_price - 2.0 * abs(stop_price - current_price))
+                _sup_target  = _smart_round(nearest_support + (nearest_resistance - nearest_support) * 0.1)
                 target_price = min(_min_target, _sup_target)
 
             # R:R check — minimum 1:2
@@ -550,7 +563,7 @@ class GeometricExpert:
                 if not is_crypto:
                     try:
                         _stop_side = "sell" if side == "long" else "buy"
-                        _sp = round(stop_price, 2)
+                        _sp = _smart_round(stop_price)
                         _stop_ord = self.broker.api.submit_order(
                             symbol=symbol, qty=qty, side=_stop_side,
                             type="stop", stop_price=_sp, time_in_force="gtc",
@@ -560,7 +573,7 @@ class GeometricExpert:
                     except Exception as _se:
                         logger.error(f"[GEO] stop order error for {symbol}: {_se}")
                 else:
-                    _sp = round(stop_price, _stop_decimals)
+                    _sp = _smart_round(stop_price)
                     logger.info(f"[GEO] 🛑 Crypto stop monitored by watchdog: {symbol} stop={_sp:{_pfmt}}")
 
                 self.memory.log_trade_open(
