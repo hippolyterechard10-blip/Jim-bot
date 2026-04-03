@@ -401,13 +401,14 @@ class GeometricExpert:
                 status = order.status
 
                 if status == "filled":
-                    fill = float(order.filled_avg_price or p["level"])
-                    qty  = float(order.filled_qty or p["qty"])
-                    logger.info(f"[GEO] ✅ FILLED: {p['symbol']} @ ${fill:.4f}")
+                    fill   = float(order.filled_avg_price or p["level"])
+                    qty    = float(order.filled_qty or p["qty"])
+                    symbol = p["symbol"]
+                    logger.info(f"[GEO] ✅ FILLED: {symbol} @ ${fill:.4f}")
                     if self.memory:
                         self.memory.log_trade_open(
                             trade_id=str(uuid.uuid4()),
-                            symbol=p["symbol"], side="buy",
+                            symbol=symbol, side="buy",
                             qty=qty, entry_price=fill,
                             stop_loss=p["stop"], take_profit=p["target"],
                             alpaca_order_id=p["order_id"],
@@ -419,6 +420,38 @@ class GeometricExpert:
                                 "target": float(p["target"]),
                             }
                         )
+                    # ── Ordres réels Alpaca après fill ─────────────────────────────
+                    try:
+                        stop_price   = _smart_round(p["stop"])
+                        target_price = _smart_round(p["target"])
+
+                        # Stop-limit : Alpaca crypto ne supporte pas stop-market
+                        # limit_price = stop - 0.4% pour absorber le slippage
+                        stop_limit_price = _smart_round(p["stop"] * 0.996)
+                        self.broker.api.submit_order(
+                            symbol=symbol,
+                            qty=qty,
+                            side="sell",
+                            type="stop_limit",
+                            stop_price=stop_price,
+                            limit_price=stop_limit_price,
+                            time_in_force="gtc",
+                        )
+                        logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_price} limit=${stop_limit_price}")
+
+                        # Take-profit limit : sort proprement au target
+                        self.broker.api.submit_order(
+                            symbol=symbol,
+                            qty=qty,
+                            side="sell",
+                            type="limit",
+                            limit_price=target_price,
+                            time_in_force="gtc",
+                        )
+                        logger.info(f"[GEO] 💰 Take-profit limit placé: {symbol} @ ${target_price}")
+
+                    except Exception as e:
+                        logger.error(f"[GEO] ordres stops/target error {symbol}: {e}")
                     del self._pending[zk]
 
                 elif status in ("canceled", "expired", "rejected"):
@@ -441,51 +474,127 @@ class GeometricExpert:
     # ── MANAGE POSITIONS ──────────────────────────────────────────────────────
 
     def manage_open_positions(self):
-        """Stop -0.3% et target +0.9% logiciels pour crypto (pas de bracket Alpaca)."""
+        """Exits gérés par ordres Alpaca réels (stop-market + limit).
+        Cette méthode surveille uniquement :
+          1. Positions fermées par Alpaca (stop ou target rempli) → mise à jour DB
+          2. Time-stop : clôture forcée si position ouverte > 4h
+        """
+        import datetime
+        TIMEOUT_MIN = 240  # 4h
+
+        def _sym_key(s):
+            """Normalise 'ETH/USD' → 'ETHUSD' pour matcher les positions Alpaca."""
+            return s.replace("/", "").replace("-", "").upper()
+
         try:
-            positions   = self.broker.get_positions()
-            open_trades = self.memory.get_open_trades()
+            # Positions Alpaca indexées par clé normalisée (ETHUSD, SOLUSD…)
+            alpaca_positions = {_sym_key(p.symbol): p for p in (self.broker.get_positions() or [])}
+            open_trades      = self.memory.get_open_trades()
 
-            for pos in (positions or []):
-                match    = None
-                ctx_data = {}
-                for t in open_trades:
-                    ctx = self._ctx(t)
-                    if (ctx.get("strategy_source") == "geo_v4"
-                            and t.get("symbol") == pos.symbol
-                            and t.get("status") == "open"):
-                        match    = t
-                        ctx_data = ctx
-                        break
-                if not match: continue
+            # Ordres sell ouverts : Alpaca retourne "SOL/USD" (avec slash) dans list_orders
+            try:
+                open_sell_orders = {
+                    _sym_key(o.symbol) for o in self.broker.api.list_orders(status="open", limit=50)
+                    if o.side == "sell"
+                }
+            except Exception:
+                open_sell_orders = set()
 
-                current      = float(pos.current_price)
-                entry        = float(match.get("entry_price", current))
-                qty          = float(pos.qty)
-                stop_price   = float(match.get("stop_loss")  or 0)
-                target_price = float(match.get("take_profit") or 0)
-                symbol       = pos.symbol
+            for t in open_trades:
+                ctx = self._ctx(t)
+                if ctx.get("strategy_source") != "geo_v4": continue
 
-                if not stop_price or not target_price: continue
+                symbol   = t.get("symbol")      # "ETH/USD" (format DB)
+                sym_k    = _sym_key(symbol)     # "ETHUSD"  (format Alpaca positions)
+                trade_id = t.get("trade_id")
+                entry    = float(t.get("entry_price", 0))
+                qty_t    = float(t.get("qty", 0))
 
-                stop_hit   = current <= stop_price
-                target_hit = current >= target_price
+                # ── 0. Réconciliation : place les ordres Alpaca si absents ────────
+                if sym_k in alpaca_positions and sym_k not in open_sell_orders:
+                    stop_db   = float(t.get("stop_loss")   or 0)
+                    target_db = float(t.get("take_profit") or 0)
+                    pos_qty   = float(alpaca_positions[sym_k].qty)
+                    if stop_db and target_db and pos_qty > 0:
+                        try:
+                            stop_p  = _smart_round(stop_db)
+                            stop_lp = _smart_round(stop_db * 0.996)
+                            tgt_p   = _smart_round(target_db)
+                            self.broker.api.submit_order(
+                                symbol=symbol, qty=pos_qty, side="sell",
+                                type="stop_limit",
+                                stop_price=stop_p, limit_price=stop_lp,
+                                time_in_force="gtc",
+                            )
+                            self.broker.api.submit_order(
+                                symbol=symbol, qty=pos_qty, side="sell",
+                                type="limit", limit_price=tgt_p,
+                                time_in_force="gtc",
+                            )
+                            logger.info(
+                                f"[GEO] 🔄 Réconciliation ordres Alpaca: {symbol} "
+                                f"stop_trigger=${stop_p} stop_limit=${stop_lp} target=${tgt_p}"
+                            )
+                            open_sell_orders.add(sym_k)
+                        except Exception as e:
+                            logger.error(f"[GEO] réconciliation ordres {symbol}: {e}")
 
-                if stop_hit:
-                    logger.info(f"[GEO] 🔴 STOP: {symbol} @ ${current:.4f}")
-                    self.broker.close_position(symbol)
-                    if self.memory:
-                        pnl = (current - entry) * qty
-                        self.memory.log_trade_close(
-                            match["trade_id"], current, "stop", pnl=pnl)
+                # ── 1. Position fermée par Alpaca (stop ou target rempli) ────────
+                if sym_k not in alpaca_positions:
+                    try:
+                        filled_sells = [
+                            o for o in self.broker.api.list_orders(
+                                status="closed", limit=20)
+                            if o.symbol == symbol
+                            and o.side   == "sell"
+                            and o.status == "filled"
+                        ]
+                        if filled_sells:
+                            o          = sorted(filled_sells, key=lambda x: x.filled_at, reverse=True)[0]
+                            fill_price = float(o.filled_avg_price or entry)
+                            qty_f      = float(o.filled_qty or qty_t)
+                            pnl        = (fill_price - entry) * qty_f
+                            reason     = "stop" if fill_price <= float(t.get("stop_loss") or 0) * 1.005 else "target"
+                            logger.info(
+                                f"[GEO] {'🔴' if reason=='stop' else '💰'} "
+                                f"Alpaca exit détecté: {symbol} @ ${fill_price:.4f} ({reason}) pnl=${pnl:.2f}"
+                            )
+                            self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
+                        else:
+                            logger.warning(f"[GEO] {symbol} absent des positions Alpaca — pas de sell trouvé")
+                    except Exception as e:
+                        logger.error(f"[GEO] detect_alpaca_exit {symbol}: {e}")
+                    continue
 
-                elif target_hit:
-                    logger.info(f"[GEO] 💰 TARGET: {symbol} @ ${current:.4f}")
-                    self.broker.close_position(symbol)
-                    if self.memory:
-                        pnl = (current - entry) * qty
-                        self.memory.log_trade_close(
-                            match["trade_id"], current, "target", pnl=pnl)
+                # ── 2. Time-stop : > 4h sans conviction ─────────────────────────
+                entry_at_str = t.get("entry_at")
+                if entry_at_str:
+                    try:
+                        entry_dt    = datetime.datetime.fromisoformat(
+                            str(entry_at_str).replace("Z", "+00:00")
+                        )
+                        now_utc     = datetime.datetime.now(datetime.timezone.utc)
+                        elapsed_min = (now_utc - entry_dt).total_seconds() / 60
+                        if elapsed_min >= TIMEOUT_MIN:
+                            pos     = alpaca_positions[sym_k]
+                            current = float(pos.current_price)
+                            qty_p   = float(pos.qty)
+                            logger.info(
+                                f"[GEO] ⏰ TIME-STOP {symbol} après {elapsed_min:.0f}min — clôture forcée"
+                            )
+                            # Annuler les ordres stop/target Alpaca ouverts
+                            try:
+                                for o in self.broker.api.list_orders(status="open", limit=50):
+                                    if _sym_key(o.symbol) == sym_k and o.side == "sell":
+                                        self.broker.api.cancel_order(o.id)
+                                        logger.info(f"[GEO] ⏰ Ordre {o.type} annulé ({o.id[:8]})")
+                            except Exception as ce:
+                                logger.debug(f"[GEO] cancel time-stop {symbol}: {ce}")
+                            self.broker.close_position(symbol)
+                            pnl = (current - entry) * qty_p
+                            self.memory.log_trade_close(trade_id, current, "timeout", pnl=pnl)
+                    except Exception as e:
+                        logger.error(f"[GEO] time-stop {symbol}: {e}")
 
         except Exception as e:
             logger.error(f"[GEO] manage_open_positions: {e}")
