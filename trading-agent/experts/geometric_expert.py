@@ -439,16 +439,9 @@ class GeometricExpert:
                         )
                         logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_price} limit=${stop_limit_price}")
 
-                        # Take-profit limit : sort proprement au target
-                        self.broker.api.submit_order(
-                            symbol=symbol,
-                            qty=qty,
-                            side="sell",
-                            type="limit",
-                            limit_price=target_price,
-                            time_in_force="gtc",
-                        )
-                        logger.info(f"[GEO] 💰 Take-profit limit placé: {symbol} @ ${target_price}")
+                        # NOTE: Alpaca réserve le collatéral pour le stop_limit → impossible
+                        # de placer un 2ème sell limit (TP). Le TP est géré par le bot
+                        # dans manage_open_positions() via price check toutes les 30s.
 
                     except Exception as e:
                         logger.error(f"[GEO] ordres stops/target error {symbol}: {e}")
@@ -491,14 +484,15 @@ class GeometricExpert:
             alpaca_positions = {_sym_key(p.symbol): p for p in (self.broker.get_positions() or [])}
             open_trades      = self.memory.get_open_trades()
 
-            # Ordres sell ouverts : Alpaca retourne "SOL/USD" (avec slash) dans list_orders
+            # Ordres stop_limit sell ouverts par symbol (le TP est géré par price check)
             try:
-                open_sell_orders = {
-                    _sym_key(o.symbol) for o in self.broker.api.list_orders(status="open", limit=50)
-                    if o.side == "sell"
+                raw_open_sells = self.broker.api.list_orders(status="open", limit=50)
+                stop_sell_syms = {
+                    _sym_key(o.symbol) for o in raw_open_sells
+                    if o.side == "sell" and o.type == "stop_limit"
                 }
             except Exception:
-                open_sell_orders = set()
+                stop_sell_syms = set()
 
             for t in open_trades:
                 ctx = self._ctx(t)
@@ -510,34 +504,54 @@ class GeometricExpert:
                 entry    = float(t.get("entry_price", 0))
                 qty_t    = float(t.get("qty", 0))
 
-                # ── 0. Réconciliation : place les ordres Alpaca si absents ────────
-                if sym_k in alpaca_positions and sym_k not in open_sell_orders:
-                    stop_db   = float(t.get("stop_loss")   or 0)
-                    target_db = float(t.get("take_profit") or 0)
-                    pos_qty   = float(alpaca_positions[sym_k].qty)
-                    if stop_db and target_db and pos_qty > 0:
+                # ── 0. Réconciliation : place le stop_limit si absent ────────────
+                if sym_k in alpaca_positions and sym_k not in stop_sell_syms:
+                    stop_db = float(t.get("stop_loss") or 0)
+                    pos_qty = float(alpaca_positions[sym_k].qty)
+                    if stop_db and pos_qty > 0:
                         try:
                             stop_p  = _smart_round(stop_db)
                             stop_lp = _smart_round(stop_db * 0.996)
-                            tgt_p   = _smart_round(target_db)
                             self.broker.api.submit_order(
                                 symbol=symbol, qty=pos_qty, side="sell",
                                 type="stop_limit",
                                 stop_price=stop_p, limit_price=stop_lp,
                                 time_in_force="gtc",
                             )
-                            self.broker.api.submit_order(
-                                symbol=symbol, qty=pos_qty, side="sell",
-                                type="limit", limit_price=tgt_p,
-                                time_in_force="gtc",
-                            )
+                            stop_sell_syms.add(sym_k)
                             logger.info(
-                                f"[GEO] 🔄 Réconciliation ordres Alpaca: {symbol} "
-                                f"stop_trigger=${stop_p} stop_limit=${stop_lp} target=${tgt_p}"
+                                f"[GEO] 🔄 Réconciliation stop: {symbol} "
+                                f"trigger=${stop_p} limit=${stop_lp}"
                             )
-                            open_sell_orders.add(sym_k)
                         except Exception as e:
-                            logger.error(f"[GEO] réconciliation ordres {symbol}: {e}")
+                            logger.error(f"[GEO] réconciliation stop {symbol}: {e}")
+
+                # ── 0b. Take-profit par price check (bot-managed) ───────────────
+                # Alpaca réserve le collatéral pour le stop_limit → pas de 2ème sell.
+                # Le bot surveille le prix et ferme proprement quand target atteint.
+                if sym_k in alpaca_positions:
+                    target_db = float(t.get("take_profit") or 0)
+                    if target_db > 0:
+                        pos = alpaca_positions[sym_k]
+                        current_px = float(pos.current_price or 0)
+                        if current_px >= target_db:
+                            try:
+                                pos_qty = float(pos.qty)
+                                # Annuler le stop_limit protecteur
+                                for o in self.broker.api.list_orders(status="open", limit=50):
+                                    if _sym_key(o.symbol) == sym_k and o.side == "sell":
+                                        self.broker.api.cancel_order(o.id)
+                                # Clôture au marché
+                                self.broker.close_position(symbol)
+                                pnl = (current_px - entry) * pos_qty
+                                logger.info(
+                                    f"[GEO] 💰 TAKE-PROFIT bot: {symbol} "
+                                    f"@ ${current_px:.4f} target=${target_db:.4f} pnl=${pnl:.2f}"
+                                )
+                                self.memory.log_trade_close(trade_id, current_px, "target", pnl=pnl)
+                                continue
+                            except Exception as e:
+                                logger.error(f"[GEO] take-profit close {symbol}: {e}")
 
                 # ── 1. Position fermée par Alpaca (stop ou target rempli) ────────
                 if sym_k not in alpaca_positions:
