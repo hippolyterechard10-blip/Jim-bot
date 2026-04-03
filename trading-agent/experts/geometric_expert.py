@@ -321,15 +321,14 @@ class GeometricExpert:
             current_capital = self._live_capital()
             deploy = min(available * 0.995, current_capital * config.GEO_POS_PCT)
 
-            # Placement limit order
+            # Placement limit order (Alpaca crypto ne supporte pas bracket/OCO)
+            # Stop + TP sont gérés après fill dans manage_open_positions()
             limit_price = _smart_round(zone["high"])
-            # Calculer qty sur le limit_price réel (zone_high), pas zone_center
-            # pour éviter "insufficient balance" quand zone_high > zone_center
             qty = round(deploy / limit_price, 6)
             if qty * limit_price < 20: continue
-            order_id    = None
+            order_id = None
             try:
-                order    = self.broker.api.submit_order(
+                order = self.broker.api.submit_order(
                     symbol=symbol, qty=qty, side="buy",
                     type="limit", limit_price=limit_price,
                     time_in_force="gtc",
@@ -337,7 +336,7 @@ class GeometricExpert:
                 order_id = getattr(order, "id", None)
                 logger.info(
                     f"[GEO] 📋 LIMIT PLACED: {symbol} @ ${limit_price:.4f} | "
-                    f"stop=${stop:.4f} | target=${target:.4f} | qty={qty} | "
+                    f"stop=${_smart_round(stop):.4f} | target=${_smart_round(target):.4f} | qty={qty} | "
                     f"RSI={rsi_now:.0f} | div={div} | zone_tests={zone['tests']}"
                 )
             except Exception as e:
@@ -420,31 +419,20 @@ class GeometricExpert:
                                 "target": float(p["target"]),
                             }
                         )
-                    # ── Ordres réels Alpaca après fill ─────────────────────────────
+                    # Placer le stop_limit protecteur dans Alpaca
+                    # (Alpaca crypto ne supporte pas bracket/OCO — TP géré par price check)
                     try:
-                        stop_price   = _smart_round(p["stop"])
-                        target_price = _smart_round(p["target"])
-
-                        # Stop-limit : Alpaca crypto ne supporte pas stop-market
-                        # limit_price = stop - 0.4% pour absorber le slippage
-                        stop_limit_price = _smart_round(p["stop"] * 0.996)
+                        stop_p   = _smart_round(p["stop"])
+                        stop_lp  = _smart_round(p["stop"] * 0.996)
                         self.broker.api.submit_order(
-                            symbol=symbol,
-                            qty=qty,
-                            side="sell",
+                            symbol=symbol, qty=qty, side="sell",
                             type="stop_limit",
-                            stop_price=stop_price,
-                            limit_price=stop_limit_price,
+                            stop_price=stop_p, limit_price=stop_lp,
                             time_in_force="gtc",
                         )
-                        logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_price} limit=${stop_limit_price}")
-
-                        # NOTE: Alpaca réserve le collatéral pour le stop_limit → impossible
-                        # de placer un 2ème sell limit (TP). Le TP est géré par le bot
-                        # dans manage_open_positions() via price check toutes les 30s.
-
+                        logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_p} limit=${stop_lp}")
                     except Exception as e:
-                        logger.error(f"[GEO] ordres stops/target error {symbol}: {e}")
+                        logger.error(f"[GEO] stop-limit post-fill {symbol}: {e}")
                     del self._pending[zk]
 
                 elif status in ("canceled", "expired", "rejected"):
@@ -484,15 +472,20 @@ class GeometricExpert:
             alpaca_positions = {_sym_key(p.symbol): p for p in (self.broker.get_positions() or [])}
             open_trades      = self.memory.get_open_trades()
 
-            # Ordres stop_limit sell ouverts par symbol (le TP est géré par price check)
+            # Tracker stop_limit et limit (TP bracket) séparément
             try:
                 raw_open_sells = self.broker.api.list_orders(status="open", limit=50)
                 stop_sell_syms = {
                     _sym_key(o.symbol) for o in raw_open_sells
                     if o.side == "sell" and o.type == "stop_limit"
                 }
+                tp_sell_syms = {
+                    _sym_key(o.symbol) for o in raw_open_sells
+                    if o.side == "sell" and o.type == "limit"
+                }
             except Exception:
                 stop_sell_syms = set()
+                tp_sell_syms   = set()
 
             for t in open_trades:
                 ctx = self._ctx(t)
@@ -526,10 +519,10 @@ class GeometricExpert:
                         except Exception as e:
                             logger.error(f"[GEO] réconciliation stop {symbol}: {e}")
 
-                # ── 0b. Take-profit par price check (bot-managed) ───────────────
-                # Alpaca réserve le collatéral pour le stop_limit → pas de 2ème sell.
-                # Le bot surveille le prix et ferme proprement quand target atteint.
-                if sym_k in alpaca_positions:
+                # ── 0b. Take-profit : price check si pas de bracket TP Alpaca ──────
+                # Bracket orders: le TP est géré par Alpaca (OCO). Sans bracket
+                # (legacy ou fallback), le bot ferme lui-même quand prix ≥ target.
+                if sym_k in alpaca_positions and sym_k not in tp_sell_syms:
                     target_db = float(t.get("take_profit") or 0)
                     if target_db > 0:
                         pos = alpaca_positions[sym_k]
