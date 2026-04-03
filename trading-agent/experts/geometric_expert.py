@@ -235,7 +235,7 @@ class GeometricExpert:
         open_count_global = len([t for t in self.memory.get_open_trades()
                                  if self._ctx(t).get("strategy_source") == "geo_v4"])
         if open_count_global >= config.GEO_MAX_SIM:
-            logger.debug(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM})")
+            logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}) — skip {symbol}")
             return
 
         # Capital
@@ -251,7 +251,7 @@ class GeometricExpert:
         hh  = h1h[-1] > h1h[-4];     hl  = l1h[-1] > l1h[-4]
         lh  = h1h[-1] < h1h[-4];     ll  = l1h[-1] < l1h[-4]
         if lh and ll:
-            logger.debug(f"[GEO] {symbol} — downtrend 1h, skip")
+            logger.info(f"[GEO] {symbol} — downtrend 1h (lh={lh} ll={ll}), skip")
             return
 
         # ── Pass 2 : Zones 15min ──────────────────────────────────────────────
@@ -272,14 +272,21 @@ class GeometricExpert:
         vols_5m   = bars_5m["volume"].values
         rsi_now   = _rsi(closes_5m, 14)
 
-        avg_vol = vols_5m[-20:].mean() if len(vols_5m) >= 20 else vols_5m.mean()
-        if avg_vol > 0 and vols_5m[-1] < avg_vol * 0.3:
-            logger.debug(f"[GEO] {symbol} — volume trop bas")
+        # Volume check — utiliser le dernier candle COMPLÉTÉ ([-2]), pas le candle
+        # en cours de formation ([-1] qui commence toujours à 0)
+        completed_vols = vols_5m[:-1] if len(vols_5m) > 1 else vols_5m
+        avg_vol = completed_vols[-20:].mean() if len(completed_vols) >= 20 else completed_vols.mean()
+        last_completed_vol = completed_vols[-1]
+        if avg_vol > 0 and last_completed_vol < avg_vol * 0.3:
+            logger.info(f"[GEO] {symbol} — volume trop bas (vol={last_completed_vol:.4f} < seuil={avg_vol*0.3:.4f} | avg20={avg_vol:.4f})")
             return
 
         # Évaluer chaque zone
         open_count = len([t for t in self.memory.get_open_trades()
                           if self._ctx(t).get("strategy_source") == "geo_v4"])
+
+        n_zones = len(zones)
+        n_dist = n_touches = n_pending = n_rsi = n_div = n_pass3b = n_rr = 0
 
         for zone in zones:
             if open_count >= config.GEO_MAX_SIM: break
@@ -287,37 +294,39 @@ class GeometricExpert:
             zk   = self._zone_key(zone["center"])
             dist = (current - zone["center"]) / current
 
-            if not (0.001 <= dist <= 0.020): continue
-            if self._touches[zk] >= config.GEO_MAX_TOUCHES: continue
-            if zk in self._pending: continue
+            if not (0.001 <= dist <= 0.020): n_dist += 1; continue
+            if self._touches[zk] >= config.GEO_MAX_TOUCHES: n_touches += 1; continue
+            if zk in self._pending: n_pending += 1; continue
 
             # RSI divergence
-            if not (config.GEO_RSI_LOW <= rsi_now <= config.GEO_RSI_HIGH): continue
+            if not (config.GEO_RSI_LOW <= rsi_now <= config.GEO_RSI_HIGH): n_rsi += 1; continue
             div = self._rsi_divergence(closes_5m, rsi_now)
-            if not div and not (30 <= rsi_now <= 55): continue
+            if not div and not (30 <= rsi_now <= 55): n_div += 1; continue
 
             # Pass 3b — touché ET remonté
             touched      = any(bars_5m["low"].values[-8:] <= zone["high"])
             closed_above = closes_5m[-1] > zone["low"]
-            if not (touched and closed_above): continue
+            if not (touched and closed_above): n_pass3b += 1; continue
 
             # Stop + target
             stop   = self._dynamic_stop(bars_5m["low"].values, zone["center"], zone["wick_low"])
             target = _smart_round(zone["high"] * (1 + config.GEO_TARGET_PCT))
             risk   = abs(zone["center"] - stop)
             reward = abs(target - zone["center"])
-            if risk <= 0 or reward / risk < 1.2: continue
+            if risk <= 0 or reward / risk < 1.2: n_rr += 1; continue
 
             # Sizing — basé sur l'equity Alpaca réelle
             available = self.get_available()
             if available < 30: break
             current_capital = self._live_capital()
-            deploy = min(available, current_capital * config.GEO_POS_PCT)
-            qty    = round(deploy / zone["center"], 6)
-            if qty * zone["center"] < 20: continue
+            deploy = min(available * 0.995, current_capital * config.GEO_POS_PCT)
 
             # Placement limit order
             limit_price = _smart_round(zone["high"])
+            # Calculer qty sur le limit_price réel (zone_high), pas zone_center
+            # pour éviter "insufficient balance" quand zone_high > zone_center
+            qty = round(deploy / limit_price, 6)
+            if qty * limit_price < 20: continue
             order_id    = None
             try:
                 order    = self.broker.api.submit_order(
@@ -363,6 +372,23 @@ class GeometricExpert:
                     logger.debug(f"[GEO] log_decision: {_le}")
 
             open_count += 1
+
+        # Résumé si aucun ordre placé
+        if open_count == len([t for t in self.memory.get_open_trades()
+                               if self._ctx(t).get("strategy_source") == "geo_v4"]):
+            reasons = []
+            if n_dist:    reasons.append(f"dist:{n_dist}")
+            if n_touches: reasons.append(f"touches:{n_touches}")
+            if n_pending: reasons.append(f"pending:{n_pending}")
+            if n_rsi:     reasons.append(f"rsi:{n_rsi}")
+            if n_div:     reasons.append(f"div:{n_div}")
+            if n_pass3b:  reasons.append(f"pass3b:{n_pass3b}")
+            if n_rr:      reasons.append(f"rr:{n_rr}")
+            reason_str = ", ".join(reasons) if reasons else "no_zones_in_range"
+            logger.info(
+                f"[GEO] {symbol} — no signal | zones={n_zones} RSI={rsi_now:.0f} "
+                f"price={closes_5m[-1]:.4f} | skip: {reason_str}"
+            )
 
     # ── MANAGE PENDING ────────────────────────────────────────────────────────
 
