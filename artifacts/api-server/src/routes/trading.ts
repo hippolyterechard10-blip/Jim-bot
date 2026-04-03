@@ -266,6 +266,31 @@ router.get("/trades/open", async (_req, res) => {
   res.json(await proxyFlask(`${FLASK_BASE}/api/trades/open`, []));
 });
 
+router.get("/analysis/rolling", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/analysis/rolling`, { n_trades: 0, win_rate: 0, profit_factor: 0, avg_hold_min: 0 }));
+});
+
+router.get("/analysis/exits", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/analysis/exits`, {
+    total: 0,
+    stop:    { n: 0, pct: 0 },
+    target:  { n: 0, pct: 0 },
+    timeout: { n: 0, pct: 0 },
+    other:   { n: 0, pct: 0 },
+  }));
+});
+
+router.get("/analysis/period", async (req, res) => {
+  const period = (req.query.period as string) || "all";
+  res.json(await proxyFlask(`${FLASK_BASE}/api/analysis/period?period=${period}`, {
+    period, n_trades: 0, total_pnl: 0, win_rate: 0, profit_factor: 0
+  }));
+});
+
+router.get("/analysis/equity-curve", async (_req, res) => {
+  res.json(await proxyFlask(`${FLASK_BASE}/api/analysis/equity-curve`, { capital_start: 0, points: [] }));
+});
+
 router.get("/analysis", async (req, res) => {
   const expert = (req.query.expert as string) || "all";
   res.json(await proxyFlask(`${FLASK_BASE}/api/analysis?expert=${expert}`, {}));
