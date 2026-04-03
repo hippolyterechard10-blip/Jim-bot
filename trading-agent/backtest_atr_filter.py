@@ -17,9 +17,9 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 try:
-    import yfinance as yf
+    import requests
 except ImportError:
-    print("pip install yfinance --break-system-packages"); sys.exit(1)
+    print("pip install requests --break-system-packages"); sys.exit(1)
 
 CAPITAL     = 1000.0
 POS_PCT     = 0.50
@@ -30,7 +30,10 @@ MAX_TOUCHES = 2
 RSI_LOW     = 20
 RSI_HIGH    = 65
 TARGET_PCT  = 0.009
-SYMBOLS     = ["ETH-USD", "SOL-USD"]
+SYMBOLS_BN  = {"ETH-USD": "ETHUSD", "SOL-USD": "SOLUSD"}
+SYMBOLS     = list(SYMBOLS_BN.keys())
+BASE        = "https://api.binance.us/api/v3/klines"
+CACHE_DIR   = "binance_us_cache"
 
 ATR_CONFIGS = {
     "Sans filtre ATR": None,
@@ -101,80 +104,140 @@ def _atr_pct(bars_5m, current):
     atr   = np.mean(highs - lows)
     return atr / current * 100
 
-# ── DOWNLOAD ──────────────────────────────────────────────────────────────────
+# ── DOWNLOAD BINANCE US ────────────────────────────────────────────────────────
+
+def _ms(dt):
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+def _dl_binance(symbol, days):
+    import time, os
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    end_dt   = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=days)
+    tag      = f"{symbol}_5m_atr_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}"
+    cache    = os.path.join(CACHE_DIR, f"{tag}.parquet")
+
+    if os.path.exists(cache):
+        df = pd.read_parquet(cache)
+        print(f"  [cache] {symbol}: {len(df):,} bars 5m")
+        return df
+
+    print(f"  [dl] {symbol}: {start_dt.date()} → {end_dt.date()} ...")
+    start_ms = _ms(start_dt); end_ms = _ms(end_dt)
+    rows = []
+    while start_ms < end_ms:
+        try:
+            r = requests.get(BASE, params={
+                "symbol": symbol, "interval": "5m",
+                "startTime": start_ms, "limit": 1000,
+            }, timeout=15)
+            data = r.json()
+        except Exception as e:
+            print(f"  retry: {e}"); time.sleep(3); continue
+        if not data or isinstance(data, dict): break
+        rows.extend(data)
+        start_ms = data[-1][0] + 300_000
+        time.sleep(0.05)
+
+    df = pd.DataFrame(rows, columns=[
+        "open_time","open","high","low","close","volume",
+        "close_time","qv","trades","tbv","tqv","ignore"
+    ])
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df.set_index("open_time", inplace=True)
+    for c in ["open","high","low","close","volume"]:
+        df[c] = df[c].astype(float)
+    df = df[["open","high","low","close","volume"]]
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    df.to_parquet(cache)
+    print(f"  → {len(df):,} bars ({df.index[0].date()} → {df.index[-1].date()})")
+    return df
+
+def _resample(df, rule):
+    return df.resample(rule).agg(
+        {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
+    ).dropna()
 
 def download_all():
-    end   = datetime.now(timezone.utc)
-    # yfinance limite 15m et 5m aux 60 derniers jours → on utilise 58j max
-    LIMITS = {"1h": LOOKBACK + 5, "15m": 58, "5m": 58}
     all_dfs = {}
-    for sym in SYMBOLS:
-        dfs = {}
-        for key, interval in [("1h", "1h"), ("15m", "15m"), ("5m", "5m")]:
-            start = end - timedelta(days=LIMITS[key])
-            df = yf.download(sym, start=start, end=end, interval=interval,
-                             auto_adjust=True, progress=False)
-            if df.empty: return None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df.index   = pd.to_datetime(df.index, utc=True)
-            df.columns = [c.lower() for c in df.columns]
-            dfs[key]   = df
-        all_dfs[sym] = dfs
-        print(f"  {sym}: {len(dfs['5m'])} bars 5min | 15m: {len(dfs['15m'])} | 1h: {len(dfs['1h'])}")
+    for sym, bn_sym in SYMBOLS_BN.items():
+        df5  = _dl_binance(bn_sym, LOOKBACK + 2)
+        if df5 is None or df5.empty: return None
+        all_dfs[sym] = {
+            "5m":  df5,
+            "15m": _resample(df5, "15min"),
+            "1h":  _resample(df5, "1h"),
+        }
+        print(f"  {sym}: {len(df5):,} bars 5m | 15m:{len(all_dfs[sym]['15m'])} | 1h:{len(all_dfs[sym]['1h'])}")
     return all_dfs
 
-# ── SIGNAL ────────────────────────────────────────────────────────────────────
+# ── SIGNAL (numpy vectorisé) ──────────────────────────────────────────────────
 
-def get_signal(sym, t_now, dfs, atr_min):
-    b1h  = dfs["1h"][dfs["1h"].index   <= t_now].tail(50)
-    b15m = dfs["15m"][dfs["15m"].index <= t_now].tail(100)
-    b5m  = dfs["5m"][dfs["5m"].index   <= t_now].tail(30)
-    if len(b1h) < 10 or len(b15m) < 20 or len(b5m) < 10: return None
+def get_signal_fast(h5, l5, c5, v5, h15, l15, c15, h1h, l1h, atr_min):
+    n5 = len(c5); n15 = len(c15); n1h = len(h1h)
+    if n5 < 30 or n15 < 20 or n1h < 10: return None, False
 
-    h1 = b1h["high"].values; l1 = b1h["low"].values
-    if h1[-1] < h1[-4] and l1[-1] < l1[-4]: return None
+    if h1h[-1] < h1h[-4] and l1h[-1] < l1h[-4]: return None, False
 
-    cl5  = b5m["close"].values
-    vo5  = b5m["volume"].values
-    rsi  = _rsi(cl5, 14)
-    curr = float(b5m["close"].iloc[-1])
+    cl5 = c5[-30:]; vo5 = v5[-30:]
+    rsi = _rsi(cl5, 14)
+    curr = float(cl5[-1])
 
-    avgv = vo5[-20:].mean() if len(vo5) >= 20 else vo5.mean()
-    if avgv > 0 and len(vo5) >= 2 and vo5[-2] < avgv * 0.3: return None
+    avgv = vo5[:-1][-20:].mean() if len(vo5) > 1 else 1.0
+    if avgv > 0 and vo5[-2] < avgv * 0.3: return None, False
 
-    # ── FILTRE ATR ────────────────────────────────────────────────────────────
+    # Filtre ATR
+    is_flat = False
     if atr_min is not None:
-        atr_p = _atr_pct(b5m, curr)
+        atr_p = np.mean(h5[-14:] - l5[-14:]) / curr * 100
         if atr_p < atr_min * 100:
-            return None  # marché trop flat
+            return None, True  # flat
 
-    if not (RSI_LOW <= rsi <= RSI_HIGH): return None
+    if not (RSI_LOW <= rsi <= RSI_HIGH): return None, False
 
-    zones = _find_zones(b15m["high"].values, b15m["low"].values, cl5)
+    zones = _find_zones(h15[-100:], l15[-100:], c15[-100:])
     for zone in zones:
         dist = (curr - zone["center"]) / curr
         if not (0.001 <= dist <= 0.020): continue
         div = _rsi_div(cl5, rsi)
         if not div and not (30 <= rsi <= 55): continue
-        if not any(b5m["low"].values[-8:] <= zone["high"]): continue
+        if not any(l5[-8:] <= zone["high"]): continue
         if cl5[-1] <= zone["low"]: continue
-        stop   = _dyn_stop(b5m["low"].values, zone["center"], zone["wick_low"])
+        stop   = _dyn_stop(l5[-8:], zone["center"], zone["wick_low"])
         target = round(zone["high"] * (1 + TARGET_PCT), 2)
         risk   = abs(zone["center"] - stop)
         reward = abs(target - zone["center"])
         if risk <= 0 or reward / risk < 1.2: continue
-        return {"zone": zone, "stop": stop, "target": target}
-    return None
+        return {"zone": zone, "stop": stop, "target": target}, False
+    return None, False
 
-# ── BACKTEST ──────────────────────────────────────────────────────────────────
+# ── BACKTEST (numpy rapide) ────────────────────────────────────────────────────
 
 def run(all_dfs, atr_min):
-    ref_idx = None
+    import bisect
+    arrays = {}
     for sym in SYMBOLS:
-        idx = set(all_dfs[sym]["5m"].index)
-        ref_idx = idx if ref_idx is None else ref_idx & idx
-    ref_idx = sorted(ref_idx)
+        df5  = all_dfs[sym]["5m"]
+        df15 = all_dfs[sym]["15m"]
+        df1h = all_dfs[sym]["1h"]
+        arrays[sym] = {
+            "idx5":  df5.index,  "idx15": df15.index, "idx1h": df1h.index,
+            "h5":  df5["high"].values,  "l5":  df5["low"].values,
+            "c5":  df5["close"].values, "v5":  df5["volume"].values,
+            "o5":  df5["open"].values,
+            "h15": df15["high"].values, "l15": df15["low"].values, "c15": df15["close"].values,
+            "h1h": df1h["high"].values, "l1h": df1h["low"].values,
+        }
+
+    ref_idx = sorted(set(arrays[SYMBOLS[0]]["idx5"]).intersection(
+        *[set(arrays[s]["idx5"]) for s in SYMBOLS[1:]]
+    ))
+    n = len(ref_idx)
+
+    pos_maps = {sym: {ts: i for i, ts in enumerate(arrays[sym]["idx5"])} for sym in SYMBOLS}
+
+    def tf_pos(idx_list, ts):
+        return max(0, bisect.bisect_right(idx_list, ts) - 1)
 
     capital     = CAPITAL
     trades      = []
@@ -182,19 +245,20 @@ def run(all_dfs, atr_min):
     touches     = defaultdict(int)
     skipped_flat = 0
 
-    for i in range(55, len(ref_idx) - 1):
+    for i in range(55, n - 1):
         t_now  = ref_idx[i]
         t_next = ref_idx[i + 1]
 
         for zk in list(open_pos.keys()):
             p   = open_pos[zk]
             sym = p["sym"]
-            df5 = all_dfs[sym]["5m"]
-            if t_next not in df5.index: continue
-            nb  = df5.loc[t_next]
-            hi  = float(nb["high"]); lo = float(nb["low"]); cl = float(nb["close"])
-            sh  = lo <= p["stop"]; th = hi >= p["target"]; to = (i - p["bar"]) >= 48
-            ep  = er = None
+            pm  = pos_maps[sym]
+            if t_next not in pm: continue
+            ni  = pm[t_next]
+            arr = arrays[sym]
+            hi = arr["h5"][ni]; lo = arr["l5"][ni]; cl = arr["c5"][ni]
+            sh = lo <= p["stop"]; th = hi >= p["target"]; to = (i - p["bar"]) >= 48
+            ep = er = None
             if sh and th: ep, er = p["stop"],   "stop"
             elif sh:      ep, er = p["stop"],   "stop"
             elif th:      ep, er = p["target"], "target"
@@ -202,59 +266,52 @@ def run(all_dfs, atr_min):
             if ep:
                 pnl = (ep - p["entry"]) * p["qty"]
                 capital += pnl
-                trades.append({
-                    "sym": sym, "entry": p["entry"], "exit": ep,
-                    "pnl": round(pnl, 4), "reason": er,
-                })
+                trades.append({"sym": sym, "entry": p["entry"], "exit": ep,
+                               "pnl": round(pnl, 4), "reason": er})
                 del open_pos[zk]
 
-        if capital < 20: continue
-        if len(open_pos) >= MAX_SIM: continue
-
-        deploy = CAPITAL * POS_PCT
+        if capital < 20 or len(open_pos) >= MAX_SIM: continue
 
         for sym in SYMBOLS:
             if len(open_pos) >= MAX_SIM: break
+            arr = arrays[sym]
+            ci5 = pos_maps[sym].get(t_now)
+            if ci5 is None: continue
+            ci15 = tf_pos(arr["idx15"], t_now)
+            ci1h = tf_pos(arr["idx1h"], t_now)
 
-            sig = get_signal(sym, t_now, all_dfs[sym], atr_min)
-            if sig is None:
-                if atr_min:
-                    b5m_w = all_dfs[sym]["5m"]
-                    b5m_w = b5m_w[b5m_w.index <= t_now].tail(30)
-                    if len(b5m_w) >= 14:
-                        curr  = float(b5m_w["close"].iloc[-1])
-                        atr_p = _atr_pct(b5m_w, curr)
-                        if atr_p < atr_min * 100:
-                            skipped_flat += 1
-                continue
+            sig, is_flat = get_signal_fast(
+                arr["h5"][:ci5+1],  arr["l5"][:ci5+1],
+                arr["c5"][:ci5+1],  arr["v5"][:ci5+1],
+                arr["h15"][:ci15+1], arr["l15"][:ci15+1], arr["c15"][:ci15+1],
+                arr["h1h"][:ci1h+1], arr["l1h"][:ci1h+1],
+                atr_min,
+            )
+            if is_flat: skipped_flat += 1
+            if sig is None: continue
 
             zone = sig["zone"]
             key  = _zk(sym, zone["center"])
-            if touches[key] >= MAX_TOUCHES: continue
-            if key in open_pos: continue
+            if touches[key] >= MAX_TOUCHES or key in open_pos: continue
 
-            df5 = all_dfs[sym]["5m"]
-            if t_next not in df5.index: continue
-            nb  = df5.loc[t_next]
-            if float(nb["low"]) <= zone["high"]:
-                fill = min(float(nb["open"]), zone["center"])
-                qty  = deploy / fill
+            pm = pos_maps[sym]
+            if t_next not in pm: continue
+            ni = pm[t_next]
+            if arr["l5"][ni] <= zone["high"]:
+                fill = min(arr["o5"][ni], zone["center"])
+                qty  = (CAPITAL * POS_PCT) / fill
                 touches[key] += 1
-                open_pos[key] = {
-                    "sym": sym, "entry": fill,
-                    "stop": sig["stop"], "target": sig["target"],
-                    "qty": qty, "bar": i,
-                }
+                open_pos[key] = {"sym": sym, "entry": fill,
+                                 "stop": sig["stop"], "target": sig["target"],
+                                 "qty": qty, "bar": i}
 
     for key, p in open_pos.items():
         sym  = p["sym"]
-        last = float(all_dfs[sym]["5m"]["close"].iloc[-1])
+        last = float(arrays[sym]["c5"][-1])
         pnl  = (last - p["entry"]) * p["qty"]
         capital += pnl
-        trades.append({
-            "sym": sym, "entry": p["entry"], "exit": last,
-            "pnl": round(pnl, 4), "reason": "end",
-        })
+        trades.append({"sym": sym, "entry": p["entry"], "exit": last,
+                       "pnl": round(pnl, 4), "reason": "end"})
 
     return trades, capital, skipped_flat
 
