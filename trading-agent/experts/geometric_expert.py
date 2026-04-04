@@ -285,7 +285,7 @@ class GeometricExpert:
                 "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status = 'closed'"
                 " AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
                 " AND close_reason != 'synced_close'"
-                " AND DATE(closed_at) = DATE('now')"
+                " AND DATE(exit_at) = DATE('now')"
             ).fetchone()
             conn.close()
             daily_pnl = float(row[0]) if row and row[0] else 0.0
