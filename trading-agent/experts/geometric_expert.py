@@ -80,8 +80,31 @@ class GeometricExpert:
             # 2. Réconcilier les positions Alpaca sans trade DB correspondant
             positions = self.broker.api.list_positions()
             open_db   = {t["symbol"] for t in self.memory.get_open_trades()}
+            # Symboles fermés il y a < 10 min → en cours de settlement Alpaca, skip orphan
+            import datetime as _dt
+            _now = _dt.datetime.now(_dt.timezone.utc)
+            recently_closed = set()
+            try:
+                import sqlite3 as _sq
+                _conn = _sq.connect(self.memory.db_path)
+                _rows = _conn.execute(
+                    "SELECT symbol, exit_at FROM trades WHERE status='closed' AND exit_at IS NOT NULL"
+                ).fetchall()
+                for _sym, _exit in _rows:
+                    try:
+                        _et = _dt.datetime.fromisoformat(str(_exit).replace("Z", "+00:00"))
+                        if (_now - _et).total_seconds() < 600:  # 10 min
+                            recently_closed.add(_sym)
+                    except Exception:
+                        pass
+                _conn.close()
+            except Exception:
+                pass
             for pos in positions:
                 sym = pos.symbol.replace("USD", "/USD") if "/" not in pos.symbol else pos.symbol
+                if sym in recently_closed:
+                    logger.debug(f"[GEO] Orphan skip {sym} — fermé il y a < 10 min (settlement)")
+                    continue
                 if sym not in open_db and any(s in sym for s in config.GEO_SYMBOLS):
                     entry  = float(pos.avg_entry_price)
                     qty    = float(pos.qty)
@@ -485,8 +508,7 @@ class GeometricExpert:
                                 "target": float(p["target"]),
                             }
                         )
-                    # Placer le stop_limit protecteur dans Alpaca
-                    # (Alpaca crypto ne supporte pas bracket/OCO — TP géré par price check)
+                    # ── Placer stop-limit protecteur ──────────────────────────────
                     try:
                         stop_p   = _smart_round(p["stop"])
                         stop_lp  = _smart_round(p["stop"] * 0.996)
@@ -499,6 +521,9 @@ class GeometricExpert:
                         logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_p} limit=${stop_lp}")
                     except Exception as e:
                         logger.error(f"[GEO] stop-limit post-fill {symbol}: {e}")
+
+                    # Note: Alpaca crypto ne supporte pas deux ordres sell simultanés
+                    # (stop-limit + TP limit) — le TP est géré par price check (live ask)
                     del self._pending[zk]
 
                 elif status in ("canceled", "expired", "rejected"):
@@ -577,13 +602,8 @@ class GeometricExpert:
                     _sym_key(o.symbol) for o in raw_open_sells
                     if o.side == "sell" and o.type == "stop_limit"
                 }
-                tp_sell_syms = {
-                    _sym_key(o.symbol) for o in raw_open_sells
-                    if o.side == "sell" and o.type == "limit"
-                }
             except Exception:
                 stop_sell_syms = set()
-                tp_sell_syms   = set()
 
             for t in open_trades:
                 ctx = self._ctx(t)
@@ -618,11 +638,10 @@ class GeometricExpert:
                             logger.error(f"[GEO] réconciliation stop {symbol}: {e}")
 
                 # ── 0b. Take-profit : price check (ask temps réel) ──────────────
-                # On compare l'ASK (= prix actuel de vente sur le marché) au target.
-                # Si ask >= target → le marché a clairement atteint notre niveau,
-                # on close au marché (fill ≈ bid, mais Alpaca paper trade simule mid).
-                # Fallback : pos.current_price si quotes indisponible.
-                if sym_k in alpaca_positions and sym_k not in tp_sell_syms:
+                # Alpaca crypto ne supporte pas deux sell orders simultanés,
+                # donc pas de TP limit order. On compare l'ASK live au target.
+                # Si ask >= target → close au marché.
+                if sym_k in alpaca_positions:
                     target_db = float(t.get("take_profit") or 0)
                     if target_db > 0:
                         pos = alpaca_positions[sym_k]
@@ -636,12 +655,17 @@ class GeometricExpert:
                         if check_px >= target_db:
                             try:
                                 pos_qty = float(pos.qty)
-                                # Annuler le stop_limit protecteur
+                                # Annuler le stop_limit protecteur + TP limit orphelin
                                 for o in self.broker.api.list_orders(status="open", limit=50):
                                     if _sym_key(o.symbol) == sym_k and o.side == "sell":
                                         self.broker.api.cancel_order(o.id)
-                                # Clôture au marché
-                                self.broker.close_position(symbol)
+                                # Clôture au marché — on vérifie que ça réussit
+                                closed_ok = self.broker.close_position(symbol)
+                                if not closed_ok:
+                                    # Position déjà fermée par Alpaca (ex: TP limit rempli)
+                                    # On laisse la logique de détection Alpaca handle ça
+                                    logger.info(f"[GEO] TP {symbol}: position déjà fermée par Alpaca")
+                                    continue
                                 fill_px = live_bid.get(sym_k) or pos_px
                                 pnl = (fill_px - entry) * pos_qty
                                 logger.info(
@@ -675,6 +699,14 @@ class GeometricExpert:
                                 f"Alpaca exit détecté: {symbol} @ ${fill_price:.4f} ({reason}) pnl=${pnl:.2f}"
                             )
                             self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
+                            # Annuler tous les ordres sell restants (stop ou TP limit orphelins)
+                            try:
+                                for rem in self.broker.api.list_orders(status="open", limit=50):
+                                    if _sym_key(rem.symbol) == sym_k and rem.side == "sell":
+                                        self.broker.api.cancel_order(rem.id)
+                                        logger.info(f"[GEO] 🗑 Ordre orphelin annulé: {rem.type} {rem.id[:8]}")
+                            except Exception as ce:
+                                logger.debug(f"[GEO] cancel orphan orders {symbol}: {ce}")
                         else:
                             logger.warning(f"[GEO] {symbol} absent des positions Alpaca — pas de sell trouvé")
                     except Exception as e:
