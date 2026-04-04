@@ -113,7 +113,7 @@ class TradingNotifier:
 
         # ── Per-expert capital breakdown ────────────────────────────────────────
         def _expert_stats(source_key):
-            base       = config.STRATEGY_CAPITAL.get(source_key, 500.0)
+            base       = config.GEO_CAPITAL
             all_trades = self.memory.get_recent_trades(limit=500)
             src_closed = [
                 t for t in all_trades
