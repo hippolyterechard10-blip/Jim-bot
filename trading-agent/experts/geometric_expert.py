@@ -277,6 +277,26 @@ class GeometricExpert:
             logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}, dont {len(self._pending)} pending) — skip {symbol}")
             return
 
+        # Circuit-breaker journalier 3%
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+            row = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status = 'closed'"
+                " AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
+                " AND close_reason != 'synced_close'"
+                " AND DATE(closed_at) = DATE('now')"
+            ).fetchone()
+            conn.close()
+            daily_pnl = float(row[0]) if row and row[0] else 0.0
+            daily_cap = config.GEO_CAPITAL * 0.03
+            if daily_pnl < -daily_cap:
+                pct = abs(daily_pnl) / config.GEO_CAPITAL * 100
+                logger.info(f"[GEO] 🔴 CIRCUIT BREAKER: perte journalière ${abs(daily_pnl):.2f} ({pct:.1f}%) > 3% — pause trading")
+                return
+        except Exception as e:
+            logger.debug(f"[GEO] circuit-breaker check: {e}")
+
         # Capital
         if not self.has_capital():
             logger.info(f"[GEO] Capital insuffisant (${self.get_available():.0f})")
