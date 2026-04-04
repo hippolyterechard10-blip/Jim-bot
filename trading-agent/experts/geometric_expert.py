@@ -272,8 +272,9 @@ class GeometricExpert:
         # Double-entrée guard — pool global ETH+SOL
         open_count_global = len([t for t in self.memory.get_open_trades()
                                  if self._ctx(t).get("strategy_source") == "geo_v4"])
+        open_count_global += len(self._pending)
         if open_count_global >= config.GEO_MAX_SIM:
-            logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}) — skip {symbol}")
+            logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}, dont {len(self._pending)} pending) — skip {symbol}")
             return
 
         # Capital
