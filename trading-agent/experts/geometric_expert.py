@@ -25,10 +25,16 @@ def _smart_round(price: float) -> float:
 
 def _rsi(closes: np.ndarray, period: int = 14) -> float:
     if len(closes) < period + 1: return 50.0
-    d  = np.diff(closes.astype(float))
-    g  = np.where(d > 0, d, 0.0)
-    l  = np.where(d < 0, -d, 0.0)
-    ag = g[-period:].mean(); al = l[-period:].mean()
+    c = np.array(closes, dtype=float)
+    d = np.diff(c)
+    g = np.where(d > 0, d, 0.0)
+    l = np.where(d < 0, -d, 0.0)
+    ag = g[:period].mean()
+    al = l[:period].mean()
+    alpha = 1.0 / period
+    for i in range(period, len(g)):
+        ag = ag * (1 - alpha) + g[i] * alpha
+        al = al * (1 - alpha) + l[i] * alpha
     if al == 0: return 100.0
     return round(100 - 100 / (1 + ag / al), 2)
 
