@@ -310,7 +310,7 @@ class GeometricExpert:
             if not div and not (30 <= rsi_now <= 55): n_div += 1; continue
 
             # Pass 3b — touché ET remonté
-            touched      = any(bars_5m["low"].values[-8:] <= zone["high"])
+            touched      = any(bars_5m["low"].values[-4:] <= zone["high"])
             closed_above = closes_5m[-1] > zone["low"]
             if not (touched and closed_above): n_pass3b += 1; continue
 
