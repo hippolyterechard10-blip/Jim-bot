@@ -317,8 +317,8 @@ class GeometricExpert:
             # Stop + target
             stop   = self._dynamic_stop(bars_5m["low"].values, zone["center"], zone["wick_low"])
             target = _smart_round(zone["high"] * (1 + config.GEO_TARGET_PCT))
-            risk   = abs(zone["center"] - stop)
-            reward = abs(target - zone["center"])
+            risk   = abs(zone["high"] - stop)
+            reward = abs(target - zone["high"])
             if risk <= 0 or reward / risk < 1.2: n_rr += 1; continue
 
             # Sizing — basé sur l'equity Alpaca réelle
