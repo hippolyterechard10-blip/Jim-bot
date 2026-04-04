@@ -159,6 +159,28 @@ class GeometricExpert:
             logger.debug(f"[GEO] _closed_pnl: {e}")
             return 0.0
 
+    def _daily_pnl(self) -> float:
+        """PnL des trades geo_v4 fermés depuis minuit UTC aujourd'hui."""
+        try:
+            import sqlite3
+            from datetime import datetime, timezone
+            midnight = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            conn = sqlite3.connect(self.memory.db_path, timeout=5)
+            row = conn.execute("""
+                SELECT COALESCE(SUM(pnl), 0.0) FROM trades
+                WHERE status = 'closed'
+                  AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+                  AND close_reason != 'synced_close'
+                  AND exit_at >= ?
+            """, (midnight,)).fetchone()
+            conn.close()
+            return float(row[0]) if row and row[0] else 0.0
+        except Exception as e:
+            logger.debug(f"[GEO] _daily_pnl: {e}")
+            return 0.0
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _ctx(self, trade: dict) -> dict:
@@ -237,6 +259,16 @@ class GeometricExpert:
             logger.info(f"[GEO] 🔴 Régime {_r} — pas d'entrée")
             return
 
+        # Circuit-breaker journalier — stop si perte > MONTHLY_LOSS_CAP_PCT × GEO_CAPITAL
+        daily_loss = self._daily_pnl()
+        daily_cap  = -abs(config.MONTHLY_LOSS_CAP_PCT * config.GEO_CAPITAL)
+        if daily_loss < daily_cap:
+            logger.warning(
+                f"[GEO] 🚨 Circuit-breaker: perte jour ${daily_loss:.2f} "
+                f"< seuil ${daily_cap:.2f} — pas d'entrée aujourd'hui"
+            )
+            return
+
         # Double-entrée guard — pool global ETH+SOL
         open_count_global = len([t for t in self.memory.get_open_trades()
                                  if self._ctx(t).get("strategy_source") == "geo_v4"])
@@ -283,6 +315,13 @@ class GeometricExpert:
         completed_vols = vols_5m[:-1] if len(vols_5m) > 1 else vols_5m
         avg_vol = completed_vols[-20:].mean() if len(completed_vols) >= 20 else completed_vols.mean()
         last_completed_vol = completed_vols[-1]
+        # Fallback heure creuse : si la dernière bougie complétée a un volume nul
+        # (Alpaca renvoie parfois 0 sur les périodes peu liquides), utiliser la
+        # moyenne des 5 dernières bougies non-nulles pour éviter les faux positifs.
+        if last_completed_vol == 0:
+            nonzero = [v for v in completed_vols[-6:-1] if v > 0]
+            last_completed_vol = float(np.mean(nonzero)) if nonzero else avg_vol
+            logger.debug(f"[GEO] {symbol} — vol=0 fallback → {last_completed_vol:.4f}")
         if avg_vol > 0 and last_completed_vol < avg_vol * 0.3:
             logger.info(f"[GEO] {symbol} — volume trop bas (vol={last_completed_vol:.4f} < seuil={avg_vol*0.3:.4f} | avg20={avg_vol:.4f})")
             return
