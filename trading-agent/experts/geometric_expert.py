@@ -597,7 +597,7 @@ class GeometricExpert:
                     try:
                         filled_sells = [
                             o for o in self.broker.api.list_orders(
-                                status="closed", limit=20)
+                                status="closed", limit=50)
                             if o.symbol == symbol
                             and o.side   == "sell"
                             and o.status == "filled"
