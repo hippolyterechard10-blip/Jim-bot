@@ -24,3 +24,9 @@ id = "lS8UIr4qtEw42ZGk3Cb5N"
 uri = "file://jimbot_source.zip"
 type = "unspecified"
 title = "Jim Bot — Code source (trading-agent/)"
+
+[[outputs]]
+id = "khfQ4A6wZDcBfZsnsvczE"
+uri = "file://trading-bot-source.zip"
+type = "unspecified"
+title = "Trading Bot — Code Source"
