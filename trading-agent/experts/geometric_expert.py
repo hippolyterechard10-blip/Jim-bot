@@ -538,6 +538,38 @@ class GeometricExpert:
             alpaca_positions = {_sym_key(p.symbol): p for p in (self.broker.get_positions() or [])}
             open_trades      = self.memory.get_open_trades()
 
+            # ── Prix bid en temps réel pour chaque symbole ouvert ──────────────
+            # On utilise le BID (prix de vente réel) plutôt que pos.current_price
+            # qui est souvent stale et fait manquer les TP au centime près.
+            # live_bid / live_ask : prix temps réel depuis Alpaca quotes API
+            # On stocke bid ET ask pour comparer correctement le TP.
+            # Pour un LONG: on vend au bid → mais on détecte le TP sur l'ask
+            # (si ask >= target, le mid est clairement au-dessus du target).
+            live_bid: dict[str, float] = {}
+            live_ask: dict[str, float] = {}
+            if open_trades:
+                syms_slash = list({t.get("symbol","") for t in open_trades})
+                if syms_slash:
+                    try:
+                        import requests as _req, os as _os
+                        _url  = "https://data.alpaca.markets/v1beta3/crypto/us/latest/quotes"
+                        _hdrs = {
+                            "APCA-API-KEY-ID":     _os.environ.get("ALPACA_API_KEY", ""),
+                            "APCA-API-SECRET-KEY": _os.environ.get("ALPACA_SECRET_KEY", ""),
+                        }
+                        _r = _req.get(_url, headers=_hdrs,
+                                      params={"symbols": ",".join(syms_slash)}, timeout=5)
+                        if _r.ok:
+                            for sym_q, q in _r.json().get("quotes", {}).items():
+                                k = _sym_key(sym_q)
+                                bp = float(q.get("bp") or 0)
+                                ap = float(q.get("ap") or 0)
+                                if bp: live_bid[k] = bp
+                                if ap: live_ask[k] = ap
+                        logger.debug(f"[GEO] live quotes bid={live_bid} ask={live_ask}")
+                    except Exception as _qe:
+                        logger.debug(f"[GEO] live quotes error: {_qe}")
+
             # Tracker stop_limit et limit (TP bracket) séparément
             try:
                 raw_open_sells = self.broker.api.list_orders(status="open", limit=50)
@@ -585,15 +617,23 @@ class GeometricExpert:
                         except Exception as e:
                             logger.error(f"[GEO] réconciliation stop {symbol}: {e}")
 
-                # ── 0b. Take-profit : price check si pas de bracket TP Alpaca ──────
-                # Bracket orders: le TP est géré par Alpaca (OCO). Sans bracket
-                # (legacy ou fallback), le bot ferme lui-même quand prix ≥ target.
+                # ── 0b. Take-profit : price check (ask temps réel) ──────────────
+                # On compare l'ASK (= prix actuel de vente sur le marché) au target.
+                # Si ask >= target → le marché a clairement atteint notre niveau,
+                # on close au marché (fill ≈ bid, mais Alpaca paper trade simule mid).
+                # Fallback : pos.current_price si quotes indisponible.
                 if sym_k in alpaca_positions and sym_k not in tp_sell_syms:
                     target_db = float(t.get("take_profit") or 0)
                     if target_db > 0:
                         pos = alpaca_positions[sym_k]
-                        current_px = float(pos.current_price or 0)
-                        if current_px >= target_db:
+                        pos_px    = float(pos.current_price or 0)
+                        check_px  = live_ask.get(sym_k) or pos_px
+                        logger.info(
+                            f"[GEO] TP check {symbol}: ask=${check_px:.4f} "
+                            f"bid=${live_bid.get(sym_k, 0):.4f} "
+                            f"pos=${pos_px:.4f} target=${target_db:.4f}"
+                        )
+                        if check_px >= target_db:
                             try:
                                 pos_qty = float(pos.qty)
                                 # Annuler le stop_limit protecteur
@@ -602,12 +642,14 @@ class GeometricExpert:
                                         self.broker.api.cancel_order(o.id)
                                 # Clôture au marché
                                 self.broker.close_position(symbol)
-                                pnl = (current_px - entry) * pos_qty
+                                fill_px = live_bid.get(sym_k) or pos_px
+                                pnl = (fill_px - entry) * pos_qty
                                 logger.info(
                                     f"[GEO] 💰 TAKE-PROFIT bot: {symbol} "
-                                    f"@ ${current_px:.4f} target=${target_db:.4f} pnl=${pnl:.2f}"
+                                    f"ask=${check_px:.4f} >= target=${target_db:.4f} "
+                                    f"fill≈${fill_px:.4f} pnl≈${pnl:.2f}"
                                 )
-                                self.memory.log_trade_close(trade_id, current_px, "target", pnl=pnl)
+                                self.memory.log_trade_close(trade_id, fill_px, "target", pnl=pnl)
                                 continue
                             except Exception as e:
                                 logger.error(f"[GEO] take-profit close {symbol}: {e}")
