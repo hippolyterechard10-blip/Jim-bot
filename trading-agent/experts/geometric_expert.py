@@ -66,7 +66,7 @@ class GeometricExpert:
                     qty    = float(o.qty or 0)
                     stop   = round(lim * 0.997, 4)
                     target = round(lim * 1.009, 4)
-                    zk     = f"{sym}_{lim:.4f}"
+                    zk     = self._zone_key(lim)
                     self._pending[zk] = {
                         "order_id": o.id,
                         "symbol":   sym,
