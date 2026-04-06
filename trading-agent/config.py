@@ -1,25 +1,39 @@
 """
-config.py — Jim Bot Geo-Only ETH
-Configuration simplifiée : un seul asset, une seule stratégie.
+config.py — Jim Bot Geo-Only ETH+SOL
 """
 import os
 
-# ── Alpaca ────────────────────────────────────────────────────────────────────
+# ── Broker actif ──────────────────────────────────────────────────────────────
+# "okx"    → OKX Demo/Live (recommandé : supporte SL+TP natif)
+# "alpaca" → Alpaca paper trading (legacy)
+USE_BROKER = os.getenv("USE_BROKER", "okx")
+
+# ── OKX ───────────────────────────────────────────────────────────────────────
+OKX_API_KEY    = os.getenv("OKX_API_KEY", "")
+OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY", "")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
+OKX_DEMO       = os.getenv("OKX_DEMO", "1") == "1"   # Demo Trading = True par défaut
+OKX_LEVERAGE   = int(os.getenv("OKX_LEVERAGE", "1"))  # 1x = équivalent spot
+
+# Mapping DB symbol → OKX instId (USDT Perpetual)
+OKX_SYMBOL_MAP = {
+    "ETH/USD": "ETH-USDT-SWAP",
+    "SOL/USD": "SOL-USDT-SWAP",
+}
+
+# ── Alpaca (legacy) ────────────────────────────────────────────────────────────
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"
 
 # ── Capital ───────────────────────────────────────────────────────────────────
-# Mis à jour le 2026-04-02 après clôture résidus AVAX/SHIB/XRP — equity réelle Alpaca
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "978.86"))
-GEO_CAPITAL     = INITIAL_CAPITAL   # Tout en geo, pas de split
+GEO_CAPITAL     = INITIAL_CAPITAL
 
-# ── Nouveau départ — reset P&L à partir de cette date ─────────────────────────
-# Seuls les trades après GEO_RESET_DATE entrent dans le calcul P&L du dashboard.
-# capital_start sera l'equity réelle Alpaca au moment du reset.
-GEO_RESET_DATE  = "2026-04-02"   # YYYY-MM-DD — mettre à jour à chaque reset
+# ── Reset P&L ─────────────────────────────────────────────────────────────────
+GEO_RESET_DATE = "2026-04-06"   # YYYY-MM-DD — mis à jour lors de la migration OKX
 
-# ── Geo V4 — Paramètres validés par backtest 2022-2025 ───────────────────────
+# ── Geo V4 — Paramètres stratégie ─────────────────────────────────────────────
 GEO_SYMBOLS       = ["ETH/USD", "SOL/USD"]
 GEO_ZONE_PCT      = 0.003    # Zone ±0.3% autour du pivot
 GEO_MAX_SIM       = 2        # Max 2 positions simultanées (pool global ETH+SOL)

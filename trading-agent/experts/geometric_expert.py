@@ -1,19 +1,26 @@
 """
-geometric_expert.py — Geo V4 ETH-Only
+geometric_expert.py — Geo V4 ETH+SOL (OKX broker)
 Stratégie validée backtest 2022-2025 :
   - Zones ±0.3% autour des pivots 15min
   - Limit order à zone["high"] (support × 1.003)
   - Stop dynamique sous wick réel
   - RSI divergence [20-65] + Pass 3b
   - Zone freshness MAX_TOUCHES=2
-  - Target +0.9% fallback
+  - Target +0.9%
+
+Broker OKX : SL + TP attachés à l'ordre d'entrée (bracket natif).
+manage_open_positions() simplifié : détecte fermeture par comparaison
+positions OKX ↔ DB. Aucun price-check bot-side.
 """
-import logging, json, uuid
+import logging, json, uuid, datetime
 from collections import defaultdict
 import numpy as np
+import pandas as pd
 import config
 
 logger = logging.getLogger(__name__)
+
+TIMEOUT_MIN = 240  # 4h time-stop
 
 
 def _smart_round(price: float) -> float:
@@ -46,70 +53,68 @@ class GeometricExpert:
         self.memory   = memory
         self.geometry = geometry
         self.regime   = regime
-        # Pending limit orders : zone_key → {order_id, level, stop, target, qty}
+        # Pending limit orders : zone_key → {order_id, symbol, level, stop, target, qty, deploy}
         self._pending: dict = {}
         # Zone touch tracking
         self._touches: defaultdict = defaultdict(int)
-        # Réconciliation au démarrage — récupère l'état Alpaca
-        self._reconcile_alpaca_state()
+        # Réconciliation au démarrage
+        self._reconcile_state()
 
-    def _reconcile_alpaca_state(self):
-        """Au démarrage, recharge les ordres GTC et les positions orphelines depuis Alpaca.
-        Évite de perdre le suivi après un redémarrage du bot."""
+    # ── Réconciliation démarrage ───────────────────────────────────────────────
+
+    def _reconcile_state(self):
+        """Au démarrage, recharge les ordres GTC ouverts et les positions orphelines."""
         try:
-            # 1. Recharger les ordres GTC ouverts dans self._pending
-            open_orders = self.broker.api.list_orders(status="open")
+            # 1. Recharger les ordres limit buy ouverts dans self._pending
+            open_orders = self.broker.list_open_orders()
             for o in open_orders:
-                sym = o.symbol  # ex: 'ETH/USD'
-                if o.time_in_force == "gtc" and o.side == "buy" and o.limit_price:
+                if o.side == "buy" and o.type == "limit" and o.limit_price:
                     lim    = float(o.limit_price)
-                    qty    = float(o.qty or 0)
+                    symbol = o.db_symbol
                     stop   = round(lim * 0.997, 4)
                     target = round(lim * 1.009, 4)
                     zk     = self._zone_key(lim)
                     self._pending[zk] = {
                         "order_id": o.id,
-                        "symbol":   sym,
+                        "symbol":   symbol,
                         "level":    lim,
+                        "high":     lim,
                         "stop":     stop,
                         "target":   target,
-                        "qty":      qty,
+                        "qty":      o.filled_qty or 0,
+                        "deploy":   lim * (o.qty_contracts or 0) * self.broker._ct(o.okx_symbol),
                     }
-                    logger.info(f"[GEO] 🔄 Recovered pending order: {sym} GTC@{lim}")
+                    logger.info(f"[GEO] 🔄 Recovered pending order: {symbol} GTC@{lim}")
 
-            # 2. Réconcilier les positions Alpaca sans trade DB correspondant
-            positions = self.broker.api.list_positions()
-            open_db   = {t["symbol"] for t in self.memory.get_open_trades()}
-            # Symboles fermés il y a < 10 min → en cours de settlement Alpaca, skip orphan
-            import datetime as _dt
-            _now = _dt.datetime.now(_dt.timezone.utc)
+            # 2. Réconcilier les positions OKX sans trade DB correspondant
+            positions   = self.broker.get_positions()
+            open_db     = {t["symbol"] for t in self.memory.get_open_trades()}
+            _now        = datetime.datetime.now(datetime.timezone.utc)
+            # Skip si fermé il y a < 10 min (settlement)
             recently_closed = set()
             try:
                 import sqlite3 as _sq
                 _conn = _sq.connect(self.memory.db_path)
-                _rows = _conn.execute(
+                for _sym, _exit in _conn.execute(
                     "SELECT symbol, exit_at FROM trades WHERE status='closed' AND exit_at IS NOT NULL"
-                ).fetchall()
-                for _sym, _exit in _rows:
+                ).fetchall():
                     try:
-                        _et = _dt.datetime.fromisoformat(str(_exit).replace("Z", "+00:00"))
-                        if (_now - _et).total_seconds() < 600:  # 10 min
+                        _et = datetime.datetime.fromisoformat(str(_exit).replace("Z", "+00:00"))
+                        if (_now - _et).total_seconds() < 600:
                             recently_closed.add(_sym)
                     except Exception:
                         pass
                 _conn.close()
             except Exception:
                 pass
+
             for pos in positions:
-                sym = pos.symbol.replace("USD", "/USD") if "/" not in pos.symbol else pos.symbol
+                sym = pos.db_symbol
                 if sym in recently_closed:
-                    logger.debug(f"[GEO] Orphan skip {sym} — fermé il y a < 10 min (settlement)")
                     continue
                 if sym not in open_db and any(s in sym for s in config.GEO_SYMBOLS):
                     entry  = float(pos.avg_entry_price)
                     qty    = float(pos.qty)
-                    # Reconstituer zone_center (entry est zone_high = center × 1.003)
-                    # et stop = zone_low × 0.999 = (center × 0.997) × 0.999
                     center = entry / (1 + config.GEO_ZONE_PCT)
                     stop   = round(center * (1 - config.GEO_ZONE_PCT) * 0.999, 4)
                     target = round(entry * (1 + config.GEO_TARGET_PCT), 4)
@@ -125,19 +130,17 @@ class GeometricExpert:
                             "reconciled": True,
                         }
                     )
-                    logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} qty={qty} entry={entry}")
+                    logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} qty={qty:.4f} entry={entry}")
         except Exception as e:
-            logger.warning(f"[GEO] _reconcile_alpaca_state: {e}")
+            logger.warning(f"[GEO] _reconcile_state: {e}")
 
     # ── Capital ───────────────────────────────────────────────────────────────
 
     def _live_capital(self) -> float:
-        """Equity Alpaca réelle — source de vérité pour le sizing.
-        Fallback: GEO_CAPITAL + closed_pnl si l'API est indisponible."""
         try:
-            equity = float(self.broker.api.get_account().equity)
-            logger.debug(f"[GEO] live capital Alpaca: ${equity:.2f}")
-            return equity
+            eq = self.broker.get_equity()
+            logger.debug(f"[GEO] live capital OKX: ${eq:.2f}")
+            return eq
         except Exception as e:
             logger.warning(f"[GEO] _live_capital fallback: {e}")
             return config.GEO_CAPITAL + self._closed_pnl()
@@ -150,15 +153,12 @@ class GeometricExpert:
                 if ctx.get("strategy_source") == "geo_v4":
                     total += float(t.get("entry_price", 0)) * float(t.get("qty", 0))
             return total
-        except Exception as e:
-            logger.error(f"[GEO] get_deployed: {e}")
+        except Exception:
             return config.GEO_CAPITAL
 
     def get_available(self) -> float:
-        """Utilise buying_power Alpaca — déjà net des ordres GTC en attente."""
         try:
-            bp = float(self.broker.api.get_account().buying_power)
-            return max(0.0, bp)
+            return max(0.0, self.broker.get_available())
         except Exception as e:
             logger.error(f"[GEO] get_available: {e}")
             return max(0.0, config.GEO_CAPITAL - self.get_deployed())
@@ -178,16 +178,13 @@ class GeometricExpert:
             """).fetchone()
             conn.close()
             return float(row[0]) if row and row[0] else 0.0
-        except Exception as e:
-            logger.debug(f"[GEO] _closed_pnl: {e}")
+        except Exception:
             return 0.0
 
     def _daily_pnl(self) -> float:
-        """PnL des trades geo_v4 fermés depuis minuit UTC aujourd'hui."""
         try:
             import sqlite3
-            from datetime import datetime, timezone
-            midnight = datetime.now(timezone.utc).replace(
+            midnight = datetime.datetime.now(datetime.timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0
             ).isoformat()
             conn = sqlite3.connect(self.memory.db_path, timeout=5)
@@ -200,8 +197,7 @@ class GeometricExpert:
             """, (midnight,)).fetchone()
             conn.close()
             return float(row[0]) if row and row[0] else 0.0
-        except Exception as e:
-            logger.debug(f"[GEO] _daily_pnl: {e}")
+        except Exception:
             return 0.0
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -262,13 +258,9 @@ class GeometricExpert:
         if floor <= zone_stop < entry_level: return zone_stop
         return entry_level * 0.997
 
-    def _cancel_order(self, order_id: str | None, symbol: str = ""):
+    def _cancel_order(self, symbol: str, order_id: str | None):
         if not order_id: return
-        try:
-            self.broker.api.cancel_order(order_id)
-            logger.info(f"[GEO] 🛑 Cancelled {order_id}")
-        except Exception as e:
-            logger.debug(f"[GEO] cancel {order_id}: {e}")
+        self.broker.cancel_order(symbol, order_id)
 
     # ── EVALUATE ──────────────────────────────────────────────────────────────
 
@@ -276,51 +268,44 @@ class GeometricExpert:
         symbol = symbol or config.GEO_SYMBOLS[0]
         logger.info(f"[GEO] evaluating {symbol} | régime={regime}")
 
-        # Gate régime
         _r = (regime or "unknown").lower()
         if _r in ("bear", "panic"):
             logger.info(f"[GEO] 🔴 Régime {_r} — pas d'entrée")
             return
 
-        # Circuit-breaker journalier — stop si perte > MONTHLY_LOSS_CAP_PCT × GEO_CAPITAL
+        # Circuit-breaker journalier
         daily_loss = self._daily_pnl()
         daily_cap  = -abs(config.MONTHLY_LOSS_CAP_PCT * config.GEO_CAPITAL)
         if daily_loss < daily_cap:
-            logger.warning(
-                f"[GEO] 🚨 Circuit-breaker: perte jour ${daily_loss:.2f} "
-                f"< seuil ${daily_cap:.2f} — pas d'entrée aujourd'hui"
-            )
+            logger.warning(f"[GEO] 🚨 Circuit-breaker: ${daily_loss:.2f} < ${daily_cap:.2f}")
             return
 
-        # Double-entrée guard — pool global ETH+SOL
+        # Pool global
         open_count_global = len([t for t in self.memory.get_open_trades()
-                                 if self._ctx(t).get("strategy_source") == "geo_v4"])
+                                  if self._ctx(t).get("strategy_source") == "geo_v4"])
         open_count_global += len(self._pending)
         if open_count_global >= config.GEO_MAX_SIM:
-            logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}, dont {len(self._pending)} pending) — skip {symbol}")
+            logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}) — skip {symbol}")
             return
 
-        # Circuit-breaker journalier 3%
+        # Circuit-breaker 3% jour
         try:
             import sqlite3
             conn = sqlite3.connect(self.memory.db_path, timeout=5)
             row = conn.execute(
-                "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status = 'closed'"
-                " AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
-                " AND close_reason != 'synced_close'"
-                " AND DATE(exit_at) = DATE('now')"
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE status='closed'"
+                " AND json_extract(market_context, '$.strategy_source')='geo_v4'"
+                " AND close_reason!='synced_close'"
+                " AND DATE(exit_at)=DATE('now')"
             ).fetchone()
             conn.close()
             daily_pnl = float(row[0]) if row and row[0] else 0.0
-            daily_cap = config.GEO_CAPITAL * 0.03
-            if daily_pnl < -daily_cap:
-                pct = abs(daily_pnl) / config.GEO_CAPITAL * 100
-                logger.info(f"[GEO] 🔴 CIRCUIT BREAKER: perte journalière ${abs(daily_pnl):.2f} ({pct:.1f}%) > 3% — pause trading")
+            if daily_pnl < -(config.GEO_CAPITAL * 0.03):
+                logger.info(f"[GEO] 🔴 CIRCUIT BREAKER: perte jour ${abs(daily_pnl):.2f} > 3% — pause")
                 return
         except Exception as e:
-            logger.debug(f"[GEO] circuit-breaker check: {e}")
+            logger.debug(f"[GEO] circuit-breaker: {e}")
 
-        # Capital
         if not self.has_capital():
             logger.info(f"[GEO] Capital insuffisant (${self.get_available():.0f})")
             return
@@ -330,10 +315,9 @@ class GeometricExpert:
         if bars_1h is None or bars_1h.empty or len(bars_1h) < 10:
             return
         h1h = bars_1h["high"].values; l1h = bars_1h["low"].values
-        hh  = h1h[-1] > h1h[-4];     hl  = l1h[-1] > l1h[-4]
         lh  = h1h[-1] < h1h[-4];     ll  = l1h[-1] < l1h[-4]
         if lh and ll:
-            logger.info(f"[GEO] {symbol} — downtrend 1h (lh={lh} ll={ll}), skip")
+            logger.info(f"[GEO] {symbol} — downtrend 1h, skip")
             return
 
         # ── Pass 2 : Zones 15min ──────────────────────────────────────────────
@@ -342,102 +326,91 @@ class GeometricExpert:
             return
         current = float(bars_15m["close"].iloc[-1])
         zones   = self._find_zones(
-            bars_15m["high"].values, bars_15m["low"].values,
-            bars_15m["close"].values, min_tests=1
+            bars_15m["high"].values,
+            bars_15m["low"].values,
+            bars_15m["close"].values,
+            min_tests=1,
         )
-
-        # ── Pass 3 : Confirmation 5min ────────────────────────────────────────
-        bars_5m = self.broker.get_bars(symbol, "5Min", limit=30)
-        if bars_5m is None or bars_5m.empty or len(bars_5m) < 10:
-            return
-        closes_5m = bars_5m["close"].values
-        vols_5m   = bars_5m["volume"].values
-        rsi_now   = _rsi(closes_5m, 14)
-
-        # Volume check — utiliser le dernier candle COMPLÉTÉ ([-2]), pas le candle
-        # en cours de formation ([-1] qui commence toujours à 0)
-        completed_vols = vols_5m[:-1] if len(vols_5m) > 1 else vols_5m
-        avg_vol = completed_vols[-20:].mean() if len(completed_vols) >= 20 else completed_vols.mean()
-        last_completed_vol = completed_vols[-1]
-        # Fallback heure creuse : si la dernière bougie complétée a un volume nul
-        # (Alpaca renvoie parfois 0 sur les périodes peu liquides), utiliser la
-        # moyenne des 5 dernières bougies non-nulles pour éviter les faux positifs.
-        if last_completed_vol == 0:
-            nonzero = [v for v in completed_vols[-6:-1] if v > 0]
-            last_completed_vol = float(np.mean(nonzero)) if nonzero else avg_vol
-            logger.debug(f"[GEO] {symbol} — vol=0 fallback → {last_completed_vol:.4f}")
-        if avg_vol > 0 and last_completed_vol < avg_vol * 0.3:
-            logger.info(f"[GEO] {symbol} — volume trop bas (vol={last_completed_vol:.4f} < seuil={avg_vol*0.3:.4f} | avg20={avg_vol:.4f})")
-            return
-
-        # Évaluer chaque zone
-        open_count = len([t for t in self.memory.get_open_trades()
-                          if self._ctx(t).get("strategy_source") == "geo_v4"])
-
-        n_zones = len(zones)
-        n_dist = n_touches = n_pending = n_rsi = n_div = n_pass3b = n_rr = 0
+        n_zones   = len(zones)
+        n_dist    = n_touches = n_pending = n_rsi = n_div = n_pass3b = n_rr = 0
+        open_count = open_count_global
 
         for zone in zones:
-            if open_count >= config.GEO_MAX_SIM: break
+            zk = self._zone_key(zone["center"])
 
-            zk   = self._zone_key(zone["center"])
-            dist = (current - zone["center"]) / current
+            # Distance
+            dist_pct = (current - zone["high"]) / zone["high"]
+            if not (-0.012 <= dist_pct <= 0.002):
+                n_dist += 1; continue
+            # Touches
+            if self._touches[zk] >= config.GEO_MAX_TOUCHES:
+                n_touches += 1; continue
+            # Pending
+            if zk in self._pending:
+                n_pending += 1; continue
 
-            if not (0.001 <= dist <= 0.020): n_dist += 1; continue
-            if self._touches[zk] >= config.GEO_MAX_TOUCHES: n_touches += 1; continue
-            if zk in self._pending: n_pending += 1; continue
+            # ── Pass 3 : RSI 5min ─────────────────────────────────────────────
+            bars_5m = self.broker.get_bars(symbol, "5Min", limit=30)
+            if bars_5m is None or bars_5m.empty or len(bars_5m) < 15:
+                continue
+            closes_5m = bars_5m["close"].values
+            rsi_now   = _rsi(closes_5m, 14)
+            div       = self._rsi_divergence(closes_5m, rsi_now)
 
-            # RSI divergence
-            if not (config.GEO_RSI_LOW <= rsi_now <= config.GEO_RSI_HIGH): n_rsi += 1; continue
-            div = self._rsi_divergence(closes_5m, rsi_now)
-            if not div and not (30 <= rsi_now <= 55): n_div += 1; continue
+            if not (config.GEO_RSI_LOW <= rsi_now <= config.GEO_RSI_HIGH):
+                n_rsi += 1; continue
+            if not div:
+                n_div += 1; continue
 
-            # Pass 3b — touché ET remonté
-            touched      = any(bars_5m["low"].values[-4:] <= zone["high"])
-            closed_above = closes_5m[-1] > zone["low"]
-            if not (touched and closed_above): n_pass3b += 1; continue
+            # ── Pass 3b : EMA momentum 5min ───────────────────────────────────
+            if len(closes_5m) >= 10:
+                ema5  = float(pd.Series(closes_5m).ewm(span=5,  adjust=False).mean().iloc[-1])
+                ema10 = float(pd.Series(closes_5m).ewm(span=10, adjust=False).mean().iloc[-1])
+                if ema5 < ema10 * 0.9985:
+                    n_pass3b += 1; continue
 
             # Stop + target
             stop   = self._dynamic_stop(bars_5m["low"].values, zone["center"], zone["wick_low"])
             target = _smart_round(zone["high"] * (1 + config.GEO_TARGET_PCT))
             risk   = abs(zone["high"] - stop)
             reward = abs(target - zone["high"])
-            if risk <= 0 or reward / risk < 1.2: n_rr += 1; continue
+            if risk <= 0 or reward / risk < 1.2:
+                n_rr += 1; continue
 
-            # Sizing — basé sur l'equity Alpaca réelle
+            # Sizing
             available = self.get_available()
             if available < 30: break
             current_capital = self._live_capital()
             deploy = min(available * 0.995, current_capital * config.GEO_POS_PCT)
-
-            # Placement limit order (Alpaca crypto ne supporte pas bracket/OCO)
-            # Stop + TP sont gérés après fill dans manage_open_positions()
             limit_price = _smart_round(zone["high"])
-            qty = round(deploy / limit_price, 6)
-            if qty * limit_price < 20: continue
-            order_id = None
-            try:
-                order = self.broker.api.submit_order(
-                    symbol=symbol, qty=qty, side="buy",
-                    type="limit", limit_price=limit_price,
-                    time_in_force="gtc",
-                )
-                order_id = getattr(order, "id", None)
-                logger.info(
-                    f"[GEO] 📋 LIMIT PLACED: {symbol} @ ${limit_price:.4f} | "
-                    f"stop=${_smart_round(stop):.4f} | target=${_smart_round(target):.4f} | qty={qty} | "
-                    f"RSI={rsi_now:.0f} | div={div} | zone_tests={zone['tests']}"
-                )
-            except Exception as e:
-                logger.error(f"[GEO] order error {symbol}: {e}")
+            if deploy / limit_price < 0.001: continue  # trop petit
+
+            # ── Place l'ordre OKX avec SL + TP attachés ───────────────────────
+            order_id = self.broker.place_limit_buy(
+                symbol     = symbol,
+                price      = limit_price,
+                stop_loss  = stop,
+                take_profit= target,
+                deploy_usdt= deploy,
+            )
+            if not order_id:
                 continue
 
             self._touches[zk] += 1
             self._pending[zk] = {
-                "order_id": order_id, "level": zone["center"],
-                "high": zone["high"], "stop": stop,
-                "target": target, "qty": qty, "symbol": symbol,
+                "order_id": order_id,
+                "symbol":   symbol,
+                "level":    zone["center"],
+                "high":     zone["high"],
+                "stop":     stop,
+                "target":   target,
+                "deploy":   deploy,
             }
+            logger.info(
+                f"[GEO] 📋 ORDER: {symbol} @ ${limit_price:.4f} "
+                f"SL=${_smart_round(stop):.4f} TP=${_smart_round(target):.4f} "
+                f"RSI={rsi_now:.0f} div={div} zone_tests={zone['tests']}"
+            )
 
             # Log dashboard
             if self.memory:
@@ -445,7 +418,7 @@ class GeometricExpert:
                     self.memory.log_decision(
                         "BUY",
                         f"GEO V4: {symbol} LIMIT @ ${limit_price:.4f} | "
-                        f"stop=${stop:.4f} target=${target:.4f} R:R={round(reward/risk,1)}x | "
+                        f"SL=${stop:.4f} TP=${target:.4f} R:R={round(reward/risk,1)}x | "
                         f"regime={_r} RSI={rsi_now:.0f}",
                         symbol=symbol,
                         confidence=round(min(zone["tests"] / 5.0, 1.0), 2),
@@ -460,10 +433,11 @@ class GeometricExpert:
                     logger.debug(f"[GEO] log_decision: {_le}")
 
             open_count += 1
+            if open_count >= config.GEO_MAX_SIM:
+                break
 
-        # Résumé si aucun ordre placé
-        if open_count == len([t for t in self.memory.get_open_trades()
-                               if self._ctx(t).get("strategy_source") == "geo_v4"]):
+        # Résumé si aucun ordre
+        if open_count == open_count_global:
             reasons = []
             if n_dist:    reasons.append(f"dist:{n_dist}")
             if n_touches: reasons.append(f"touches:{n_touches}")
@@ -474,25 +448,29 @@ class GeometricExpert:
             if n_rr:      reasons.append(f"rr:{n_rr}")
             reason_str = ", ".join(reasons) if reasons else "no_zones_in_range"
             logger.info(
-                f"[GEO] {symbol} — no signal | zones={n_zones} RSI={rsi_now:.0f} "
-                f"price={closes_5m[-1]:.4f} | skip: {reason_str}"
+                f"[GEO] {symbol} — no signal | zones={n_zones} "
+                f"price={current:.4f} | skip: {reason_str}"
             )
 
     # ── MANAGE PENDING ────────────────────────────────────────────────────────
 
     def manage_pending_orders(self):
-        """Appelé toutes les 30s. Détecte les fills et annule les ordres si niveau cassé."""
+        """Vérifie les ordres GTC en attente : fill → log trade.
+        SL + TP sont déjà attachés à l'ordre OKX → aucun ordre supplémentaire à placer."""
         for zk in list(self._pending.keys()):
             p = self._pending[zk]
             try:
-                order  = self.broker.api.get_order(p["order_id"])
-                status = order.status
+                order = self.broker.get_order(p["symbol"], p["order_id"])
+                if order is None:
+                    continue
 
-                if status == "filled":
-                    fill   = float(order.filled_avg_price or p["level"])
-                    qty    = float(order.filled_qty or p["qty"])
-                    symbol = p["symbol"]
-                    logger.info(f"[GEO] ✅ FILLED: {symbol} @ ${fill:.4f}")
+                state = order.status   # "live", "filled", "cancelled", "partially_filled"
+
+                if state == "filled":
+                    fill  = float(order.filled_avg_price or p.get("high", p["level"]))
+                    qty   = float(order.filled_qty or 0)
+                    symbol= p["symbol"]
+                    logger.info(f"[GEO] ✅ FILLED: {symbol} @ ${fill:.4f} qty={qty:.4f}")
                     if self.memory:
                         self.memory.log_trade_open(
                             trade_id=str(uuid.uuid4()),
@@ -506,38 +484,24 @@ class GeometricExpert:
                                 "level":  float(p["level"]),
                                 "stop":   float(p["stop"]),
                                 "target": float(p["target"]),
+                                "broker": "okx",
                             }
                         )
-                    # ── Placer stop-limit protecteur ──────────────────────────────
-                    try:
-                        stop_p   = _smart_round(p["stop"])
-                        stop_lp  = _smart_round(p["stop"] * 0.996)
-                        self.broker.api.submit_order(
-                            symbol=symbol, qty=qty, side="sell",
-                            type="stop_limit",
-                            stop_price=stop_p, limit_price=stop_lp,
-                            time_in_force="gtc",
-                        )
-                        logger.info(f"[GEO] 🛑 Stop-limit placé: {symbol} trigger=${stop_p} limit=${stop_lp}")
-                    except Exception as e:
-                        logger.error(f"[GEO] stop-limit post-fill {symbol}: {e}")
-
-                    # Note: Alpaca crypto ne supporte pas deux ordres sell simultanés
-                    # (stop-limit + TP limit) — le TP est géré par price check (live ask)
+                    # ⚠️ SL + TP déjà actifs côté OKX — rien à faire ici
                     del self._pending[zk]
 
-                elif status in ("canceled", "expired", "rejected"):
-                    logger.info(f"[GEO] 🗑 Order {status}: {p['symbol']}")
+                elif state in ("cancelled", "expired", "rejected"):
+                    logger.info(f"[GEO] 🗑 Order {state}: {p['symbol']}")
                     del self._pending[zk]
 
-                else:
-                    # Vérifier si niveau cassé
+                else:  # "live" ou "partially_filled"
+                    # Vérifier si le niveau est cassé → annuler
                     bars = self.broker.get_bars(p["symbol"], "1Min", limit=3)
                     if bars is not None and not bars.empty:
                         curr = float(bars["close"].iloc[-1])
                         if curr < p["level"] * 0.997:
                             logger.info(f"[GEO] 🚫 Niveau cassé {p['symbol']} — annulation")
-                            self._cancel_order(p["order_id"], p["symbol"])
+                            self._cancel_order(p["symbol"], p["order_id"])
                             del self._pending[zk]
 
             except Exception as e:
@@ -546,202 +510,96 @@ class GeometricExpert:
     # ── MANAGE POSITIONS ──────────────────────────────────────────────────────
 
     def manage_open_positions(self):
-        """Exits gérés par ordres Alpaca réels (stop-market + limit).
-        Cette méthode surveille uniquement :
-          1. Positions fermées par Alpaca (stop ou target rempli) → mise à jour DB
-          2. Time-stop : clôture forcée si position ouverte > 4h
         """
-        import datetime
-        TIMEOUT_MIN = 240  # 4h
-
-        def _sym_key(s):
-            """Normalise 'ETH/USD' → 'ETHUSD' pour matcher les positions Alpaca."""
-            return s.replace("/", "").replace("-", "").upper()
-
+        SIMPLIFIÉ vs version Alpaca :
+        - SL et TP sont des ordres réels sur OKX → pas de price-check bot-side
+        - Cette méthode :
+            1. Détecte les positions fermées par OKX (SL ou TP touché)
+            2. Log la fermeture en DB avec le bon close_reason
+            3. Time-stop : clôture forcée si position ouverte > 4h
+        """
         try:
-            # Positions Alpaca indexées par clé normalisée (ETHUSD, SOLUSD…)
-            alpaca_positions = {_sym_key(p.symbol): p for p in (self.broker.get_positions() or [])}
+            # Positions OKX actives indexées par db_symbol
+            broker_positions = {pos.db_symbol: pos for pos in (self.broker.get_positions() or [])}
             open_trades      = self.memory.get_open_trades()
-
-            # ── Prix bid en temps réel pour chaque symbole ouvert ──────────────
-            # On utilise le BID (prix de vente réel) plutôt que pos.current_price
-            # qui est souvent stale et fait manquer les TP au centime près.
-            # live_bid / live_ask : prix temps réel depuis Alpaca quotes API
-            # On stocke bid ET ask pour comparer correctement le TP.
-            # Pour un LONG: on vend au bid → mais on détecte le TP sur l'ask
-            # (si ask >= target, le mid est clairement au-dessus du target).
-            live_bid: dict[str, float] = {}
-            live_ask: dict[str, float] = {}
-            if open_trades:
-                syms_slash = list({t.get("symbol","") for t in open_trades})
-                if syms_slash:
-                    try:
-                        import requests as _req, os as _os
-                        _url  = "https://data.alpaca.markets/v1beta3/crypto/us/latest/quotes"
-                        _hdrs = {
-                            "APCA-API-KEY-ID":     _os.environ.get("ALPACA_API_KEY", ""),
-                            "APCA-API-SECRET-KEY": _os.environ.get("ALPACA_SECRET_KEY", ""),
-                        }
-                        _r = _req.get(_url, headers=_hdrs,
-                                      params={"symbols": ",".join(syms_slash)}, timeout=5)
-                        if _r.ok:
-                            for sym_q, q in _r.json().get("quotes", {}).items():
-                                k = _sym_key(sym_q)
-                                bp = float(q.get("bp") or 0)
-                                ap = float(q.get("ap") or 0)
-                                if bp: live_bid[k] = bp
-                                if ap: live_ask[k] = ap
-                        logger.debug(f"[GEO] live quotes bid={live_bid} ask={live_ask}")
-                    except Exception as _qe:
-                        logger.debug(f"[GEO] live quotes error: {_qe}")
-
-            # Tracker stop_limit et limit (TP bracket) séparément
-            try:
-                raw_open_sells = self.broker.api.list_orders(status="open", limit=50)
-                stop_sell_syms = {
-                    _sym_key(o.symbol) for o in raw_open_sells
-                    if o.side == "sell" and o.type == "stop_limit"
-                }
-            except Exception:
-                stop_sell_syms = set()
+            now_utc          = datetime.datetime.now(datetime.timezone.utc)
 
             for t in open_trades:
                 ctx = self._ctx(t)
-                if ctx.get("strategy_source") != "geo_v4": continue
+                if ctx.get("strategy_source") != "geo_v4":
+                    continue
 
-                symbol   = t.get("symbol")      # "ETH/USD" (format DB)
-                sym_k    = _sym_key(symbol)     # "ETHUSD"  (format Alpaca positions)
+                symbol   = t.get("symbol")      # "ETH/USD"
                 trade_id = t.get("trade_id")
                 entry    = float(t.get("entry_price", 0))
                 qty_t    = float(t.get("qty", 0))
+                stop_db  = float(t.get("stop_loss") or 0)
+                tp_db    = float(t.get("take_profit") or 0)
 
-                # ── 0. Réconciliation : place le stop_limit si absent ────────────
-                if sym_k in alpaca_positions and sym_k not in stop_sell_syms:
-                    stop_db = float(t.get("stop_loss") or 0)
-                    pos_qty = float(alpaca_positions[sym_k].qty)
-                    if stop_db and pos_qty > 0:
-                        try:
-                            stop_p  = _smart_round(stop_db)
-                            stop_lp = _smart_round(stop_db * 0.996)
-                            self.broker.api.submit_order(
-                                symbol=symbol, qty=pos_qty, side="sell",
-                                type="stop_limit",
-                                stop_price=stop_p, limit_price=stop_lp,
-                                time_in_force="gtc",
-                            )
-                            stop_sell_syms.add(sym_k)
-                            logger.info(
-                                f"[GEO] 🔄 Réconciliation stop: {symbol} "
-                                f"trigger=${stop_p} limit=${stop_lp}"
-                            )
-                        except Exception as e:
-                            logger.error(f"[GEO] réconciliation stop {symbol}: {e}")
+                # Timestamp d'ouverture pour filtrer les fills
+                entry_at_str = t.get("entry_at", "")
+                try:
+                    entry_dt   = datetime.datetime.fromisoformat(
+                        str(entry_at_str).replace("Z", "+00:00"))
+                    entry_ts_ms= int(entry_dt.timestamp() * 1000)
+                except Exception:
+                    entry_ts_ms = 0
 
-                # ── 0b. Take-profit : price check (ask temps réel) ──────────────
-                # Alpaca crypto ne supporte pas deux sell orders simultanés,
-                # donc pas de TP limit order. On compare l'ASK live au target.
-                # Si ask >= target → close au marché.
-                if sym_k in alpaca_positions:
-                    target_db = float(t.get("take_profit") or 0)
-                    if target_db > 0:
-                        pos = alpaca_positions[sym_k]
-                        pos_px    = float(pos.current_price or 0)
-                        check_px  = live_ask.get(sym_k) or pos_px
-                        logger.info(
-                            f"[GEO] TP check {symbol}: ask=${check_px:.4f} "
-                            f"bid=${live_bid.get(sym_k, 0):.4f} "
-                            f"pos=${pos_px:.4f} target=${target_db:.4f}"
-                        )
-                        if check_px >= target_db:
-                            try:
-                                pos_qty = float(pos.qty)
-                                # Annuler le stop_limit protecteur + TP limit orphelin
-                                for o in self.broker.api.list_orders(status="open", limit=50):
-                                    if _sym_key(o.symbol) == sym_k and o.side == "sell":
-                                        self.broker.api.cancel_order(o.id)
-                                # Clôture au marché — on vérifie que ça réussit
-                                closed_ok = self.broker.close_position(symbol)
-                                if not closed_ok:
-                                    # Position déjà fermée par Alpaca (ex: TP limit rempli)
-                                    # On laisse la logique de détection Alpaca handle ça
-                                    logger.info(f"[GEO] TP {symbol}: position déjà fermée par Alpaca")
-                                    continue
-                                fill_px = live_bid.get(sym_k) or pos_px
-                                pnl = (fill_px - entry) * pos_qty
-                                logger.info(
-                                    f"[GEO] 💰 TAKE-PROFIT bot: {symbol} "
-                                    f"ask=${check_px:.4f} >= target=${target_db:.4f} "
-                                    f"fill≈${fill_px:.4f} pnl≈${pnl:.2f}"
-                                )
-                                self.memory.log_trade_close(trade_id, fill_px, "target", pnl=pnl)
-                                continue
-                            except Exception as e:
-                                logger.error(f"[GEO] take-profit close {symbol}: {e}")
+                # ── 1. Position fermée par OKX (SL ou TP touché) ──────────────
+                if symbol not in broker_positions:
+                    # Récupérer le fill de clôture
+                    fill_info = self.broker.get_last_fill(symbol, since_ts_ms=entry_ts_ms)
+                    if fill_info:
+                        fill_price = fill_info["price"]
+                        fill_qty   = fill_info.get("qty", qty_t)
+                        pnl        = (fill_price - entry) * fill_qty
 
-                # ── 1. Position fermée par Alpaca (stop ou target rempli) ────────
-                if sym_k not in alpaca_positions:
-                    try:
-                        filled_sells = [
-                            o for o in self.broker.api.list_orders(
-                                status="closed", limit=50)
-                            if o.symbol == symbol
-                            and o.side   == "sell"
-                            and o.status == "filled"
-                        ]
-                        if filled_sells:
-                            o          = sorted(filled_sells, key=lambda x: x.filled_at, reverse=True)[0]
-                            fill_price = float(o.filled_avg_price or entry)
-                            qty_f      = float(o.filled_qty or qty_t)
-                            pnl        = (fill_price - entry) * qty_f
-                            reason     = "stop" if fill_price <= float(t.get("stop_loss") or 0) * 1.005 else "target"
-                            logger.info(
-                                f"[GEO] {'🔴' if reason=='stop' else '💰'} "
-                                f"Alpaca exit détecté: {symbol} @ ${fill_price:.4f} ({reason}) pnl=${pnl:.2f}"
-                            )
-                            self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
-                            # Annuler tous les ordres sell restants (stop ou TP limit orphelins)
-                            try:
-                                for rem in self.broker.api.list_orders(status="open", limit=50):
-                                    if _sym_key(rem.symbol) == sym_k and rem.side == "sell":
-                                        self.broker.api.cancel_order(rem.id)
-                                        logger.info(f"[GEO] 🗑 Ordre orphelin annulé: {rem.type} {rem.id[:8]}")
-                            except Exception as ce:
-                                logger.debug(f"[GEO] cancel orphan orders {symbol}: {ce}")
+                        # Détecter la raison : stop ou target
+                        if stop_db and fill_price <= stop_db * 1.01:
+                            reason = "stop"
+                        elif tp_db and fill_price >= tp_db * 0.99:
+                            reason = "target"
                         else:
-                            logger.warning(f"[GEO] {symbol} absent des positions Alpaca — pas de sell trouvé")
-                    except Exception as e:
-                        logger.error(f"[GEO] detect_alpaca_exit {symbol}: {e}")
+                            reason = "stop" if pnl < 0 else "target"
+
+                        emoji = "🔴" if reason == "stop" else "💰"
+                        logger.info(
+                            f"[GEO] {emoji} OKX exit: {symbol} @ ${fill_price:.4f} "
+                            f"({reason}) pnl=${pnl:.2f}"
+                        )
+                        self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
+                    else:
+                        # Pas de fill trouvé → position disparue sans fill (ex: expirée)
+                        # Utiliser le prix live comme approximation
+                        live = self.broker.get_live_price(symbol) or entry
+                        pnl  = (live - entry) * qty_t
+                        logger.warning(
+                            f"[GEO] {symbol} absent des positions OKX, pas de fill trouvé "
+                            f"— fermeture approx @ ${live:.4f} pnl=${pnl:.2f}"
+                        )
+                        reason = "stop" if pnl < 0 else "target"
+                        self.memory.log_trade_close(trade_id, live, reason, pnl=pnl)
                     continue
 
-                # ── 2. Time-stop : > 4h sans conviction ─────────────────────────
-                entry_at_str = t.get("entry_at")
+                # ── 2. Time-stop : > 4h sans conviction ───────────────────────
                 if entry_at_str:
                     try:
-                        entry_dt    = datetime.datetime.fromisoformat(
-                            str(entry_at_str).replace("Z", "+00:00")
-                        )
-                        now_utc     = datetime.datetime.now(datetime.timezone.utc)
                         elapsed_min = (now_utc - entry_dt).total_seconds() / 60
                         if elapsed_min >= TIMEOUT_MIN:
-                            pos     = alpaca_positions[sym_k]
+                            pos     = broker_positions[symbol]
                             current = float(pos.current_price)
                             qty_p   = float(pos.qty)
                             logger.info(
-                                f"[GEO] ⏰ TIME-STOP {symbol} après {elapsed_min:.0f}min — clôture forcée"
+                                f"[GEO] ⏰ TIME-STOP {symbol} après {elapsed_min:.0f}min"
                             )
-                            # Annuler les ordres stop/target Alpaca ouverts
-                            try:
-                                for o in self.broker.api.list_orders(status="open", limit=50):
-                                    if _sym_key(o.symbol) == sym_k and o.side == "sell":
-                                        self.broker.api.cancel_order(o.id)
-                                        logger.info(f"[GEO] ⏰ Ordre {o.type} annulé ({o.id[:8]})")
-                            except Exception as ce:
-                                logger.debug(f"[GEO] cancel time-stop {symbol}: {ce}")
-                            self.broker.close_position(symbol)
-                            pnl = (current - entry) * qty_p
-                            self.memory.log_trade_close(trade_id, current, "timeout", pnl=pnl)
+                            closed = self.broker.close_position(symbol)
+                            if closed:
+                                pnl = (current - entry) * qty_p
+                                self.memory.log_trade_close(trade_id, current, "timeout", pnl=pnl)
                     except Exception as e:
                         logger.error(f"[GEO] time-stop {symbol}: {e}")
 
         except Exception as e:
             logger.error(f"[GEO] manage_open_positions: {e}")
+
+

@@ -1,7 +1,7 @@
 """
-main.py — Jim Bot Geo-Only ETH
-Boucle simplifiée : fast loop 30s + slow loop 5min + watchdog.
-Zero mastermind, zero gapper, zero Claude API.
+main.py — Jim Bot Geo-Only ETH+SOL
+Boucle : fast loop 30s + slow loop 5min + watchdog.
+Broker sélectionné via config.USE_BROKER ("okx" ou "alpaca").
 """
 import logging
 import threading
@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
-from broker import AlpacaBroker
 from memory import TradingMemory
 from geometry import GeometryAnalysis
 from regime import MarketRegime
@@ -24,26 +23,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def make_fast_thread(geo: GeometricExpert, broker: AlpacaBroker) -> threading.Thread:
+def _make_broker():
+    if config.USE_BROKER == "okx":
+        from okx_broker import OKXBroker
+        return OKXBroker()
+    else:
+        from broker import AlpacaBroker
+        return AlpacaBroker()
+
+
+def make_fast_thread(geo: GeometricExpert, broker) -> threading.Thread:
     def _run():
         logger.info("[FAST] ⚡ Fast loop started — 30s")
         while True:
             try:
                 geo.manage_pending_orders()
                 geo.manage_open_positions()
-                _check_preclose(broker, geo)
             except Exception as e:
                 logger.error(f"[FAST] error: {e}")
             time.sleep(config.FAST_LOOP_SECONDS)
     return threading.Thread(target=_run, daemon=True, name="FastLoop")
 
 
-def _check_preclose(broker: AlpacaBroker, geo: GeometricExpert):
-    """Ferme les positions stocks 5 min avant la clôture (pas nécessaire sur ETH crypto, mais garde la garde)."""
-    pass  # ETH/USD = 24/7, pas de pre-close nécessaire
-
-
-def _run_watchdog(geo: GeometricExpert, broker: AlpacaBroker, thread_ref: list):
+def _run_watchdog(geo: GeometricExpert, broker, thread_ref: list):
     while True:
         time.sleep(60)
         t = thread_ref[0]
@@ -58,10 +60,10 @@ def _run_watchdog(geo: GeometricExpert, broker: AlpacaBroker, thread_ref: list):
 
 
 def main():
-    logger.info("🚀 Jim Bot Geo-Only ETH démarrage...")
+    logger.info(f"🚀 Jim Bot démarrage (broker={config.USE_BROKER})...")
 
     memory   = TradingMemory("trading_memory.db")
-    broker   = AlpacaBroker()
+    broker   = _make_broker()
     geometry = GeometryAnalysis()
     regime   = MarketRegime()
 
@@ -74,15 +76,12 @@ def main():
 
     logger.info(f"💰 Capital : ${config.GEO_CAPITAL} | Assets : {config.GEO_SYMBOLS}")
 
-    # Dashboard
     start_dashboard(memory, regime=regime, port=5000)
 
-    # Fast loop
     fast_thread = make_fast_thread(geo, broker)
     fast_thread.start()
     thread_ref  = [fast_thread]
 
-    # Watchdog
     threading.Thread(
         target=_run_watchdog,
         args=(geo, broker, thread_ref),
@@ -92,7 +91,6 @@ def main():
 
     logger.info(f"✅ Prêt — fast:{config.FAST_LOOP_SECONDS}s slow:{config.SLOW_LOOP_SECONDS}s")
 
-    # Slow loop — évalue ETH+SOL toutes les 5 min
     cycle = 0
     while True:
         try:
