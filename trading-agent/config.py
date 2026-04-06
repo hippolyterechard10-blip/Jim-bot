@@ -18,7 +18,7 @@ BYBIT_SYMBOL_MAP = {
 }
 
 # ── Capital ────────────────────────────────────────────────────────────────────
-INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "978.86"))
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.00"))
 GEO_CAPITAL     = INITIAL_CAPITAL
 
 # ── Reset P&L ──────────────────────────────────────────────────────────────────
