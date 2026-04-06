@@ -1,0 +1,14 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r trading-agent/requirements.txt"
+
+[deploy]
+startCommand = "cd trading-agent && python main.py"
+restartPolicyType = "always"
+region = "europe-west"
+
+[environments.production.variables]
+BYBIT_TESTNET = "0"
+
+[environments.staging.variables]
+BYBIT_TESTNET = "1"

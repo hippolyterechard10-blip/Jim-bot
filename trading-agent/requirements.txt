@@ -1,18 +1,19 @@
 # Trading Agent — Python dependencies
 # Broker
-python-okx==0.4.1
+pybit==5.10.0
 
 # Data
 pandas==3.0.1
 numpy==2.4.3
 yfinance==1.2.0
 
-# Dashboard
+# Dashboard API
+flask==3.1.0
 flask-cors==6.0.2
 requests==2.33.0
 
 # AI (regime detection)
 anthropic==0.86.0
 
-# Legacy (kept for reference, not used by bot)
-# alpaca-trade-api==3.2.0
+# Utils
+python-dotenv==1.1.0

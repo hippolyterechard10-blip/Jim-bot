@@ -1,9 +1,10 @@
 """
 main.py — Jim Bot Geo-Only ETH+SOL
 Boucle : fast loop 30s + slow loop 5min + watchdog.
-Broker sélectionné via config.USE_BROKER ("okx" ou "alpaca").
+Broker : Bybit USDT Perpetual (testnet ou live selon BYBIT_TESTNET).
 """
 import logging
+import os
 import threading
 import time
 from dotenv import load_dotenv
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 def _make_broker():
-    from okx_broker import OKXBroker
-    return OKXBroker()
+    from bybit_broker import BybitBroker
+    return BybitBroker()
 
 
 def make_fast_thread(geo: GeometricExpert, broker) -> threading.Thread:
@@ -72,7 +73,8 @@ def main():
 
     logger.info(f"💰 Capital : ${config.GEO_CAPITAL} | Assets : {config.GEO_SYMBOLS}")
 
-    start_dashboard(memory, regime=regime, port=5000)
+    port = int(os.getenv("PORT", 5000))
+    start_dashboard(memory, regime=regime, port=port)
 
     fast_thread = make_fast_thread(geo, broker)
     fast_thread.start()
