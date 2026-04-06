@@ -547,30 +547,33 @@ class GeometricExpert:
 
                 # ── 1. Position fermée par OKX (SL ou TP touché) ──────────────
                 if symbol not in broker_positions:
-                    # Récupérer le fill de clôture
-                    fill_info = self.broker.get_last_fill(symbol, since_ts_ms=entry_ts_ms)
-                    if fill_info:
-                        fill_price = fill_info["price"]
-                        fill_qty   = fill_info.get("qty", qty_t)
+                    # Récupérer fill + raison depuis l'historique OKX
+                    close_info = self.broker.get_close_info(symbol, since_ts_ms=entry_ts_ms)
+                    if close_info:
+                        fill_price = close_info["price"]
+                        fill_qty   = close_info.get("qty", qty_t)
                         pnl        = (fill_price - entry) * fill_qty
 
-                        # Détecter la raison : stop ou target
-                        if stop_db and fill_price <= stop_db * 1.01:
-                            reason = "stop"
-                        elif tp_db and fill_price >= tp_db * 0.99:
-                            reason = "target"
-                        else:
-                            reason = "stop" if pnl < 0 else "target"
+                        # Raison : priorité à ce qu'OKX remonte (algo order type)
+                        reason = close_info.get("reason")
+                        if reason is None:
+                            # Fallback heuristique sur les prix DB
+                            if stop_db and fill_price <= stop_db * 1.01:
+                                reason = "stop"
+                            elif tp_db and fill_price >= tp_db * 0.99:
+                                reason = "target"
+                            else:
+                                reason = "stop" if pnl < 0 else "target"
 
-                        emoji = "🔴" if reason == "stop" else "💰"
+                        source = close_info.get("source", "?")
+                        emoji  = "🔴" if reason == "stop" else "💰"
                         logger.info(
-                            f"[GEO] {emoji} OKX exit: {symbol} @ ${fill_price:.4f} "
+                            f"[GEO] {emoji} OKX exit [{source}]: {symbol} @ ${fill_price:.4f} "
                             f"({reason}) pnl=${pnl:.2f}"
                         )
                         self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
                     else:
-                        # Pas de fill trouvé → position disparue sans fill (ex: expirée)
-                        # Utiliser le prix live comme approximation
+                        # Pas de fill trouvé → utiliser le prix live comme approximation
                         live = self.broker.get_live_price(symbol) or entry
                         pnl  = (live - entry) * qty_t
                         logger.warning(

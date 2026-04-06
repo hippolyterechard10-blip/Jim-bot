@@ -418,27 +418,83 @@ class OKXBroker:
                 ok = False
         return ok
 
-    # ── Fill history (détection fermeture SL/TP) ─────────────────────────────
+    # ── Détection fermeture SL/TP ────────────────────────────────────────────
 
-    def get_last_fill(self, symbol: str, since_ts_ms: int = 0):
-        """Dernier fill de fermeture (sell) pour ce symbole depuis since_ts_ms."""
+    def get_close_info(self, symbol: str, since_ts_ms: int = 0) -> dict | None:
+        """Retourne le prix de fermeture ET la raison ("stop" ou "target") depuis
+        l'historique des ordres algo OKX (TP = tp, SL = sl).
+        Méthode primaire — interroge les ordres algo conditional/sl/tp remplis.
+        Fallback : dernier fill sell + heuristique sur le signe du PnL."""
         inst_id = self._to_okx(symbol)
         ct      = self._ct(inst_id)
+
+        # ── Méthode 1 : historique des ordres algo OKX ──────────────────────
         try:
-            r = self.trade.get_fills_history(instType="SWAP", instId=inst_id, limit="20")
-            if r.get("code") != "0" or not r.get("data"):
-                return None
-            for fill in r["data"]:   # newest first
-                ts_ms = int(fill.get("ts", 0))
-                if since_ts_ms and ts_ms < since_ts_ms:
+            for ord_type, reason in [("tp", "target"), ("sl", "stop"), ("conditional", None)]:
+                r = self.trade.order_algos_history(
+                    ordType = ord_type,
+                    instType= "SWAP",
+                    instId  = inst_id,
+                    state   = "filled",
+                    limit   = "10",
+                )
+                if r.get("code") != "0":
                     continue
-                if fill.get("side") == "sell":
+                for algo in r.get("data", []):
+                    ts_ms = int(algo.get("cTime", 0) or algo.get("uTime", 0))
+                    if since_ts_ms and ts_ms < since_ts_ms:
+                        continue
+                    side = algo.get("side", "")
+                    if side != "sell":
+                        continue
+                    fill_px = float(algo.get("avgSz", 0) or algo.get("sz", 0))
+                    # avgSz n'est pas le prix — essayons fillPx ou px
+                    fill_px = float(
+                        algo.get("fillPx", 0) or
+                        algo.get("avgPx", 0) or
+                        algo.get("slTriggerPx", 0) or
+                        algo.get("tpTriggerPx", 0) or 0
+                    )
+                    if fill_px <= 0:
+                        continue
+                    sz_c = float(algo.get("sz", 0) or 0)
+                    # Déterminer la raison si c'est un ordre "conditional" (pas tp/sl directement)
+                    if reason is None:
+                        a_type = algo.get("ordType", "")
+                        reason = "target" if a_type == "tp" else "stop"
                     return {
-                        "price":          float(fill["fillPx"]),
-                        "qty_contracts":  float(fill["fillSz"]),
-                        "qty":            float(fill["fillSz"]) * ct,
-                        "ts_ms":          ts_ms,
+                        "price":  fill_px,
+                        "qty":    sz_c * ct,
+                        "reason": reason,
+                        "source": "algo",
                     }
         except Exception as e:
-            logger.warning(f"[OKX] get_last_fill {symbol}: {e}")
+            logger.debug(f"[OKX] get_close_info algo {symbol}: {e}")
+
+        # ── Méthode 2 : fills history + heuristique ─────────────────────────
+        try:
+            r = self.trade.get_fills_history(instType="SWAP", instId=inst_id, limit="20")
+            if r.get("code") == "0":
+                for fill in r.get("data", []):  # newest first
+                    ts_ms = int(fill.get("ts", 0))
+                    if since_ts_ms and ts_ms < since_ts_ms:
+                        continue
+                    if fill.get("side") == "sell":
+                        fill_px = float(fill.get("fillPx", 0))
+                        sz_c    = float(fill.get("fillSz", 0))
+                        # Raison heuristique : déterminée dans manage_open_positions
+                        return {
+                            "price":  fill_px,
+                            "qty":    sz_c * ct,
+                            "reason": None,   # expert détermine via stop_loss/take_profit
+                            "source": "fill",
+                        }
+        except Exception as e:
+            logger.warning(f"[OKX] get_close_info fill {symbol}: {e}")
+
         return None
+
+    def get_last_fill(self, symbol: str, since_ts_ms: int = 0) -> dict | None:
+        """Alias de compatibilité → get_close_info()."""
+        info = self.get_close_info(symbol, since_ts_ms)
+        return info

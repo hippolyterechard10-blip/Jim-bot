@@ -4,9 +4,9 @@ config.py — Jim Bot Geo-Only ETH+SOL
 import os
 
 # ── Broker actif ──────────────────────────────────────────────────────────────
-# "okx"    → OKX Demo/Live (recommandé : supporte SL+TP natif)
-# "alpaca" → Alpaca paper trading (legacy)
-USE_BROKER = os.getenv("USE_BROKER", "okx")
+# Seul "okx" est supporté. GeometricExpert utilise les méthodes OKX-spécifiques
+# (place_limit_buy, list_open_orders, get_last_fill) incompatibles avec AlpacaBroker.
+USE_BROKER = "okx"
 
 # ── OKX ───────────────────────────────────────────────────────────────────────
 OKX_API_KEY    = os.getenv("OKX_API_KEY", "")

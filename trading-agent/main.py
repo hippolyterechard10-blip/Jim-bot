@@ -24,12 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 def _make_broker():
-    if config.USE_BROKER == "okx":
-        from okx_broker import OKXBroker
-        return OKXBroker()
-    else:
-        from broker import AlpacaBroker
-        return AlpacaBroker()
+    from okx_broker import OKXBroker
+    return OKXBroker()
 
 
 def make_fast_thread(geo: GeometricExpert, broker) -> threading.Thread:
