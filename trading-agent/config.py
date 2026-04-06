@@ -9,6 +9,7 @@ USE_BROKER = "kraken"
 # ── Kraken Futures ─────────────────────────────────────────────────────────────
 KRAKEN_API_KEY    = os.getenv("KRAKEN_API_KEY", "")
 KRAKEN_SECRET_KEY = os.getenv("KRAKEN_SECRET_KEY", "")
+KRAKEN_PAPER      = os.getenv("KRAKEN_PAPER", "1") == "1"   # 1 = démo, 0 = live
 
 # ── Bybit (conservé pour référence) ────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")

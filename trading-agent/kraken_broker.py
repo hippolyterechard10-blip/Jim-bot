@@ -23,7 +23,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL        = "https://futures.kraken.com"
+BASE_URL_LIVE   = "https://futures.kraken.com"
+BASE_URL_PAPER  = "https://demo-futures.kraken.com"
 SLTP_CACHE_FILE = "kraken_sltp_cache.json"
 
 # ── Symboles ───────────────────────────────────────────────────────────────────
@@ -107,8 +108,10 @@ class KrakenBroker:
     def __init__(self):
         self.api_key    = config.KRAKEN_API_KEY
         self.api_secret = config.KRAKEN_SECRET_KEY
+        self.base_url   = BASE_URL_PAPER if config.KRAKEN_PAPER else BASE_URL_LIVE
         self._sltp      = self._load_sltp_cache()
-        logger.info("✅ Kraken Futures broker connecté (LIVE, 1x)")
+        mode = "PAPER (démo)" if config.KRAKEN_PAPER else "LIVE 🔴"
+        logger.info(f"✅ Kraken Futures broker connecté ({mode})")
 
     # ── Stub OKX compat ──────────────────────────────────────────────────────
     def _ct(self, symbol):
@@ -153,7 +156,7 @@ class KrakenBroker:
             "Authent": self._sign(path, nonce, ""),
         }
         qs = urllib.parse.urlencode(params or {})
-        url = BASE_URL + path + ("?" + qs if qs else "")
+        url = self.base_url + path + ("?" + qs if qs else "")
         r = requests.get(url, headers=headers, timeout=10)
         return r.json()
 
@@ -166,7 +169,7 @@ class KrakenBroker:
             "Authent":      self._sign(path, nonce, post_data),
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        r = requests.post(BASE_URL + path, data=post_data,
+        r = requests.post(self.base_url + path, data=post_data,
                           headers=headers, timeout=10)
         return r.json()
 
@@ -308,7 +311,7 @@ class KrakenBroker:
     def get_live_price(self, symbol: str) -> float | None:
         sym = self._to_kraken(symbol)
         try:
-            r = requests.get(f"{BASE_URL}/derivatives/api/v3/tickers",
+            r = requests.get(f"{self.base_url}/derivatives/api/v3/tickers",
                              timeout=8)
             for t in r.json().get("tickers", []):
                 if t.get("symbol", "").upper() == sym:
@@ -325,7 +328,7 @@ class KrakenBroker:
     def get_ask_bid(self, symbol: str):
         sym = self._to_kraken(symbol)
         try:
-            r = requests.get(f"{BASE_URL}/derivatives/api/v3/tickers",
+            r = requests.get(f"{self.base_url}/derivatives/api/v3/tickers",
                              timeout=8)
             for t in r.json().get("tickers", []):
                 if t.get("symbol", "").upper() == sym:
