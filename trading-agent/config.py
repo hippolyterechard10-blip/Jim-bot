@@ -4,18 +4,17 @@ config.py — Jim Bot Geo-Only ETH+SOL
 import os
 
 # ── Broker actif ───────────────────────────────────────────────────────────────
-USE_BROKER = "bybit"
+USE_BROKER = "kraken"
 
-# ── Bybit ──────────────────────────────────────────────────────────────────────
+# ── Kraken Futures ─────────────────────────────────────────────────────────────
+KRAKEN_API_KEY    = os.getenv("KRAKEN_API_KEY", "")
+KRAKEN_SECRET_KEY = os.getenv("KRAKEN_SECRET_KEY", "")
+
+# ── Bybit (conservé pour référence) ────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET_KEY = os.getenv("BYBIT_SECRET_KEY", "")
-BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "1") == "1"   # True = testnet
-BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))    # 1x par défaut
-
-BYBIT_SYMBOL_MAP = {
-    "ETH/USD": "ETHUSDT",
-    "SOL/USD": "SOLUSDT",
-}
+BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "1") == "1"
+BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
 
 # ── Capital ────────────────────────────────────────────────────────────────────
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.00"))
