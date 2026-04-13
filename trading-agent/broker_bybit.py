@@ -89,17 +89,13 @@ class BybitBroker:
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
-        if getattr(config, "BYBIT_EU", False):
+        if os.getenv("BYBIT_EU", "1") == "1":
             session_kwargs["base_endpoint"] = "https://api.bybit.eu"
-        else:
-            session_kwargs["demo"] = bool(int(os.getenv("BYBIT_DEMO", "0")))
-        self.session = HTTP(**session_kwargs)
-        if getattr(config, "BYBIT_EU", False):
             mode = "LIVE EU 🇪🇺 (api.bybit.eu)"
-        elif session_kwargs.get("demo"):
-            mode = "DEMO"
         else:
-            mode = "LIVE 🔴"
+            session_kwargs["demo"] = True
+            mode = "DEMO (api-demo.bybit.com)"
+        self.session = HTTP(**session_kwargs)
         logger.info(f"✅ BybitBroker connecté ({mode})")
 
     # ── Compte ───────────────────────────────────────────────────────────────

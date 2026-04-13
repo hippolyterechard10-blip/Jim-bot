@@ -16,7 +16,7 @@ BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET_KEY = os.getenv("BYBIT_SECRET_KEY", "")
 BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "0") == "1"
 BYBIT_DEMO       = os.getenv("BYBIT_DEMO", "1") == "1"   # 1 = compte démo Bybit, 0 = live
-BYBIT_EU         = os.getenv("BYBIT_EU", "1") == "1"    # 1 = api.bybit.eu, 0 = api.bybit.com
+BYBIT_EU         = os.getenv("BYBIT_EU", "1")           # "1" = api.bybit.eu, "0" = demo
 BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
 
 # ── Broker sélectionné ─────────────────────────────────────────────────────────
