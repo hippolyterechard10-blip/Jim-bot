@@ -83,20 +83,13 @@ class Position:
 class BybitBroker:
 
     def __init__(self):
-        session_kwargs = dict(
+        self.session = HTTP(
             testnet    = False,
             demo       = True,
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
-        if os.getenv("BYBIT_EU", "1") == "1":
-            session_kwargs["endpoint"] = "https://api.bybit.eu"
-            mode = "LIVE EU 🇪🇺 (api.bybit.eu)"
-        else:
-            session_kwargs["demo"] = True
-            mode = "DEMO (api-demo.bybit.com)"
-        self.session = HTTP(**session_kwargs)
-        logger.info(f"✅ BybitBroker connecté ({mode})")
+        logger.info("✅ BybitBroker connecté (DEMO)")
 
     # ── Compte ───────────────────────────────────────────────────────────────
 
