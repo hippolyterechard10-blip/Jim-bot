@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 
 
 def _make_broker():
-    if config.USE_BROKER == "kraken":
+    broker_id = config.ACTIVE_BROKER or config.USE_BROKER
+    if broker_id == "kraken":
         from kraken_broker import KrakenBroker
         return KrakenBroker()
-    from bybit_broker import BybitBroker
+    if broker_id == "alpaca":
+        from broker import AlpacaBroker
+        return AlpacaBroker()
+    from broker_bybit import BybitBroker
     return BybitBroker()
 
 

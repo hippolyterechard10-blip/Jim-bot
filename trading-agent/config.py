@@ -11,11 +11,15 @@ KRAKEN_API_KEY    = os.getenv("KRAKEN_API_KEY", "")
 KRAKEN_SECRET_KEY = os.getenv("KRAKEN_SECRET_KEY", "")
 KRAKEN_PAPER      = os.getenv("KRAKEN_PAPER", "1") == "1"   # 1 = démo, 0 = live
 
-# ── Bybit (conservé pour référence) ────────────────────────────────────────────
+# ── Bybit ──────────────────────────────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET_KEY = os.getenv("BYBIT_SECRET_KEY", "")
-BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "1") == "1"
+BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "0") == "1"
+BYBIT_DEMO       = os.getenv("BYBIT_DEMO", "1") == "1"   # 1 = compte démo Bybit, 0 = live
 BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
+
+# ── Broker sélectionné ─────────────────────────────────────────────────────────
+ACTIVE_BROKER    = os.getenv("ACTIVE_BROKER", "bybit")   # "bybit" | "alpaca" | "kraken"
 
 # ── Capital ────────────────────────────────────────────────────────────────────
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.00"))
