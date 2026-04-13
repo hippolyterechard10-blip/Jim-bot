@@ -4,7 +4,7 @@ config.py — Jim Bot Geo-Only ETH+SOL
 import os
 
 # ── Broker actif ───────────────────────────────────────────────────────────────
-USE_BROKER = "kraken"
+USE_BROKER = "bybit"
 
 # ── Kraken Futures ─────────────────────────────────────────────────────────────
 KRAKEN_API_KEY    = os.getenv("KRAKEN_API_KEY", "")
