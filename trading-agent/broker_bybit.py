@@ -6,6 +6,7 @@ Demo mode : testnet=False, demo=True (compte démo Bybit).
 Live mode  : testnet=False, demo=False.
 """
 import logging
+import os
 import pandas as pd
 from pybit.unified_trading import HTTP
 import config
@@ -82,13 +83,23 @@ class Position:
 class BybitBroker:
 
     def __init__(self):
-        self.session = HTTP(
+        session_kwargs = dict(
             testnet    = False,
-            demo       = config.BYBIT_DEMO,
+            demo       = False,
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
-        mode = "DEMO" if config.BYBIT_DEMO else "LIVE 🔴"
+        if getattr(config, "BYBIT_EU", False):
+            session_kwargs["base_endpoint"] = "https://api.bybit.eu"
+        else:
+            session_kwargs["demo"] = bool(int(os.getenv("BYBIT_DEMO", "0")))
+        self.session = HTTP(**session_kwargs)
+        if getattr(config, "BYBIT_EU", False):
+            mode = "LIVE EU 🇪🇺 (api.bybit.eu)"
+        elif session_kwargs.get("demo"):
+            mode = "DEMO"
+        else:
+            mode = "LIVE 🔴"
         logger.info(f"✅ BybitBroker connecté ({mode})")
 
     # ── Compte ───────────────────────────────────────────────────────────────
