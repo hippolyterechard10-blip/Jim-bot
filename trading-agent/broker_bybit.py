@@ -90,7 +90,7 @@ class BybitBroker:
             api_secret = config.BYBIT_SECRET_KEY,
         )
         if os.getenv("BYBIT_EU", "1") == "1":
-            session_kwargs["base_endpoint"] = "https://api.bybit.eu"
+            session_kwargs["endpoint"] = "https://api.bybit.eu"
             mode = "LIVE EU 🇪🇺 (api.bybit.eu)"
         else:
             session_kwargs["demo"] = True
