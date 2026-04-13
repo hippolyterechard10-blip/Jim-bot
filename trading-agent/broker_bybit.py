@@ -85,7 +85,7 @@ class BybitBroker:
     def __init__(self):
         session_kwargs = dict(
             testnet    = False,
-            demo       = False,
+            demo       = True,
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
