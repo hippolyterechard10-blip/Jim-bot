@@ -86,10 +86,10 @@ class BybitBroker:
         self.session = HTTP(
             testnet    = False,
             demo       = (os.getenv("BYBIT_DEMO", "false").lower() == "true"),
-            base_url   = "https://api.bybit.eu",
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
+        self.session._V5HTTPManager__base_url = "https://api.bybit.eu"
         logger.info("✅ BybitBroker connecté")
         for sym in ("ETHUSDT", "SOLUSDT"):
             try:
