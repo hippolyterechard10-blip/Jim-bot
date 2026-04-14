@@ -85,11 +85,11 @@ class BybitBroker:
     def __init__(self):
         self.session = HTTP(
             testnet    = False,
-            demo       = (os.getenv("BYBIT_DEMO", "false").lower() == "true"),
+            demo       = False,
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
+            domain     = "bybit.eu",
         )
-        self.session._V5HTTPManager__base_url = "https://api.bybit.eu"
         logger.info("✅ BybitBroker connecté")
         for sym in ("ETHUSDT", "SOLUSDT"):
             try:
