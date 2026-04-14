@@ -156,33 +156,41 @@ class KrakenBroker:
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
     def _get(self, endpoint: str, params: dict = None) -> dict:
-        nonce  = _nonce()
-        params = params or {}
-        params["nonce"] = nonce
-        qs     = urllib.parse.urlencode(params)
-        sig    = _sign(self._secret, endpoint, qs, nonce)
-        url    = _BASE_URL + endpoint
-        headers = {
+        nonce     = _nonce()
+        params    = params or {}
+        # postData pour la signature = query string SANS nonce
+        post_data = urllib.parse.urlencode(params) if params else ""
+        api_path  = "/derivatives/api/v3" + endpoint
+        sig       = _sign(self._secret, api_path, post_data, nonce)
+        # nonce ajouté séparément à la requête réelle
+        req_params = dict(params)
+        req_params["nonce"] = nonce
+        url       = _BASE_URL + endpoint
+        headers   = {
             "APIKey":  self._api_key,
             "Authent": sig,
         }
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=req_params, headers=headers, timeout=10)
         r.raise_for_status()
         return r.json()
 
     def _post(self, endpoint: str, data: dict = None) -> dict:
-        nonce    = _nonce()
-        data     = data or {}
-        data["nonce"] = nonce
-        post_data = urllib.parse.urlencode(data)
-        sig       = _sign(self._secret, endpoint, post_data, nonce)
+        nonce     = _nonce()
+        data      = data or {}
+        # postData pour la signature = body SANS nonce
+        post_data = urllib.parse.urlencode(data) if data else ""
+        api_path  = "/derivatives/api/v3" + endpoint
+        sig       = _sign(self._secret, api_path, post_data, nonce)
+        # nonce ajouté séparément au body réel
+        req_data  = dict(data)
+        req_data["nonce"] = nonce
         url       = _BASE_URL + endpoint
         headers   = {
             "APIKey":       self._api_key,
             "Authent":      sig,
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        r = requests.post(url, data=data, headers=headers, timeout=10)
+        r = requests.post(url, data=req_data, headers=headers, timeout=10)
         r.raise_for_status()
         return r.json()
 
