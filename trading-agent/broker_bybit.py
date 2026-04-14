@@ -88,8 +88,8 @@ class BybitBroker:
             demo       = False,
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
-            domain     = "bybit.eu",
         )
+        self.session.endpoint = "https://api.bybit.eu"
         logger.info("✅ BybitBroker connecté")
         for sym in ("ETHUSDT", "SOLUSDT"):
             try:
