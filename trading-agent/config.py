@@ -13,9 +13,9 @@ KRAKEN_PAPER      = os.getenv("KRAKEN_PAPER", "1") == "1"   # 1 = démo, 0 = liv
 
 # ── Bybit ──────────────────────────────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
-BYBIT_SECRET_KEY = os.getenv("BYBIT_SECRET_KEY", "")
+BYBIT_SECRET_KEY = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "0") == "1"
-BYBIT_DEMO       = os.getenv("BYBIT_DEMO", "1") == "1"   # 1 = compte démo Bybit, 0 = live
+BYBIT_DEMO       = os.getenv("BYBIT_DEMO", "true").lower() == "true"
 BYBIT_EU         = os.getenv("BYBIT_EU", "1")           # "1" = api.bybit.eu, "0" = demo
 BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
 
@@ -23,8 +23,8 @@ BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
 ACTIVE_BROKER    = os.getenv("ACTIVE_BROKER", "bybit")   # "bybit" | "alpaca" | "kraken"
 
 # ── Capital ────────────────────────────────────────────────────────────────────
-INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "1000.00"))
-GEO_CAPITAL     = INITIAL_CAPITAL
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "100.0"))
+GEO_CAPITAL     = float(os.getenv("INITIAL_CAPITAL", "100.0"))
 
 # ── Reset P&L ──────────────────────────────────────────────────────────────────
 GEO_RESET_DATE = "2026-04-06"
