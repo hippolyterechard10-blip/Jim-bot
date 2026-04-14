@@ -85,11 +85,22 @@ class BybitBroker:
     def __init__(self):
         self.session = HTTP(
             testnet    = False,
-            demo       = True,
+            demo       = (os.getenv("BYBIT_DEMO", "true").lower() == "true"),
             api_key    = config.BYBIT_API_KEY,
             api_secret = config.BYBIT_SECRET_KEY,
         )
-        logger.info("✅ BybitBroker connecté (DEMO)")
+        logger.info("✅ BybitBroker connecté")
+        for sym in ("ETHUSDT", "SOLUSDT"):
+            try:
+                r = self.session.set_leverage(
+                    category     = "linear",
+                    symbol       = sym,
+                    buyLeverage  = "2",
+                    sellLeverage = "2",
+                )
+                logger.info(f"[Bybit] leverage {sym} = 2x ✓ {r.get('retMsg','')}")
+            except Exception as e:
+                logger.warning(f"[Bybit] set_leverage {sym}: {e}")
 
     # ── Compte ───────────────────────────────────────────────────────────────
 
