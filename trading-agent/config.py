@@ -1,26 +1,25 @@
 """
-config.py — Jim Bot Geo-Only ETH+SOL
+config.py — Jim Bot Geo-Only ETH+SOL — Kraken Futures
 """
 import os
 
-# ── Broker actif ───────────────────────────────────────────────────────────────
-USE_BROKER = "bybit"
+# ── Broker actif (Kraken Futures par défaut) ───────────────────────────────────
+USE_BROKER    = os.getenv("ACTIVE_BROKER", "kraken")
+ACTIVE_BROKER = USE_BROKER    # "kraken" | "bybit" | "alpaca"
 
 # ── Kraken Futures ─────────────────────────────────────────────────────────────
 KRAKEN_API_KEY    = os.getenv("KRAKEN_API_KEY", "")
-KRAKEN_SECRET_KEY = os.getenv("KRAKEN_SECRET_KEY", "")
+# accepte KRAKEN_SECRET_KEY (legacy) ou KRAKEN_API_SECRET (recommandé)
+KRAKEN_SECRET_KEY = os.getenv("KRAKEN_API_SECRET", os.getenv("KRAKEN_SECRET_KEY", ""))
 KRAKEN_PAPER      = os.getenv("KRAKEN_PAPER", "1") == "1"   # 1 = démo, 0 = live
 
-# ── Bybit ──────────────────────────────────────────────────────────────────────
+# ── Bybit (legacy — optionnel) ─────────────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_SECRET_KEY = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_TESTNET    = os.getenv("BYBIT_TESTNET", "0") == "1"
 BYBIT_DEMO       = os.getenv("BYBIT_DEMO", "true").lower() == "true"
-BYBIT_EU         = os.getenv("BYBIT_EU", "1")           # "1" = api.bybit.eu, "0" = demo
+BYBIT_EU         = os.getenv("BYBIT_EU", "1")
 BYBIT_LEVERAGE   = int(os.getenv("BYBIT_LEVERAGE", "1"))
-
-# ── Broker sélectionné ─────────────────────────────────────────────────────────
-ACTIVE_BROKER    = os.getenv("ACTIVE_BROKER", "bybit")   # "bybit" | "alpaca" | "kraken"
 
 # ── Capital ────────────────────────────────────────────────────────────────────
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "100.0"))
