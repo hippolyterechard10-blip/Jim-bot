@@ -38,6 +38,12 @@ GEO_MAX_TOUCHES   = 2        # Skip zone si touchée > 2 fois
 GEO_RSI_LOW       = 20
 GEO_RSI_HIGH      = 65
 
+# ── Short (miroir des résistances) ─────────────────────────────────────────────
+# Backtest 2022-2025 : +122 pts/an sur SOL, +172 pts/an sur ETH quand activé
+GEO_ENABLE_SHORT  = os.getenv("GEO_ENABLE_SHORT", "0") == "1"
+GEO_RSI_LOW_S     = 35
+GEO_RSI_HIGH_S    = 80
+
 # ── Boucles ────────────────────────────────────────────────────────────────────
 FAST_LOOP_SECONDS = 30     # manage_pending + manage_positions
 SLOW_LOOP_SECONDS = 300    # evaluate() — nouveau signal
