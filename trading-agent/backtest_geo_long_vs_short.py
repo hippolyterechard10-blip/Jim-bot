@@ -13,12 +13,13 @@ Toutes les règles GEO V4 sont conservées :
   - Time-stop 4h (48 bougies 5min)
   - Target +0.9 % (long) / -0.9 % (short)
   - R:R min 1.2, max 2 positions simultanées, fees 0.05 % par side
+
+Perf : indexation positionnelle + numpy → ~30s pour 4 ans × 3 modes × 2 symboles.
 """
 import glob
 import os
 import warnings
 from collections import defaultdict
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -26,19 +27,19 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-CAPITAL      = 1000.0
-POS_PCT      = 0.50    # 50 % du capital par trade
-MAX_SIM      = 2       # max positions simultanées
-ZONE_PCT     = 0.003
-TARGET_PCT   = 0.009
-MAX_TOUCHES  = 2
-RSI_LOW_L    = 20
-RSI_HIGH_L   = 65
-RSI_LOW_S    = 35
-RSI_HIGH_S   = 80
-TIMEOUT_BARS = 48      # 4h en bougies 5min
-FEE_PCT      = 0.0005  # 0.05 % maker Kraken Futures (side)
-RR_MIN       = 1.2
+CAPITAL        = 1000.0
+NOTIONAL       = 500.0    # taille fixe $ par trade (isole l'edge du compounding)
+MAX_SIM        = 2
+ZONE_PCT       = 0.003
+TARGET_PCT     = 0.009
+MAX_TOUCHES    = 2
+RSI_LOW_L      = 20
+RSI_HIGH_L     = 65
+RSI_LOW_S      = 35
+RSI_HIGH_S     = 80
+TIMEOUT_BARS   = 48
+FEE_PCT        = 0.0005
+RR_MIN         = 1.2
 
 CACHE_DIR = "binance_us_cache"
 
@@ -46,14 +47,12 @@ CACHE_DIR = "binance_us_cache"
 # ── DATA LOADER ───────────────────────────────────────────────────────────────
 
 def load_symbol(prefix: str) -> pd.DataFrame:
-    """Concatène tous les parquets disponibles pour un symbole, dédoublonne, trie."""
     files = sorted(glob.glob(os.path.join(CACHE_DIR, f"{prefix}_5m_*.parquet")))
     if not files:
         raise FileNotFoundError(f"Aucune donnée pour {prefix} dans {CACHE_DIR}")
     dfs = [pd.read_parquet(f) for f in files]
     df = pd.concat(dfs)
     df = df[~df.index.duplicated(keep="last")].sort_index()
-    # uniformise colonnes
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     return df
 
@@ -68,105 +67,97 @@ def resample_ohlcv(df_5m: pd.DataFrame, rule: str) -> pd.DataFrame:
     }).dropna()
 
 
-# ── HELPERS STRATÉGIE ─────────────────────────────────────────────────────────
+# ── RSI vectorisé (Wilder exponentiel sur fenêtre glissante) ─────────────────
 
-def _rsi(closes: np.ndarray, period: int = 14) -> float:
-    arr = np.array(closes, dtype=float)
-    if len(arr) < period + 1:
+def _rsi_from_window(closes: np.ndarray, period: int = 14) -> float:
+    if len(closes) < period + 1:
         return 50.0
-    d  = np.diff(arr)
-    g  = np.where(d > 0, d, 0.0)
-    l  = np.where(d < 0, -d, 0.0)
+    d = np.diff(closes)
+    g = np.where(d > 0, d, 0.0)
+    l = np.where(d < 0, -d, 0.0)
     ag = g[-period:].mean()
     al = l[-period:].mean()
     if al == 0:
         return 100.0
-    return round(100 - 100 / (1 + ag / al), 2)
+    return round(100.0 - 100.0 / (1.0 + ag / al), 2)
 
 
-def _find_support_zones(highs, lows, closes, min_tests=1):
-    current = closes[-1]
-    sw = []
-    for i in range(2, len(highs) - 2):
-        if (lows[i] < lows[i-1] and lows[i] < lows[i-2]
-                and lows[i] < lows[i+1] and lows[i] < lows[i+2]):
-            sw.append((lows[i], highs[i]))
-    if not sw:
+# ── PIVOTS détection vectorisée (swing high/low 5 bougies) ───────────────────
+
+def compute_swing_lows(lows: np.ndarray, highs: np.ndarray):
+    """Retourne tableau bool : True si lows[i] est un swing-low (i pivot sur 5 bars)."""
+    n = len(lows)
+    mask = np.zeros(n, dtype=bool)
+    if n < 5:
+        return mask
+    cond = ((lows[2:-2] < lows[:-4]) & (lows[2:-2] < lows[1:-3]) &
+            (lows[2:-2] < lows[3:-1]) & (lows[2:-2] < lows[4:]))
+    mask[2:-2] = cond
+    return mask
+
+
+def compute_swing_highs(highs: np.ndarray):
+    n = len(highs)
+    mask = np.zeros(n, dtype=bool)
+    if n < 5:
+        return mask
+    cond = ((highs[2:-2] > highs[:-4]) & (highs[2:-2] > highs[1:-3]) &
+            (highs[2:-2] > highs[3:-1]) & (highs[2:-2] > highs[4:]))
+    mask[2:-2] = cond
+    return mask
+
+
+# ── Clustering de pivots en zones ────────────────────────────────────────────
+
+def cluster_zones(levels: np.ndarray, wicks: np.ndarray, current: float,
+                  side: str, lookback: int = 100):
+    """Cluster des swing-lows (support) ou swing-highs (résistance) dans les
+    `lookback` dernières bougies. Retourne liste de zones."""
+    if len(levels) == 0:
         return []
-    sw.sort(key=lambda x: x[0])
-    clusters = [[sw[0]]]
-    for v in sw[1:]:
-        if (v[0] - clusters[-1][0][0]) / clusters[-1][0][0] < ZONE_PCT * 2:
-            clusters[-1].append(v)
+    order = np.argsort(levels)
+    sorted_lvls = levels[order]
+    sorted_wks  = wicks[order]
+    clusters = [[(sorted_lvls[0], sorted_wks[0])]]
+    for lvl, wk in zip(sorted_lvls[1:], sorted_wks[1:]):
+        base = clusters[-1][0][0]
+        if (lvl - base) / base < ZONE_PCT * 2:
+            clusters[-1].append((lvl, wk))
         else:
-            clusters.append([v])
+            clusters.append([(lvl, wk)])
     zones = []
     for c in clusters:
-        center   = sum(x[0] for x in c) / len(c)
-        wick_low = min(x[0] for x in c)
-        if center < current * 0.999 and len(c) >= min_tests:
-            zones.append({
-                "center":   center,
-                "high":     center * (1 + ZONE_PCT),
-                "low":      center * (1 - ZONE_PCT),
-                "wick":     wick_low,
-                "tests":    len(c),
-            })
-    zones.sort(key=lambda x: x["center"], reverse=True)
+        center = sum(x[0] for x in c) / len(c)
+        if side == "long":
+            wick = min(x[1] for x in c)
+            if center < current * 0.999:
+                zones.append({
+                    "center": center,
+                    "high":   center * (1 + ZONE_PCT),
+                    "low":    center * (1 - ZONE_PCT),
+                    "wick":   wick,
+                    "tests":  len(c),
+                })
+        else:
+            wick = max(x[1] for x in c)
+            if center > current * 1.001:
+                zones.append({
+                    "center": center,
+                    "high":   center * (1 + ZONE_PCT),
+                    "low":    center * (1 - ZONE_PCT),
+                    "wick":   wick,
+                    "tests":  len(c),
+                })
+    if side == "long":
+        zones.sort(key=lambda x: x["center"], reverse=True)  # proche en premier
+    else:
+        zones.sort(key=lambda x: x["center"])                # proche en premier
     return zones
 
 
-def _find_resistance_zones(highs, lows, closes, min_tests=1):
-    """Miroir de _find_support_zones : clusterise les swing HIGHS."""
-    current = closes[-1]
-    sw = []
-    for i in range(2, len(highs) - 2):
-        if (highs[i] > highs[i-1] and highs[i] > highs[i-2]
-                and highs[i] > highs[i+1] and highs[i] > highs[i+2]):
-            sw.append((highs[i], lows[i]))
-    if not sw:
-        return []
-    sw.sort(key=lambda x: x[0])
-    clusters = [[sw[0]]]
-    for v in sw[1:]:
-        if (v[0] - clusters[-1][0][0]) / clusters[-1][0][0] < ZONE_PCT * 2:
-            clusters[-1].append(v)
-        else:
-            clusters.append([v])
-    zones = []
-    for c in clusters:
-        center    = sum(x[0] for x in c) / len(c)
-        wick_high = max(x[0] for x in c)
-        if center > current * 1.001 and len(c) >= min_tests:
-            zones.append({
-                "center":   center,
-                "high":     center * (1 + ZONE_PCT),
-                "low":      center * (1 - ZONE_PCT),
-                "wick":     wick_high,
-                "tests":    len(c),
-            })
-    # plus proche en premier (au-dessus du prix)
-    zones.sort(key=lambda x: x["center"])
-    return zones
-
-
-def _rsi_bull_div(closes, rsi_now):
-    if len(closes) < 5:
-        return False
-    rsi_prev = _rsi(np.array(closes[:-3]), 14)
-    return closes[-1] < closes[-4] and rsi_now > rsi_prev
-
-
-def _rsi_bear_div(closes, rsi_now):
-    if len(closes) < 5:
-        return False
-    rsi_prev = _rsi(np.array(closes[:-3]), 14)
-    return closes[-1] > closes[-4] and rsi_now < rsi_prev
-
-
-def _dynamic_stop_long(lows_5m, entry, wick_low):
+def _dynamic_stop_long(lows_window, entry, wick_low):
     floor = entry * 0.992
-    cand  = min(lows_5m[-8:]) * 0.999 if len(lows_5m) >= 8 else wick_low * 0.999
+    cand  = lows_window[-8:].min() * 0.999 if len(lows_window) >= 8 else wick_low * 0.999
     if floor <= cand < entry:
         return cand
     zs = wick_low * 0.999
@@ -175,9 +166,9 @@ def _dynamic_stop_long(lows_5m, entry, wick_low):
     return entry * 0.997
 
 
-def _dynamic_stop_short(highs_5m, entry, wick_high):
+def _dynamic_stop_short(highs_window, entry, wick_high):
     ceiling = entry * 1.008
-    cand    = max(highs_5m[-8:]) * 1.001 if len(highs_5m) >= 8 else wick_high * 1.001
+    cand    = highs_window[-8:].max() * 1.001 if len(highs_window) >= 8 else wick_high * 1.001
     if entry < cand <= ceiling:
         return cand
     zs = wick_high * 1.001
@@ -186,7 +177,7 @@ def _dynamic_stop_short(highs_5m, entry, wick_high):
     return entry * 1.003
 
 
-def _bias_1h(highs, lows):
+def _bias(highs, lows):
     if len(highs) < 5:
         return "range"
     hh = highs[-1] > highs[-4]
@@ -203,25 +194,49 @@ def _zone_key(center):
     return round(center, mag)
 
 
-# ── BACKTEST ─────────────────────────────────────────────────────────────────
+# ── BACKTEST OPTIMISÉ ────────────────────────────────────────────────────────
 
 def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
+    # Arrays 5m
+    opens_5m  = df_5m["open"].values
+    highs_5m  = df_5m["high"].values
+    lows_5m   = df_5m["low"].values
+    closes_5m = df_5m["close"].values
+    vols_5m   = df_5m["volume"].values
+    ts_5m     = df_5m.index.values.astype("datetime64[ns]")
+
+    # Arrays 15m + mapping : pour chaque i dans 5m, pos15[i] = index du dernier
+    # 15m-bar fermé avant ou égal à ts_5m[i].
+    ts_15  = df_15m.index.values.astype("datetime64[ns]")
+    highs_15 = df_15m["high"].values
+    lows_15  = df_15m["low"].values
+    closes_15 = df_15m["close"].values
+    pos15 = np.searchsorted(ts_15, ts_5m, side="right") - 1
+
+    # Arrays 1h
+    ts_1h  = df_1h.index.values.astype("datetime64[ns]")
+    highs_1h = df_1h["high"].values
+    lows_1h  = df_1h["low"].values
+    pos1h = np.searchsorted(ts_1h, ts_5m, side="right") - 1
+
+    # Précalcul swing masks sur 15m
+    swing_lo_15 = compute_swing_lows(lows_15, highs_15)
+    swing_hi_15 = compute_swing_highs(highs_15)
+
+    n = len(df_5m)
     capital  = CAPITAL
     trades   = []
-    open_pos = {}            # zk → {side, entry, stop, target, qty, bar}
+    open_pos = {}
     touches  = defaultdict(int)
 
-    idx = df_5m.index
-    n   = len(idx)
+    LOOKBACK_15 = 100
 
     for i in range(60, n - 1):
-        t_now   = idx[i]
-        next_b  = df_5m.iloc[i + 1]
-        hi      = float(next_b["high"])
-        lo      = float(next_b["low"])
-        cls     = float(next_b["close"])
+        hi  = highs_5m[i + 1]
+        lo  = lows_5m[i + 1]
+        cls = closes_5m[i + 1]
 
-        # ── Gestion sorties ───────────────────────────────────────────────
+        # ── gestion sorties ──────────────────────────────────────────────
         for zk in list(open_pos.keys()):
             pos = open_pos[zk]
             ep = er = None
@@ -232,7 +247,7 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
                     ep, er = pos["target"], "target"
                 elif (i - pos["bar"]) >= TIMEOUT_BARS:
                     ep, er = cls, "timeout"
-            else:  # short
+            else:
                 if hi >= pos["stop"]:
                     ep, er = pos["stop"], "stop"
                 elif lo <= pos["target"]:
@@ -249,7 +264,7 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
                 pnl  = gross - fees
                 capital += pnl
                 trades.append({
-                    "t": t_now, "side": pos["side"],
+                    "t": ts_5m[i], "side": pos["side"],
                     "entry": pos["entry"], "exit": ep,
                     "pnl": round(pnl, 4), "reason": er,
                 })
@@ -258,56 +273,73 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
         if capital < 20 or len(open_pos) >= MAX_SIM:
             continue
 
-        # ── Données fenêtrées ─────────────────────────────────────────────
-        b1h  = df_1h[df_1h.index   <= t_now].tail(50)
-        b15  = df_15m[df_15m.index <= t_now].tail(100)
-        b5   = df_5m[df_5m.index   <= t_now].tail(30)
-        if len(b1h) < 10 or len(b15) < 20 or len(b5) < 15:
+        # ── fenêtres 15m / 1h / 5m via indices positionnels ─────────────
+        p15 = pos15[i]
+        p1h = pos1h[i]
+        if p15 < 20 or p1h < 10:
             continue
 
-        current   = float(df_5m.iloc[i]["close"])
-        closes_5m = b5["close"].values
-        highs_5m  = b5["high"].values
-        lows_5m   = b5["low"].values
-        rsi_now   = _rsi(closes_5m, 14)
-        bias      = _bias_1h(b1h["high"].values, b1h["low"].values)
+        s15 = max(0, p15 - LOOKBACK_15)
+        h15_w = highs_15[s15:p15 + 1]
+        l15_w = lows_15[s15:p15 + 1]
+        sl_mask = swing_lo_15[s15:p15 + 1]
+        sh_mask = swing_hi_15[s15:p15 + 1]
 
-        # volume filter
-        vols_5m = b5["volume"].values
-        avg_v   = vols_5m[-20:].mean() if len(vols_5m) >= 20 else vols_5m.mean()
-        if avg_v > 0 and vols_5m[-1] < avg_v * 0.3:
+        # bias 1h sur derniers 4 bars
+        if p1h >= 4:
+            bias = _bias(highs_1h[p1h - 4:p1h + 1], lows_1h[p1h - 4:p1h + 1])
+        else:
+            bias = "range"
+
+        # 5m window (30 derniers)
+        s5 = max(0, i - 29)
+        c5 = closes_5m[s5:i + 1]
+        h5 = highs_5m[s5:i + 1]
+        l5 = lows_5m[s5:i + 1]
+        v5 = vols_5m[s5:i + 1]
+        if len(c5) < 15:
             continue
 
-        # ── LONG (support bounce) ─────────────────────────────────────────
+        # filtre volume
+        avg_v = v5[-20:].mean() if len(v5) >= 20 else v5.mean()
+        if avg_v > 0 and v5[-1] < avg_v * 0.3:
+            continue
+
+        current = closes_5m[i]
+        rsi_now = _rsi_from_window(c5, 14)
+
+        # ── LONG ────────────────────────────────────────────────────────
         if enable_long and bias != "downtrend":
-            for zone in _find_support_zones(b15["high"].values, b15["low"].values,
-                                             b15["close"].values, 1):
-                zk_l = ("L", _zone_key(zone["center"]))
-                if zk_l in open_pos or touches[zk_l] >= MAX_TOUCHES:
+            lo_levels = l15_w[sl_mask]
+            hi_levels = h15_w[sl_mask]  # wicks "high" lors du swing-low
+            zones = cluster_zones(lo_levels, lo_levels, current, "long")
+            for zone in zones:
+                zk = ("L", _zone_key(zone["center"]))
+                if zk in open_pos or touches[zk] >= MAX_TOUCHES:
                     continue
                 dist = (current - zone["center"]) / current
                 if not (0.001 <= dist <= 0.020):
                     continue
                 if not (RSI_LOW_L <= rsi_now <= RSI_HIGH_L):
                     continue
-                div = _rsi_bull_div(closes_5m, rsi_now)
+                rsi_prev = _rsi_from_window(c5[:-3], 14)
+                div = c5[-1] < c5[-4] and rsi_now > rsi_prev
                 if not div and not (30 <= rsi_now <= 55):
                     continue
-                touched   = any(lows_5m[-8:] <= zone["high"])
-                above_low = closes_5m[-1] > zone["low"]
-                if not (touched and above_low):
+                touched = (l5[-8:] <= zone["high"]).any()
+                if not (touched and c5[-1] > zone["low"]):
                     continue
-                stop   = _dynamic_stop_long(lows_5m, zone["center"], zone["wick"])
+                stop   = _dynamic_stop_long(l5, zone["center"], zone["wick"])
                 target = zone["center"] * (1 + TARGET_PCT)
                 risk   = abs(zone["center"] - stop)
                 reward = abs(target - zone["center"])
                 if risk <= 0 or reward / risk < RR_MIN:
                     continue
                 if lo <= zone["high"]:
-                    fill = min(float(next_b["open"]), zone["center"])
-                    qty  = (capital * POS_PCT) / fill
-                    touches[zk_l] += 1
-                    open_pos[zk_l] = {
+                    fill = min(opens_5m[i + 1], zone["center"])
+                    qty  = NOTIONAL / fill
+                    touches[zk] += 1
+                    open_pos[zk] = {
                         "side": "long", "entry": fill,
                         "stop": stop, "target": target,
                         "qty": qty, "bar": i + 1,
@@ -315,36 +347,37 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
                     if len(open_pos) >= MAX_SIM:
                         break
 
-        # ── SHORT (resistance rejection) ──────────────────────────────────
+        # ── SHORT ───────────────────────────────────────────────────────
         if enable_short and bias != "uptrend" and len(open_pos) < MAX_SIM:
-            for zone in _find_resistance_zones(b15["high"].values, b15["low"].values,
-                                                b15["close"].values, 1):
-                zk_s = ("S", _zone_key(zone["center"]))
-                if zk_s in open_pos or touches[zk_s] >= MAX_TOUCHES:
+            hi_levels = h15_w[sh_mask]
+            zones = cluster_zones(hi_levels, hi_levels, current, "short")
+            for zone in zones:
+                zk = ("S", _zone_key(zone["center"]))
+                if zk in open_pos or touches[zk] >= MAX_TOUCHES:
                     continue
                 dist = (zone["center"] - current) / current
                 if not (0.001 <= dist <= 0.020):
                     continue
                 if not (RSI_LOW_S <= rsi_now <= RSI_HIGH_S):
                     continue
-                div = _rsi_bear_div(closes_5m, rsi_now)
+                rsi_prev = _rsi_from_window(c5[:-3], 14)
+                div = c5[-1] > c5[-4] and rsi_now < rsi_prev
                 if not div and not (45 <= rsi_now <= 70):
                     continue
-                touched   = any(highs_5m[-8:] >= zone["low"])
-                below_hi  = closes_5m[-1] < zone["high"]
-                if not (touched and below_hi):
+                touched = (h5[-8:] >= zone["low"]).any()
+                if not (touched and c5[-1] < zone["high"]):
                     continue
-                stop   = _dynamic_stop_short(highs_5m, zone["center"], zone["wick"])
+                stop   = _dynamic_stop_short(h5, zone["center"], zone["wick"])
                 target = zone["center"] * (1 - TARGET_PCT)
                 risk   = abs(stop - zone["center"])
                 reward = abs(zone["center"] - target)
                 if risk <= 0 or reward / risk < RR_MIN:
                     continue
                 if hi >= zone["low"]:
-                    fill = max(float(next_b["open"]), zone["center"])
-                    qty  = (capital * POS_PCT) / fill
-                    touches[zk_s] += 1
-                    open_pos[zk_s] = {
+                    fill = max(opens_5m[i + 1], zone["center"])
+                    qty  = NOTIONAL / fill
+                    touches[zk] += 1
+                    open_pos[zk] = {
                         "side": "short", "entry": fill,
                         "stop": stop, "target": target,
                         "qty": qty, "bar": i + 1,
@@ -352,8 +385,8 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
                     if len(open_pos) >= MAX_SIM:
                         break
 
-    # ferme tout en fin de série
-    last = float(df_5m.iloc[-1]["close"])
+    # ferme le reste
+    last = closes_5m[-1]
     for zk, pos in open_pos.items():
         if pos["side"] == "long":
             gross = (last - pos["entry"]) * pos["qty"]
@@ -363,7 +396,7 @@ def run_backtest(df_5m, df_15m, df_1h, enable_long=True, enable_short=False):
         pnl  = gross - fees
         capital += pnl
         trades.append({
-            "t": df_5m.index[-1], "side": pos["side"],
+            "t": ts_5m[-1], "side": pos["side"],
             "entry": pos["entry"], "exit": last,
             "pnl": round(pnl, 4), "reason": "end",
         })
@@ -422,10 +455,9 @@ def main():
     results = {}
 
     for prefix, label in symbols:
-        print(f"\n  {label} — chargement des données…")
+        print(f"\n  {label} — chargement…")
         df_5m = load_symbol(prefix)
-        df_5m = df_5m[df_5m.index >= "2022-01-01"]  # horizon analyse
-        df_5m = df_5m[df_5m.index <  "2026-01-01"]
+        df_5m = df_5m[(df_5m.index >= "2022-01-01") & (df_5m.index < "2026-01-01")]
         df_15 = resample_ohlcv(df_5m, "15min")
         df_1h = resample_ohlcv(df_5m, "1h")
         days  = max(1, (df_5m.index[-1] - df_5m.index[0]).days)
@@ -433,9 +465,9 @@ def main():
               f"{df_5m.index[-1].date()} ({days}j)")
 
         for mode, el, es in [
-            ("LONG-only",    True,  False),
-            ("SHORT-only",   False, True),
-            ("LONG+SHORT",   True,  True),
+            ("LONG-only",  True,  False),
+            ("SHORT-only", False, True),
+            ("LONG+SHORT", True,  True),
         ]:
             print(f"    → {mode}…", end=" ", flush=True)
             trades, capital = run_backtest(df_5m, df_15, df_1h,
@@ -446,7 +478,6 @@ def main():
 
     print_table("Résumé tous symboles / modes", results)
 
-    # verdict
     print(f"\n{'═'*78}")
     print("  VERDICT")
     print(f"{'═'*78}")
@@ -462,7 +493,6 @@ def main():
                       f"LONG+SHORT={combo['ann']:+.1f}%/an | "
                       f"Δ={delta:+.1f}pts → {tag}")
 
-    # CSV
     out = "backtest_long_vs_short.csv"
     rows = [{"symbol": sym, "mode": mode, **s} for (sym, mode), s in results.items()]
     pd.DataFrame(rows).to_csv(out, index=False)
