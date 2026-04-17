@@ -16,7 +16,7 @@ from geometry import GeometryAnalysis
 from regime import MarketRegime
 from experts.geometric_expert import GeometricExpert
 from dashboard import start_dashboard
-from broker_kraken import KrakenBroker
+from kraken_broker import KrakenBroker
 
 logging.basicConfig(
     level=logging.INFO,

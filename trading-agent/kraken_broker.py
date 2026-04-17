@@ -1,10 +1,10 @@
 """
 kraken_broker.py — Broker Kraken Futures (Perpetual)
-Interface identique à bybit_broker.py.
-US-compatible — pas de blocage IP — tourne sur Replit directement.
+Interface identique à bybit_broker.py — stratégie GEO plug-and-play.
 ETH/USD → PF_ETHUSD, SOL/USD → PF_SOLUSD
 SL = ordre stop resting sur Kraken, TP = limit sell resting.
 Les deux survivent à un crash du bot (sur le matching engine Kraken).
+OHLCV natif via /api/charts/v1/trade (pas de dépendance yfinance).
 """
 import base64
 import hashlib
@@ -17,7 +17,6 @@ import urllib.parse
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 import config
 
@@ -27,6 +26,9 @@ BASE_URL_LIVE   = "https://futures.kraken.com"
 BASE_URL_PAPER  = "https://demo-futures.kraken.com"
 SLTP_CACHE_FILE = "kraken_sltp_cache.json"
 
+API_PREFIX   = "/derivatives/api/v3"
+CHARTS_PATH  = "/api/charts/v1/trade"   # OHLCV public endpoint
+
 # ── Symboles ───────────────────────────────────────────────────────────────────
 _DB_TO_KRAKEN = {
     "ETH/USD": "PF_ETHUSD",
@@ -34,11 +36,7 @@ _DB_TO_KRAKEN = {
 }
 _KRAKEN_TO_DB = {v: k for k, v in _DB_TO_KRAKEN.items()}
 
-_YF_MAP = {
-    "ETH/USD": "ETH-USD",
-    "SOL/USD": "SOL-USD",
-}
-
+# Résolutions natives Kraken Futures
 _TF_MAP = {
     "1Min":  "1m",
     "5Min":  "5m",
@@ -49,9 +47,10 @@ _TF_MAP = {
     "1Day":  "1d",
 }
 
-_PERIOD_MAP = {
-    "1m": "1d", "5m": "5d", "15m": "8d", "30m": "15d",
-    "1h": "30d", "4h": "60d", "1d": "730d",
+# Durée d'une bougie en secondes — sert à calculer la fenêtre from/to
+_TF_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "4h": 14400, "1d": 86400,
 }
 
 _MIN_QTY = {"PF_ETHUSD": 0.01, "PF_SOLUSD": 1.0}
@@ -137,36 +136,39 @@ class KrakenBroker:
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
-    def _sign(self, endpoint: str, nonce: str, post_data: str = "") -> str:
-        msg = nonce + endpoint + hashlib.sha256(
-            (nonce + post_data).encode()
-        ).hexdigest()
-        sig = hmac.new(
-            base64.b64decode(self.api_secret),
-            msg.encode("utf-8"),
-            hashlib.sha512,
-        )
-        return base64.b64encode(sig.digest()).decode()
+    def _sign(self, endpoint_path: str, post_data: str, nonce: str) -> str:
+        """Signature Kraken Futures.
+        Auth = Base64( HMAC-SHA512( Base64Decode(secret),
+                                    SHA256(postData + nonce + endpointPath) ) )
+        endpoint_path est le path SANS le préfixe /derivatives/api/v3.
+        """
+        msg = (post_data + nonce + endpoint_path).encode("utf-8")
+        sha = hashlib.sha256(msg).digest()
+        key = base64.b64decode(self.api_secret)
+        sig = hmac.new(key, sha, hashlib.sha512).digest()
+        return base64.b64encode(sig).decode()
 
     def _get(self, path: str, params: dict = None) -> dict:
-        nonce = str(int(time.time() * 1000))
-        headers = {
+        nonce     = str(int(time.time() * 1000))
+        qs        = urllib.parse.urlencode(params or {})
+        endpoint  = path[len(API_PREFIX):] if path.startswith(API_PREFIX) else path
+        headers   = {
             "APIKey":  self.api_key,
             "Nonce":   nonce,
-            "Authent": self._sign(path, nonce, ""),
+            "Authent": self._sign(endpoint, qs, nonce),
         }
-        qs = urllib.parse.urlencode(params or {})
-        url = self.base_url + path + ("?" + qs if qs else "")
+        url = self.base_url + path + (("?" + qs) if qs else "")
         r = requests.get(url, headers=headers, timeout=10)
         return r.json()
 
     def _post(self, path: str, data: dict) -> dict:
         nonce     = str(int(time.time() * 1000))
-        post_data = urllib.parse.urlencode(data)
+        post_data = urllib.parse.urlencode(data or {})
+        endpoint  = path[len(API_PREFIX):] if path.startswith(API_PREFIX) else path
         headers   = {
             "APIKey":       self.api_key,
             "Nonce":        nonce,
-            "Authent":      self._sign(path, nonce, post_data),
+            "Authent":      self._sign(endpoint, post_data, nonce),
             "Content-Type": "application/x-www-form-urlencoded",
         }
         r = requests.post(self.base_url + path, data=post_data,
@@ -342,22 +344,40 @@ class KrakenBroker:
 
     def get_bars(self, symbol: str, timeframe: str = "15Min",
                  limit: int = 100) -> pd.DataFrame | None:
-        yf_sym = _YF_MAP.get(symbol, symbol)
-        yf_tf  = _TF_MAP.get(timeframe, "15m")
-        period = _PERIOD_MAP.get(yf_tf, "8d")
+        """OHLCV depuis le endpoint public Kraken Futures — pas de clé API requise.
+        Endpoint: /api/charts/v1/trade/{symbol}/{resolution}?from=...&to=...
+        """
+        kraken_sym = self._to_kraken(symbol)
+        tf         = _TF_MAP.get(timeframe, "15m")
+        step_s     = _TF_SECONDS.get(tf, 900)
+        now_s      = int(time.time())
+        # marge de sécurité (+5 bougies) pour tolérer les trous éventuels
+        from_s     = now_s - step_s * (limit + 5)
+        url = f"{BASE_URL_LIVE}{CHARTS_PATH}/{kraken_sym}/{tf}"
         try:
-            ticker = yf.Ticker(yf_sym)
-            df = ticker.history(period=period, interval=yf_tf,
-                                auto_adjust=True)
-            if df is None or df.empty:
+            r = requests.get(
+                url,
+                params={"from": from_s, "to": now_s},
+                timeout=10,
+            )
+            r.raise_for_status()
+            candles = r.json().get("candles", [])
+            if not candles:
                 return None
-            df = df.rename(columns={
-                "Open": "open", "High": "high", "Low": "low",
-                "Close": "close", "Volume": "volume",
-            })
-            df["symbol"] = symbol
-            df.index     = pd.to_datetime(df.index, utc=True)
-            df = df[["open", "high", "low", "close", "volume", "symbol"]]
+            rows = []
+            for c in candles:
+                rows.append({
+                    "timestamp": pd.to_datetime(int(c["time"]),
+                                                unit="ms", utc=True),
+                    "open":   float(c["open"]),
+                    "high":   float(c["high"]),
+                    "low":    float(c["low"]),
+                    "close":  float(c["close"]),
+                    "volume": float(c.get("volume", 0) or 0),
+                    "symbol": symbol,
+                })
+            df = pd.DataFrame(rows).set_index("timestamp")
+            # écarte la bougie en cours (non close)
             if len(df) > 1:
                 df = df.iloc[:-1]
             return df.tail(limit)
