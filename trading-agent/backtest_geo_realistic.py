@@ -422,7 +422,7 @@ def main():
         "A": {"rr_min": 1.2, "timeout_bars": 48, "div_lookback": 3},
         "B": {"rr_min": 1.5, "timeout_bars": 18, "div_lookback": 8},
     }
-    capitals = [500, 1000, 2500, 5000, 10000, 25000]
+    capitals = [100, 250, 500, 1000, 2500, 5000, 10000, 25000]
 
     loaded = {}
     for prefix, label in [("ETHUSD", "ETH"), ("SOLUSD", "SOL")]:
@@ -494,6 +494,27 @@ def main():
             print(f"  ${row['cap_total']:>5,} {int(row['year']):>6} {int(row['n']):>7,} "
                   f"{row['pnl_gross']:>+10,.0f} {row['fees']:>9,.0f} "
                   f"{row['pnl_net']:>+10,.0f} {row['pnl_net_pfu']:>+10,.0f}")
+
+    # ── Scénario alternatif : tout le capital sur ETH seulement ────────
+    print(f"\n{'─'*90}")
+    print("  Alternative — 100 % du capital sur ETH uniquement (SOL min $200 bloque < $400)")
+    print(f"{'─'*90}")
+    print(f"  {'Var':<4} {'Cap':>8} {'Trades':>7} {'WR%':>5} "
+          f"{'Net brut':>10} {'Net PFU':>10} {'/an PFU':>10}")
+    print("  " + "─" * 62)
+    for v_name, v_params in variants.items():
+        for cap in [100, 250, 500, 1000, 2500]:
+            tr_eth, _ = run_backtest(*loaded["ETH"], "ETH", v_params, cap)
+            if not tr_eth: continue
+            df = pd.DataFrame(tr_eth)
+            df["year"] = pd.to_datetime(df["t"]).dt.year
+            yr = df.groupby("year")["pnl"].sum().to_dict()
+            net_brut = df["pnl"].sum()
+            net_pfu  = apply_tax_yearly(list(yr.values()), TAX_PFU)
+            wr       = (df["pnl"] > 0).mean() * 100
+            flag = "✅" if net_pfu > 0 else "🔴"
+            print(f"  {v_name:<4} ${cap:>6,} {len(df):>7,} {wr:>5.1f} "
+                  f"{net_brut:>+10,.0f} {net_pfu:>+10,.0f} {net_pfu/2:>+10,.0f} {flag}")
 
     # ── Verdict net break-even ─────────────────────────────────────────
     print(f"\n{'═'*90}")
