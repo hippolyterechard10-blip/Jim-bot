@@ -40,10 +40,20 @@ RSI_HIGH_S   = 80
 FEE_ENTRY    = 0.0002
 FEE_EXIT_TP  = 0.0002
 FEE_EXIT_SL  = 0.0005
-SLIPPAGE_SL  = 0.0005
+SLIPPAGE_SL  = 0.0010    # 0.10 % — market SL sur perp crypto en mouvement normal
+
+# Réalisme des fills limit (GTC dans le carnet Kraken) :
+#  - Pénétration 0 : un GTC touché par la book fill (comportement normal)
+#  - FILL_RATE < 1 : simule les fills ratés (queue, latence, bars 5m agrégées
+#    qui touchent sans que notre ordre soit traité en time-priority)
+FILL_PENETRATION = 0.0     # pas de pénétration requise (GTC normal)
+FILL_RATE        = 0.85    # 85 % des setups touchés fillent réellement
 
 TAX_PFU      = 0.30
 TAX_BNC_PRO  = 0.45
+
+# Seed pour la reproductibilité du FILL_RATE stochastique
+_RNG = np.random.default_rng(42)
 
 MIN_NOTIONAL = {"ETH": 40.0, "SOL": 200.0}
 
@@ -272,7 +282,7 @@ def run_backtest(df_5m, df_15m, df_1h, sym_label, params, start_capital):
         current = closes_5m[i]
         rsi_now = _rsi(c5, 14)
 
-        # LONG
+        # LONG — limit buy à zone_high, fill réaliste
         if b != "downtrend":
             for zone in cluster_zones(l15w[slm], current, "long"):
                 zk = ("L", zone_key(zone["center"]))
@@ -287,20 +297,38 @@ def run_backtest(df_5m, df_15m, df_1h, sym_label, params, start_capital):
                 zone_low  = zone["center"] * (1 - ZONE_PCT)
                 if not (l5[-8:] <= zone_high).any() or c5[-1] <= zone_low:
                     continue
+                # Limit price = ce que le bot live place : zone_high
+                limit_price = zone_high
                 stop   = dyn_stop_long(l5, zone["center"], zone["wick"])
-                target = zone["center"] * (1 + TARGET_PCT)
-                risk   = abs(zone["center"] - stop)
-                rew    = abs(target - zone["center"])
+                target = limit_price * (1 + TARGET_PCT)
+                risk   = abs(limit_price - stop)
+                rew    = abs(target - limit_price)
                 if risk <= 0 or rew / risk < rr_min: continue
-                if lo > zone_high: continue
-                fill = min(opens_5m[i + 1], zone["center"])
+                # Pénétration requise : next_bar.low doit casser le limit d'au moins 5 bps
+                if lo > limit_price * (1 - FILL_PENETRATION): continue
+                # Probabiliste : 65 % fill rate (queue Kraken + latence)
+                if _RNG.random() > FILL_RATE: continue
+                # Fill price = limit (ou open si gap favorable en dessous)
+                fill = min(opens_5m[i + 1], limit_price)
                 qty  = notional / fill
                 touches[zk] += 1
-                open_pos[zk] = {"side": "long", "entry": fill, "stop": stop,
-                                "target": target, "qty": qty, "bar": i + 1}
+                # Check same-bar stop immédiat après fill
+                if lo <= stop:
+                    exit_p = stop * (1 - SLIPPAGE_SL)
+                    gross  = (exit_p - fill) * qty
+                    fees   = (fill * FEE_ENTRY + exit_p * FEE_EXIT_SL) * qty
+                    pnl    = gross - fees
+                    capital += pnl
+                    trades.append({"t": pd.Timestamp(ts_5m[i]), "side": "long",
+                                   "entry": fill, "exit": exit_p,
+                                   "gross": gross, "fees": fees, "pnl": pnl,
+                                   "reason": "stop_same_bar"})
+                else:
+                    open_pos[zk] = {"side": "long", "entry": fill, "stop": stop,
+                                    "target": target, "qty": qty, "bar": i + 1}
                 if len(open_pos) >= MAX_SIM: break
 
-        # SHORT
+        # SHORT — limit sell à zone_low, fill réaliste
         if b != "uptrend" and len(open_pos) < MAX_SIM:
             for zone in cluster_zones(h15w[shm], current, "short"):
                 zk = ("S", zone_key(zone["center"]))
@@ -315,17 +343,30 @@ def run_backtest(df_5m, df_15m, df_1h, sym_label, params, start_capital):
                 zone_low  = zone["center"] * (1 - ZONE_PCT)
                 if not (h5[-8:] >= zone_low).any() or c5[-1] >= zone_high:
                     continue
+                limit_price = zone_low
                 stop   = dyn_stop_short(h5, zone["center"], zone["wick"])
-                target = zone["center"] * (1 - TARGET_PCT)
-                risk   = abs(stop - zone["center"])
-                rew    = abs(zone["center"] - target)
+                target = limit_price * (1 - TARGET_PCT)
+                risk   = abs(stop - limit_price)
+                rew    = abs(limit_price - target)
                 if risk <= 0 or rew / risk < rr_min: continue
-                if hi < zone_low: continue
-                fill = max(opens_5m[i + 1], zone["center"])
+                if hi < limit_price * (1 + FILL_PENETRATION): continue
+                if _RNG.random() > FILL_RATE: continue
+                fill = max(opens_5m[i + 1], limit_price)
                 qty  = notional / fill
                 touches[zk] += 1
-                open_pos[zk] = {"side": "short", "entry": fill, "stop": stop,
-                                "target": target, "qty": qty, "bar": i + 1}
+                if hi >= stop:
+                    exit_p = stop * (1 + SLIPPAGE_SL)
+                    gross  = (fill - exit_p) * qty
+                    fees   = (fill * FEE_ENTRY + exit_p * FEE_EXIT_SL) * qty
+                    pnl    = gross - fees
+                    capital += pnl
+                    trades.append({"t": pd.Timestamp(ts_5m[i]), "side": "short",
+                                   "entry": fill, "exit": exit_p,
+                                   "gross": gross, "fees": fees, "pnl": pnl,
+                                   "reason": "stop_same_bar"})
+                else:
+                    open_pos[zk] = {"side": "short", "entry": fill, "stop": stop,
+                                    "target": target, "qty": qty, "bar": i + 1}
                 if len(open_pos) >= MAX_SIM: break
 
     # Ferme à la fin
