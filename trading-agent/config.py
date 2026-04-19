@@ -29,12 +29,15 @@ GEO_CAPITAL     = float(os.getenv("INITIAL_CAPITAL", "100.0"))
 GEO_RESET_DATE = "2026-04-06"
 
 # ── Geo V4 — Paramètres stratégie ──────────────────────────────────────────────
-GEO_SYMBOLS       = ["ETH/USD", "SOL/USD"]
-GEO_ZONE_PCT      = 0.003    # Zone ±0.3% autour du pivot
-GEO_MAX_SIM       = 2        # Max 2 positions simultanées
-GEO_POS_PCT       = 0.50     # 50% du capital par position
-GEO_TARGET_PCT    = 0.009    # Target +0.9%
-GEO_MAX_TOUCHES   = 2        # Skip zone si touchée > 2 fois
+# GEO_SYMBOLS pilotable via env (virgules). Ex. "ETH/USD" pour tester petit
+# capital, puis "ETH/USD,SOL/USD" quand tu passes à ≥ $1000.
+_GEO_SYMBOLS_RAW  = os.getenv("GEO_SYMBOLS", "ETH/USD,SOL/USD")
+GEO_SYMBOLS       = [s.strip() for s in _GEO_SYMBOLS_RAW.split(",") if s.strip()]
+GEO_ZONE_PCT      = 0.003
+GEO_MAX_SIM       = int(os.getenv("GEO_MAX_SIM", str(len(GEO_SYMBOLS))))
+GEO_POS_PCT       = float(os.getenv("GEO_POS_PCT", "0.50"))
+GEO_TARGET_PCT    = 0.009
+GEO_MAX_TOUCHES   = 2
 GEO_RSI_LOW       = 20
 GEO_RSI_HIGH      = 65
 
