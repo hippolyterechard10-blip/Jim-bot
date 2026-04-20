@@ -1,10 +1,12 @@
 """
-kraken_test.py — Diagnostic auth Kraken Futures.
+kraken_test.py — Diagnostic auth Kraken Futures, version élargie.
 
-Teste la clé contre 3 endpoints distincts pour trancher :
-  1. Endpoint public (connectivité Kraken)
-  2. Endpoint Futures authentifié  /accounts  (scheme Kraken Futures)
-  3. Endpoint Spot    authentifié  /0/private/Balance  (scheme Kraken Spot)
+Teste 5 variantes pour isoler la cause :
+  1. Endpoint public (connectivité)
+  2. .env : whitespace / caractères cachés dans la clé et le secret
+  3. Signature Futures avec endpoint "/accounts"       (scheme standard SDK)
+  4. Signature Futures avec endpoint "/api/v3/accounts" (scheme alternatif docs)
+  5. Signature Spot avec /0/private/Balance            (valide si clé unifiée)
 
 Usage (depuis trading-agent/) :
     sudo /opt/jimbot-venv/bin/python kraken_test.py
@@ -22,46 +24,77 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-k = os.getenv("KRAKEN_API_KEY", "")
-s = os.getenv("KRAKEN_API_SECRET", "")
-print(f"KEY    : len={len(k):<4} start={k[:6]}... end=...{k[-4:]}")
-print(f"SECRET : len={len(s):<4} start={s[:6]}... end=...{s[-4:]}")
-print(f"PAPER  : {os.getenv('KRAKEN_PAPER', '(unset)')}")
+k_raw = os.getenv("KRAKEN_API_KEY", "")
+s_raw = os.getenv("KRAKEN_API_SECRET", "")
+
+# ── 2. Audit caractères cachés ────────────────────────────────────────────────
+def char_audit(name, v):
+    spaces   = v.count(" ")
+    tabs     = v.count("\t")
+    crlf     = v.count("\r") + v.count("\n")
+    trailing = len(v) - len(v.rstrip())
+    leading  = len(v) - len(v.lstrip())
+    print(f"  {name}: len={len(v)}  spaces={spaces}  tabs={tabs}  "
+          f"crlf={crlf}  leading_ws={leading}  trailing_ws={trailing}")
+
+print("── Audit .env (whitespace/chars cachés) ──")
+char_audit("KEY   ", k_raw)
+char_audit("SECRET", s_raw)
 print()
 
-# ── 1. Public (no auth) ───────────────────────────────────────────────────────
-print("── Test 1 — Endpoint public Kraken Futures (pas d'auth) ──")
+k = k_raw.strip()
+s = s_raw.strip()
+print(f"Après strip() — KEY    : len={len(k):<4} start={k[:6]}... end=...{k[-4:]}")
+print(f"Après strip() — SECRET : len={len(s):<4} start={s[:6]}... end=...{s[-4:]}")
+print(f"PAPER={os.getenv('KRAKEN_PAPER', '(unset)')}")
+print()
+
+# ── 1. Public ─────────────────────────────────────────────────────────────────
+print("── Test 1 — Public (pas d'auth) ──")
 try:
     r = requests.get("https://futures.kraken.com/derivatives/api/v3/feeschedules",
                      timeout=10)
     print(f"  status={r.status_code}  result={r.json().get('result')}")
 except Exception as e:
-    print(f"  erreur réseau : {e}")
+    print(f"  erreur : {e}")
 print()
 
-# ── 2. Futures auth ───────────────────────────────────────────────────────────
-print("── Test 2 — /accounts avec scheme Kraken Futures ──")
-try:
-    endpoint = "/accounts"
-    nonce    = str(int(time.time() * 1000))
-    msg      = (nonce + endpoint).encode("utf-8")
-    sha      = hashlib.sha256(msg).digest()
-    sig      = base64.b64encode(
-        hmac.new(base64.b64decode(s), sha, hashlib.sha512).digest()
+
+def sign_futures(endpoint: str, post: str, nonce: str, secret: str) -> str:
+    msg = (post + nonce + endpoint).encode("utf-8")
+    sha = hashlib.sha256(msg).digest()
+    return base64.b64encode(
+        hmac.new(base64.b64decode(secret), sha, hashlib.sha512).digest()
     ).decode()
-    r = requests.get(
-        "https://futures.kraken.com/derivatives/api/v3/accounts",
-        headers={"APIKey": k, "Nonce": nonce, "Authent": sig},
-        timeout=10,
-    )
-    print(f"  status={r.status_code}")
-    print(f"  body  ={json.dumps(r.json(), indent=2)[:800]}")
-except Exception as e:
-    print(f"  exception : {e}")
+
+
+def try_futures(signed_endpoint: str, label: str):
+    try:
+        nonce = str(int(time.time() * 1000))
+        sig   = sign_futures(signed_endpoint, "", nonce, s)
+        r = requests.get(
+            "https://futures.kraken.com/derivatives/api/v3/accounts",
+            headers={"APIKey": k, "Nonce": nonce, "Authent": sig},
+            timeout=10,
+        )
+        body = r.json()
+        err  = body.get("error") or body.get("errors")
+        print(f"  {label}: status={r.status_code}  "
+              f"result={body.get('result')}  error={err}")
+    except Exception as e:
+        print(f"  {label}: exception {e}")
+
+
+# ── 3 + 4. Futures avec 2 variantes d'endpoint signé ──────────────────────────
+print("── Test 3 — Futures / scheme SDK (signe '/accounts') ──")
+try_futures("/accounts", "A")
+print()
+print("── Test 4 — Futures / scheme docs (signe '/api/v3/accounts') ──")
+try_futures("/api/v3/accounts", "B")
 print()
 
-# ── 3. Spot auth ──────────────────────────────────────────────────────────────
-print("── Test 3 — /0/private/Balance avec scheme Kraken Spot ──")
+# ── 5. Spot signing ───────────────────────────────────────────────────────────
+print("── Test 5 — Spot /0/private/Balance ──")
 try:
     urlpath  = "/0/private/Balance"
     nonce    = str(int(time.time() * 1000))
@@ -77,14 +110,14 @@ try:
                  "Content-Type": "application/x-www-form-urlencoded"},
         timeout=10,
     )
-    print(f"  status={r.status_code}")
-    print(f"  body  ={json.dumps(r.json(), indent=2)[:800]}")
+    print(f"  status={r.status_code}  body={json.dumps(r.json())[:200]}")
 except Exception as e:
     print(f"  exception : {e}")
 print()
 
 print("── Lecture ──")
-print("• Test 1 success       → Kraken accessible")
-print("• Test 2 success       → clé Futures valide → bot OK après restart")
-print("• Test 3 success       → clé SPOT (pas Futures) → en créer une Futures")
-print("• Les 2 et 3 échouent  → clé invalide ou désactivée → régénère")
+print("• Audit whitespace : si spaces/tabs/crlf != 0 → corrompu, à réécrire")
+print("• Test 3 success  → bot OK, juste restart")
+print("• Test 4 success  → bug dans mon broker, je corrige la signature")
+print("• 3 ET 4 ko, 5 ok → clé Spot, pas Futures, il faut une clé Futures")
+print("• 3, 4, 5 tous ko → clé invalide, régénérer")
