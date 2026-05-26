@@ -61,40 +61,48 @@ sudo /opt/jimbot-venv/bin/python /opt/Jim-bot/trading-agent/kraken_test.py
 
 ---
 
-## État actuel (au 19/04/2026)
+## État actuel
 
-**Bot arrêté** — la clé API Kraken génère `authenticationError` sur tous les
-endpoints Futures. Test diagnostic confirme :
+**Switch sur Kraken paper** (demo-futures.kraken.com) pour Phase 1 — aucun
+risque, faux argent, validation mécanique pure.
 
-- ✅ Connectivité Kraken OK (endpoint public)
-- ✅ Pas de whitespace dans `.env`, lengths correctes (KEY 56 / SECRET 88)
-- ✅ Mon code de signature est correct (testé 2 schemes `/accounts` et `/api/v3/accounts`)
-- ❌ La clé elle-même n'est pas reconnue par Kraken
+Le précédent essai en live avait `authenticationError` sur tous les endpoints
+Futures (clé live de pro.kraken.com non reconnue). Hypothèses : clé désactivée,
+permissions manquantes, ou activation Futures incomplète. **On va plutôt** :
 
-**Hypothèses** : clé désactivée, compte futures pas pleinement activé, ou
-permissions manquantes. **Action requise** : régénérer la clé sur
-pro.kraken.com avec :
-- API générale : Accès complet ✅
-- API de retrait : **AUCUN ACCÈS** ⚠️ (sécurité, le bot n'en a pas besoin)
-- IP whitelist : `178.104.145.1` (VPS)
+1. Créer un compte **demo séparé** sur https://demo-futures.kraken.com (compte
+   différent du compte live — Kraken les isole totalement)
+2. Générer une **clé API paper** sur ce compte demo (Settings → API Keys)
+   - API générale : Accès complet ✅
+   - API de retrait : aucun accès
+3. Mettre `KRAKEN_PAPER=1` dans le `.env`
+4. Le code switche automatiquement vers `https://demo-futures.kraken.com`
+   (cf. `kraken_broker.py:base_url`)
+
+Plus tard, passage en live :
+- Régénérer une clé sur pro.kraken.com (compte live), permissions identiques
+- IP whitelist : `178.104.145.1` (VPS) — important cette fois
+- Retraits : **AUCUN accès** (le bot n'en a pas besoin)
+- Passer `KRAKEN_PAPER=0`
 
 ---
 
 ## Phases de déploiement
 
-### Phase 1 — Validation mécanique (en cours)
+### Phase 1 — Validation mécanique sur Kraken paper
 
-- Capital $100 (déjà déposé sur Futures wallet)
+- **Paper mode** : `KRAKEN_PAPER=1` → endpoint demo-futures.kraken.com
+- Capital "virtuel" $100 (le compte demo Kraken est crédité auto)
 - ETH-only, `MAX_SIM=1`, `POS_PCT=1.00`, **short activé** (`GEO_ENABLE_SHORT=1`)
 - Objectif : ~30 trades pour valider fills, SL/TP, pas de crash
-- Pas de jugement de rendement (trop peu de trades)
+- Pas de jugement de rendement (paper fills trop bons + trop peu de trades)
 
-`.env` Phase 1 :
+`.env` Phase 1 (paper) :
 ```
 ACTIVE_BROKER=kraken
-KRAKEN_API_KEY=<clé>
-KRAKEN_API_SECRET=<secret>
-KRAKEN_PAPER=0
+KRAKEN_API_KEY=<clé demo générée sur demo-futures.kraken.com>
+KRAKEN_API_SECRET=<secret demo>
+KRAKEN_PAPER=1
 INITIAL_CAPITAL=100
 GEO_SYMBOLS=ETH/USD
 GEO_MAX_SIM=1
