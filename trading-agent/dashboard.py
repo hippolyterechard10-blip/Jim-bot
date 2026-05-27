@@ -151,6 +151,23 @@ def api_stats():
     if not _memory: return jsonify({})
     return jsonify(_memory.compute_performance_stats())
 
+@app.route("/api/llm/usage")
+def api_llm_usage():
+    """LLM usage stats (Audit #4 Phase A — observability).
+    Query param ?hours=24 (default) | 168 | 720 ..."""
+    try:
+        from flask import request as fr
+        hours = int(fr.args.get("hours", 24))
+        import llm_usage as _lu
+        # Use _memory.db_path so we read from the same DB as everything else
+        db = _memory.db_path if _memory else None
+        s = _lu.stats(window_hours=hours, db_path=db)
+        s["recent"] = _lu.recent(limit=20, db_path=db)
+        return jsonify(s)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/crypto-regime")
 def api_crypto_regime():
     """Live crypto-native regime evaluation per symbol (read-only snapshot)."""

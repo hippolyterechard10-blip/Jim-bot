@@ -51,6 +51,31 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
         #  agent_memory est currently empty, donc pas de conflit en pratique)
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_bot_key ON agent_memory(bot_id, key)",
     ]),
+    (6, "llm_usage_observability", [
+        # Audit #4 Phase A — observability LLM (Zeus, Jim, Claude Code, etc.)
+        # Pure observability table — n'affecte pas le runtime trading
+        """CREATE TABLE IF NOT EXISTS llm_usage (
+               id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+               timestamp           TEXT NOT NULL DEFAULT (datetime('now')),
+               bot_id              TEXT NOT NULL,
+               session_id          TEXT,
+               provider            TEXT NOT NULL,
+               model               TEXT NOT NULL,
+               input_tokens        INTEGER NOT NULL DEFAULT 0,
+               output_tokens       INTEGER NOT NULL DEFAULT 0,
+               cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+               cost_usd            REAL NOT NULL DEFAULT 0,
+               task_type           TEXT,
+               purpose             TEXT,
+               latency_ms          INTEGER,
+               success             INTEGER NOT NULL DEFAULT 1,
+               meta                TEXT
+           )""",
+        "CREATE INDEX IF NOT EXISTS idx_llm_bot_ts        ON llm_usage(bot_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_model_ts      ON llm_usage(model, timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_session       ON llm_usage(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_task_type_ts  ON llm_usage(task_type, timestamp)",
+    ]),
 ]
 
 
