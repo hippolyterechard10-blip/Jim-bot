@@ -953,25 +953,25 @@ _equity_cache: dict = {"value": None, "ts": 0.0}
 _EQUITY_CACHE_TTL = 60  # secondes
 
 def _get_alpaca_equity() -> float:
-    """Retourne l'equity réelle du compte Alpaca paper, avec cache 60s."""
+    """Equity courante en mode paper = capital de référence + PnL réalisé.
+    Nom conservé pour ne pas casser les callers. Cache 60s."""
     import time as _time
     now = _time.time()
     if _equity_cache["value"] is not None and now - _equity_cache["ts"] < _EQUITY_CACHE_TTL:
         return _equity_cache["value"]
     try:
-        import alpaca_trade_api as tradeapi
-        api = tradeapi.REST(
-            os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"),
-            "https://paper-api.alpaca.markets"
-        )
-        equity = float(api.get_account().equity)
+        conn = _ro_conn(_memory.db_path)
+        row  = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='closed'"
+        ).fetchone()
+        conn.close()
+        equity = config.GEO_CAPITAL + float((row[0] if row else 0) or 0)
         _equity_cache["value"] = equity
         _equity_cache["ts"]    = now
         return equity
     except Exception as e:
-        logger.warning(f"_get_alpaca_equity error: {e}")
-        # Retourne la valeur cachée même périmée, ou GEO_CAPITAL par défaut
-        return _equity_cache["value"] if _equity_cache["value"] else config.GEO_CAPITAL
+        logger.warning(f"_get_equity error: {e}")
+        return _equity_cache["value"] if _equity_cache["value"] is not None else config.GEO_CAPITAL
 
 
 @app.route("/api/experts/stats")
