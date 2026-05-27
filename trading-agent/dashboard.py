@@ -1445,6 +1445,42 @@ header{
 .strat-confidence.negative strong{color:var(--red)}
 .strat-confidence.neutral strong{color:var(--gold)}
 
+/* ─── LLM Cost Observability ─────────────────────── */
+.llm-card{padding:24px}
+.llm-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:16px;flex-wrap:wrap}
+.llm-window-tabs{display:flex;gap:4px;padding:3px;background:var(--surface);border-radius:6px;border:1px solid var(--border)}
+.llm-tab{padding:4px 12px;font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;background:transparent;border:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:all .15s;font-family:'SF Mono','Monaco',monospace}
+.llm-tab:hover{color:var(--text2)}
+.llm-tab.active{background:var(--surface-hi);color:var(--text)}
+
+.llm-kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.llm-kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px 16px}
+.llm-kpi .lbl{font-size:9px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:4px}
+.llm-kpi .val{font-family:'SF Mono','Monaco',monospace;font-size:22px;font-weight:600;letter-spacing:-.02em;color:var(--text);line-height:1}
+.llm-kpi .val.warn{color:var(--gold)}
+.llm-kpi .val.crit{color:var(--red)}
+.llm-kpi .val.good{color:var(--green)}
+.llm-kpi .sub{font-family:'SF Mono','Monaco',monospace;font-size:10px;color:var(--text3);margin-top:5px}
+
+.llm-breakdown{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px}
+.llm-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:13px 15px;min-height:140px}
+.llm-panel-title{font-size:9px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:10px}
+.llm-row{display:flex;align-items:center;padding:4px 0;font-family:'SF Mono','Monaco',monospace;font-size:11px;border-top:1px dashed transparent}
+.llm-row+.llm-row{border-top-color:rgba(255,255,255,0.04)}
+.llm-row .label{color:var(--text2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px}
+.llm-row .calls{color:var(--text3);margin-right:10px;min-width:36px;text-align:right;font-size:10px}
+.llm-row .cost{color:var(--text);font-weight:500;min-width:60px;text-align:right}
+.llm-row .cost.high{color:var(--red)}
+.llm-row .cost.mid{color:var(--gold)}
+.llm-empty{color:var(--text3);font-size:11px;font-style:italic;padding:8px 0}
+
+.llm-footer{margin-top:12px;padding-top:10px;border-top:1px dashed var(--border);display:flex;justify-content:space-between;font-family:'SF Mono','Monaco',monospace;font-size:10px;color:var(--text3)}
+
+@media(max-width:980px){
+  .llm-kpi-row{grid-template-columns:repeat(2,1fr)}
+  .llm-breakdown{grid-template-columns:1fr}
+}
+
 /* ─── Crypto regime strip ────────────────────────── */
 .cregime-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:14px}
 .creg-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px 16px}
@@ -1522,6 +1558,21 @@ header{
   <div class="cregime-strip" id="cregime-strip"></div>
   <div class="modes-grid" id="modes-grid"></div>
   <div class="strat-confidence" id="strat-confidence">Loading…</div>
+</div>
+
+<!-- ═══ LLM COST OBSERVABILITY ═════════════════════════════════════════════ -->
+<div class="card llm-card" style="animation-delay:.06s">
+  <div class="llm-header">
+    <div class="strat-title">LLM Cost Observability <em>— OpenClaw + Claude Code</em></div>
+    <div class="llm-window-tabs" id="llm-window-tabs">
+      <button class="llm-tab" data-h="24">24h</button>
+      <button class="llm-tab active" data-h="168">7d</button>
+      <button class="llm-tab" data-h="720">30d</button>
+    </div>
+  </div>
+  <div class="llm-kpi-row" id="llm-kpi-row"></div>
+  <div class="llm-breakdown" id="llm-breakdown"></div>
+  <div class="llm-footer" id="llm-footer"></div>
 </div>
 
 <!-- ═══ KPI STRIP ════════════════════════════════════════════════════════════ -->
@@ -2270,11 +2321,129 @@ async function loadStrategy(){
   _renderConfidence(data);
 }
 
+// ─── LLM Cost Observability ───────────────────────────────────
+let _llmWindow = 168;     // 7d default
+
+function _llmFmt$(v) {
+  if (v == null) return '—';
+  if (v < 1) return '$' + v.toFixed(3);
+  if (v < 100) return '$' + v.toFixed(2);
+  return '$' + Math.round(v).toLocaleString();
+}
+
+function _llmCostClass(cost, low, high) {
+  if (cost >= high) return 'crit';
+  if (cost >= low)  return 'warn';
+  return '';
+}
+
+async function loadLLMUsage() {
+  const data = await api(`/api/llm/usage?hours=${_llmWindow}`);
+  if (!data || data.error) {
+    const k = $('llm-kpi-row');
+    if (k) k.innerHTML = `<div class="llm-empty">endpoint error: ${data?.error || 'no data'}</div>`;
+    return;
+  }
+  const total      = data.total      || {};
+  const byBot      = data.by_bot     || [];
+  const byModel    = data.by_model   || [];
+  const byTask     = data.by_task_type || [];
+
+  const totCost    = total.cost_usd || 0;
+  const totCalls   = total.calls    || 0;
+  const inTok      = total.in_tok   || 0;
+  const cachedTok  = total.cached_tok || 0;
+  const outTok     = total.out_tok || 0;
+  const cacheRatio = (inTok + cachedTok) > 0
+                     ? cachedTok / (inTok + cachedTok) * 100 : 0;
+  const days       = _llmWindow / 24;
+  const monthly    = days > 0 ? (totCost / days) * 30 : 0;
+
+  // KPI tiles
+  $('llm-kpi-row').innerHTML = `
+    <div class="llm-kpi">
+      <div class="lbl">Total cost</div>
+      <div class="val ${_llmCostClass(totCost, 5, 25)}">${_llmFmt$(totCost)}</div>
+      <div class="sub">over ${days.toFixed(1)}d</div>
+    </div>
+    <div class="llm-kpi">
+      <div class="lbl">Calls</div>
+      <div class="val">${totCalls.toLocaleString()}</div>
+      <div class="sub">${days > 0 ? Math.round(totCalls/days) : 0}/day avg</div>
+    </div>
+    <div class="llm-kpi">
+      <div class="lbl">Cache hit</div>
+      <div class="val ${cacheRatio < 50 ? 'warn' : cacheRatio > 80 ? 'good' : ''}">${cacheRatio.toFixed(0)}%</div>
+      <div class="sub">${(cachedTok/1000).toFixed(0)}k cached / ${(inTok/1000).toFixed(0)}k fresh</div>
+    </div>
+    <div class="llm-kpi">
+      <div class="lbl">Est. monthly</div>
+      <div class="val ${_llmCostClass(monthly, 20, 80)}">${_llmFmt$(monthly)}</div>
+      <div class="sub">extrapolated</div>
+    </div>`;
+
+  // Breakdown panels
+  const modelRowsHtml = byModel.slice(0, 6).map(r => {
+    const klass = r.cost_usd >= 1 ? 'high' : r.cost_usd >= 0.1 ? 'mid' : '';
+    return `<div class="llm-row">
+      <span class="label">${r.model || '—'}</span>
+      <span class="calls">${r.calls}</span>
+      <span class="cost ${klass}">${_llmFmt$(r.cost_usd)}</span>
+    </div>`;
+  }).join('') || '<div class="llm-empty">no calls in window</div>';
+
+  const botRowsHtml = byBot.map(r => `
+    <div class="llm-row">
+      <span class="label">${r.bot_id}</span>
+      <span class="calls">${r.calls}</span>
+      <span class="cost">${_llmFmt$(r.cost_usd)}</span>
+    </div>`).join('') || '<div class="llm-empty">no calls</div>';
+
+  const taskRowsHtml = byTask.map(r => `
+    <div class="llm-row">
+      <span class="label">${r.task_type || 'unspec.'}</span>
+      <span class="calls">${r.calls}</span>
+      <span class="cost">${_llmFmt$(r.cost_usd)}</span>
+    </div>`).join('') || '<div class="llm-empty">no calls</div>';
+
+  $('llm-breakdown').innerHTML = `
+    <div class="llm-panel">
+      <div class="llm-panel-title">By Model (top 6)</div>
+      ${modelRowsHtml}
+    </div>
+    <div class="llm-panel">
+      <div class="llm-panel-title">By Bot</div>
+      ${botRowsHtml}
+    </div>
+    <div class="llm-panel">
+      <div class="llm-panel-title">By Task Type</div>
+      ${taskRowsHtml}
+    </div>`;
+
+  $('llm-footer').innerHTML = `
+    <span>Tokens : ${(inTok/1000).toFixed(0)}k fresh + ${(cachedTok/1000).toFixed(0)}k cached → ${(outTok/1000).toFixed(0)}k out</span>
+    <span>Cost model conservative — calibrate via OpenRouter dashboard</span>`;
+}
+
+let _llmTabsInited = false;
+function _initLLMTabs() {
+  if (_llmTabsInited) return;
+  const tabs = document.querySelectorAll('.llm-tab');
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    _llmWindow = parseInt(t.dataset.h);
+    loadLLMUsage();
+  }));
+  _llmTabsInited = true;
+}
+
 async function refresh() {
+  _initLLMTabs();
   await Promise.all([
     loadHero(), loadKPIs(), loadEquity(), loadPositions(),
     loadRegime(), loadTrades(_period), loadDecisions(),
-    loadExits(), loadAnalyses(), loadStrategy()
+    loadExits(), loadAnalyses(), loadStrategy(), loadLLMUsage()
   ]);
   const fill = $('rfbar-fill');
   fill.style.transition = 'none';
