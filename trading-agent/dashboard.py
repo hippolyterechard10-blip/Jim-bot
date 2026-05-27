@@ -1481,6 +1481,25 @@ header{
   .llm-breakdown{grid-template-columns:1fr}
 }
 
+/* ─── Tab Navigation ─────────────────────────────── */
+.tab-nav{display:flex;gap:4px;padding:4px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:24px;width:fit-content}
+.tab-btn{padding:8px 18px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;background:transparent;border:none;color:var(--text3);cursor:pointer;border-radius:7px;transition:all .15s;font-family:'SF Mono','Monaco',monospace;display:flex;align-items:center;gap:8px}
+.tab-btn:hover{color:var(--text2)}
+.tab-btn.active{background:var(--surface-hi);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,0.15)}
+.tab-btn .tab-count{font-size:9px;background:var(--surface);padding:2px 6px;border-radius:99px;color:var(--text3);border:1px solid var(--border)}
+.tab-btn.active .tab-count{background:var(--green-soft);color:var(--green);border-color:rgba(16,185,129,0.25)}
+
+/* Tab pane visibility — controlled by .wrap[data-active-tab="X"] */
+.wrap[data-active-tab="overview"] [data-tab]:not([data-tab="overview"]){display:none}
+.wrap[data-active-tab="trades"]   [data-tab]:not([data-tab="trades"]){display:none}
+.wrap[data-active-tab="strategy"] [data-tab]:not([data-tab="strategy"]){display:none}
+.wrap[data-active-tab="cost"]     [data-tab]:not([data-tab="cost"]){display:none}
+
+@media(max-width:520px){
+  .tab-nav{width:100%;overflow-x:auto}
+  .tab-btn{padding:8px 12px;flex-shrink:0}
+}
+
 /* ─── Crypto regime strip ────────────────────────── */
 .cregime-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:14px}
 .creg-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px 16px}
@@ -1505,7 +1524,7 @@ header{
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" data-active-tab="overview">
 
 <!-- ═══ HEADER ══════════════════════════════════════════════════════════════ -->
 <header>
@@ -1527,8 +1546,16 @@ header{
   </div>
 </header>
 
+<!-- ═══ TAB NAVIGATION ═══════════════════════════════════════════════════════ -->
+<nav class="tab-nav" role="tablist">
+  <button class="tab-btn active" data-target-tab="overview" role="tab">Overview</button>
+  <button class="tab-btn"        data-target-tab="trades"   role="tab">Trades <span class="tab-count" id="tab-count-trades">—</span></button>
+  <button class="tab-btn"        data-target-tab="strategy" role="tab">Strategy</button>
+  <button class="tab-btn"        data-target-tab="cost"     role="tab">Cost</button>
+</nav>
+
 <!-- ═══ HERO ═════════════════════════════════════════════════════════════════ -->
-<div class="card hero-card" style="animation-delay:.02s">
+<div class="card hero-card" data-tab="overview" style="animation-delay:.02s">
   <div class="hero-grid">
     <div>
       <div class="hero-label">Valeur du Portfolio</div>
@@ -1550,7 +1577,7 @@ header{
 </div>
 
 <!-- ═══ STRATEGY ANALYTICS ════════════════════════════════════════════════════ -->
-<div class="card strat-card" style="animation-delay:.04s">
+<div class="card strat-card" data-tab="strategy" style="animation-delay:.04s">
   <div class="strat-header">
     <div class="strat-title">Strategy Analytics <em>— confidence layer</em></div>
     <div class="strat-state-chips" id="strat-state-chips"></div>
@@ -1561,7 +1588,7 @@ header{
 </div>
 
 <!-- ═══ LLM COST OBSERVABILITY ═════════════════════════════════════════════ -->
-<div class="card llm-card" style="animation-delay:.06s">
+<div class="card llm-card" data-tab="cost" style="animation-delay:.06s">
   <div class="llm-header">
     <div class="strat-title">LLM Cost Observability <em>— OpenClaw + Claude Code</em></div>
     <div class="llm-window-tabs" id="llm-window-tabs">
@@ -1576,7 +1603,7 @@ header{
 </div>
 
 <!-- ═══ KPI STRIP ════════════════════════════════════════════════════════════ -->
-<div class="kpi-row">
+<div class="kpi-row" data-tab="overview">
   <div class="kpi">
     <div class="kpi-lbl">Win Rate</div>
     <div class="kpi-val neu" id="kpi-wr">—</div>
@@ -1605,7 +1632,7 @@ header{
 </div>
 
 <!-- ═══ EQUITY CURVE ══════════════════════════════════════════════════════════ -->
-<div class="card eq-card" style="animation-delay:.08s">
+<div class="card eq-card" data-tab="overview" style="animation-delay:.08s">
   <div class="eq-top">
     <div>
       <div class="eq-title">Courbe d'équité</div>
@@ -1633,7 +1660,7 @@ header{
 </div>
 
 <!-- ═══ MID GRID : Positions + Regime ════════════════════════════════════════ -->
-<div class="mid-grid">
+<div class="mid-grid" data-tab="overview">
 
   <!-- Positions -->
   <div class="card" style="animation-delay:.10s">
@@ -1666,7 +1693,7 @@ header{
 </div>
 
 <!-- ═══ BOT GRID : Trades + Decisions ════════════════════════════════════════ -->
-<div class="bot-grid">
+<div class="bot-grid" data-tab="trades">
 
   <!-- Trade History -->
   <div class="card" style="animation-delay:.14s">
@@ -1715,7 +1742,7 @@ header{
 </div>
 
 <!-- ═══ POST-TRADE ANALYSES ═══════════════════════════════════════════════════ -->
-<div class="card" style="animation-delay:.20s">
+<div class="card" data-tab="trades" style="animation-delay:.20s">
   <div class="sec-label">Analyses post-trade — Leçons apprises</div>
   <div id="analyses-container" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
     <div style="text-align:center;color:var(--text3);padding:32px;grid-column:1/-1;font-size:13px">Aucune analyse disponible</div>
@@ -2438,7 +2465,47 @@ function _initLLMTabs() {
   _llmTabsInited = true;
 }
 
+// ─── Tab Navigation ──────────────────────────────────────────
+const TAB_STORAGE_KEY = 'jimbot.activeTab';
+
+function _activateTab(name) {
+  const wrap = document.querySelector('.wrap');
+  if (!wrap) return;
+  wrap.setAttribute('data-active-tab', name);
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.targetTab === name);
+  });
+  try { localStorage.setItem(TAB_STORAGE_KEY, name); } catch {}
+  // Scroll to top of content area for smooth UX
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+let _tabsInited = false;
+function _initTabs() {
+  if (_tabsInited) return;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => _activateTab(btn.dataset.targetTab));
+  });
+  // Restore saved tab if any
+  let saved = null;
+  try { saved = localStorage.getItem(TAB_STORAGE_KEY); } catch {}
+  if (saved && ['overview','trades','strategy','cost'].includes(saved)) {
+    _activateTab(saved);
+  }
+  _tabsInited = true;
+}
+
+function _updateTabBadges() {
+  // Open positions badge on Trades tab — derived from current data
+  const cntEl = document.getElementById('tab-count-trades');
+  if (!cntEl) return;
+  // Best-effort: count rows in trade history table
+  const rows = document.querySelectorAll('#trades-tbody tr');
+  if (rows && rows.length) cntEl.textContent = rows.length;
+}
+
 async function refresh() {
+  _initTabs();
   _initLLMTabs();
   await Promise.all([
     loadHero(), loadKPIs(), loadEquity(), loadPositions(),
@@ -2452,6 +2519,7 @@ async function refresh() {
     fill.style.transition = `width ${INTERVAL}ms linear`;
     fill.style.width = '100%';
   });
+  _updateTabBadges();
 }
 
 refresh();
