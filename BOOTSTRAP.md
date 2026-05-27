@@ -1,0 +1,1 @@
+/Users/hippolyterechard/Documents/documents AI-OS/AI-OS/agents/jim/BOOTSTRAP.md

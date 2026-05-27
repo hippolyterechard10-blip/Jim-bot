@@ -1,1 +1,1 @@
-# Jim Bot V2 - Trading Agent
+/Users/hippolyterechard/Documents/documents AI-OS/AI-OS/agents/jim/README.md
