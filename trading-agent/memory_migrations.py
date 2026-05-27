@@ -76,6 +76,12 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
         "CREATE INDEX IF NOT EXISTS idx_llm_session       ON llm_usage(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_llm_task_type_ts  ON llm_usage(task_type, timestamp)",
     ]),
+    (7, "llm_usage_external_id", [
+        # Audit #4 task 1 — ingester depuis trajectoires OpenClaw avec idempotence
+        "ALTER TABLE llm_usage ADD COLUMN external_id TEXT",
+        # SQLite NULLs distinct dans UNIQUE — OK pour entries manuelles sans external_id
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_external_id ON llm_usage(external_id)",
+    ]),
 ]
 
 

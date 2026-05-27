@@ -157,6 +157,15 @@ def main():
     p = sub.add_parser("prices", help="print model price table")
     p.set_defaults(func=cmd_prices)
 
+    rc = sub.add_parser("recompute-costs",
+                        help="recompute cost_usd on every row using current MODEL_PRICES")
+    rc.set_defaults(func=lambda args: (
+        (lambda r: (print(f"  rows: {r['rows']}\n  updated: {r['updated']}\n"
+                           f"  before total cost: ${r['before']}\n"
+                           f"  after  total cost: ${r['after']}\n"
+                           f"  delta: ${r['delta']:+}") or 0))(llm_usage.recompute_all_costs())
+    ))
+
     args = ap.parse_args()
     sys.exit(args.func(args))
 

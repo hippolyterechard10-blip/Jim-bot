@@ -64,6 +64,11 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "openai/gpt-4-turbo":          (10.000, 30.000),
     "openai/o1-mini":              (3.000, 12.000),
     "openai/o1":                   (15.000, 60.000),
+    # ── OpenAI gpt-5.x family (May 2026 estimates — calibrate when OpenRouter dashboard accessible)
+    "openai/gpt-5":                (5.000, 20.000),
+    "openai/gpt-5-mini":           (0.500, 2.000),
+    "openai/gpt-5.5":              (5.000, 20.000),    # observed in OpenClaw trajectories
+    "openai/gpt-5.4-mini":         (1.000, 5.000),     # observed (fallback in OpenClaw)
     # ── Anthropic via OpenRouter ─────────────────────────────────────────────
     "anthropic/claude-3.5-sonnet": (3.000, 15.000),
     "anthropic/claude-3.5-haiku":  (1.000, 5.000),
@@ -87,10 +92,13 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "meta-llama/llama-3.1-8b":     (0.055, 0.055),
 }
 
-# Cached input tokens are billed at ~10% of standard input by Anthropic
-# (90% discount). Most other providers don't publicly support prompt caching
-# yet ; the discount factor below is conservative (assume 10% if unknown).
-CACHED_INPUT_DISCOUNT = 0.10
+# Cached input tokens — provider-specific :
+#   Anthropic explicit cache_control : 10% of full (90% discount)
+#   OpenAI auto-cache (1024+ token prefix match) : 50% of full
+#   Gemini cached_content : depends on tier, ~25% typical
+# Since our traffic mix is ~99% OpenAI (gpt-4o-mini, gpt-5.5), use 0.50 as
+# the calibrated global. Per-model factor TBD when traffic diversifies.
+CACHED_INPUT_DISCOUNT = 0.50
 
 
 def _resolve_price(model: str) -> tuple[float, float]:
@@ -277,6 +285,38 @@ def stats(window_hours: int = 24, db_path: str | None = None) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"[llm_usage] stats failed: {e}")
         return {"error": str(e), "window_hours": window_hours}
+
+
+def recompute_all_costs(db_path: str | None = None) -> dict:
+    """Recompute cost_usd for every row in llm_usage using the current
+    MODEL_PRICES table. Useful when prices are updated post-hoc.
+    Returns {updated, before, after, delta}."""
+    path = db_path or str(DB_PATH)
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        rows = conn.execute(
+            "SELECT id, model, input_tokens, output_tokens, cached_input_tokens, cost_usd "
+            "FROM llm_usage"
+        ).fetchall()
+        before = sum(r[5] or 0 for r in rows)
+        updated = 0
+        for rid, model, in_tok, out_tok, cached, prev_cost in rows:
+            new_cost = compute_cost(model, in_tok or 0, out_tok or 0, cached or 0)
+            if abs(new_cost - (prev_cost or 0)) > 1e-9:
+                conn.execute("UPDATE llm_usage SET cost_usd=? WHERE id=?", (new_cost, rid))
+                updated += 1
+        conn.commit()
+        after = conn.execute("SELECT COALESCE(SUM(cost_usd),0) FROM llm_usage").fetchone()[0]
+        return {
+            "rows":     len(rows),
+            "updated":  updated,
+            "before":   round(before, 4),
+            "after":    round(after, 4),
+            "delta":    round(after - before, 4),
+        }
+    finally:
+        conn.close()
 
 
 def recent(limit: int = 50, db_path: str | None = None) -> list[dict]:
