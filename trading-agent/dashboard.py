@@ -22,6 +22,17 @@ app.secret_key = os.getenv("SESSION_SECRET", secrets.token_hex(32))
 _memory: Optional[TradingMemory] = None
 _regime  = None
 
+
+# ── Read-only SQLite helper (Phase E concurrency hardening) ───────────────────
+def _ro_conn(db_path: str, timeout: float = 5.0) -> sqlite3.Connection:
+    """Open a read-only SQLite connection with busy_timeout + query_only.
+    Prevents accidental writes from dashboard endpoints and waits gracefully on locks."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA query_only = 1")
+    return conn
+
+
 # ── Auth helpers ───────────────────────────────────────────────────────────────
 _AUTH_COOKIE   = "jb_session"
 _SESSION_DAYS  = 30
@@ -227,7 +238,7 @@ def api_stats_periods():
         return jsonify({})
     expert = flask_req.args.get("expert", "all")
     try:
-        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        conn = _ro_conn(_memory.db_path)
 
         src_filter = ""
         if expert == "gap":
@@ -367,7 +378,7 @@ def api_closed_today():
         period    = flask_req.args.get("period", "today")
         since     = _period_start(period)
         today     = datetime.now(timezone.utc).date().isoformat()
-        conn      = sqlite3.connect(_memory.db_path, timeout=10)
+        conn      = _ro_conn(_memory.db_path, timeout=10)
         c         = conn.cursor()
         if since:
             c.execute("""
@@ -425,7 +436,7 @@ def api_trades_individual():
         period = flask_req.args.get("period", "today")
         since  = _period_start(period)
         limit  = min(int(flask_req.args.get("limit", 300)), 500)
-        conn   = sqlite3.connect(_memory.db_path, timeout=10)
+        conn   = _ro_conn(_memory.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         if since:
@@ -504,7 +515,7 @@ def api_trade_detail(trade_id):
     if not _memory:
         return jsonify({"error": "not ready"}), 503
     try:
-        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        conn = _ro_conn(_memory.db_path)
         conn.row_factory = sqlite3.Row
         trade = conn.execute("""
             SELECT trade_id, symbol, side, qty, entry_price, exit_price,
@@ -571,7 +582,7 @@ def api_analysis():
     if not _memory:
         return jsonify({})
     try:
-        conn = sqlite3.connect(_memory.db_path, timeout=10)
+        conn = _ro_conn(_memory.db_path, timeout=10)
         c    = conn.cursor()
 
         # ── Expert filter — based on strategy_source in market_context ──
@@ -722,7 +733,7 @@ def api_analysis_rolling():
     if not _memory:
         return jsonify({"n_trades": 0})
     try:
-        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        conn = _ro_conn(_memory.db_path)
         rows = conn.execute(f"""
             SELECT pnl, hold_duration_min FROM trades
             WHERE {_geo_filter()}
@@ -752,7 +763,7 @@ def api_analysis_exits():
     if not _memory:
         return jsonify({"total": 0})
     try:
-        conn = sqlite3.connect(_memory.db_path, timeout=5)
+        conn = _ro_conn(_memory.db_path)
         rows = conn.execute(f"""
             SELECT close_reason, COUNT(*) as n FROM trades
             WHERE {_geo_filter()}
@@ -792,7 +803,7 @@ def api_analysis_period():
             since = now.replace(day=1).isoformat()
         # "all" → already covered by _geo_filter (>= GEO_RESET_DATE)
         extra = f"AND exit_at >= '{since}'" if since else ""
-        conn  = sqlite3.connect(_memory.db_path, timeout=5)
+        conn  = _ro_conn(_memory.db_path)
         rows  = conn.execute(f"""
             SELECT pnl FROM trades WHERE {_geo_filter(extra)}
         """).fetchall()
@@ -821,7 +832,7 @@ def api_analysis_equity_curve():
         return jsonify({"capital_start": 0, "points": []})
     try:
         capital_start = _get_alpaca_equity()
-        conn  = sqlite3.connect(_memory.db_path, timeout=5)
+        conn  = _ro_conn(_memory.db_path)
         rows  = conn.execute(f"""
             SELECT exit_at, pnl FROM trades
             WHERE {_geo_filter()}

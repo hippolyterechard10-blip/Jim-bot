@@ -64,10 +64,19 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 """
 
 class TradingMemory:
-    def __init__(self, db_path="trading_memory.db"):
+    def __init__(self, db_path="trading_memory.db", bot_id="jim"):
         self.db_path = db_path
+        self.bot_id  = bot_id           # multi-bot ready (default 'jim' rétrocompat)
         self._init_db()
-        logger.info(f"✅ TradingMemory ready: {db_path}")
+        # Run idempotent schema migrations (bot_id columns, indices, etc.)
+        try:
+            from memory_migrations import run_migrations
+            applied = run_migrations(db_path)
+            if applied:
+                logger.info(f"✅ {applied} schema migration(s) applied")
+        except Exception as e:
+            logger.warning(f"[MIGRATION] runner failed (non-fatal): {e}")
+        logger.info(f"✅ TradingMemory ready: {db_path} (bot_id={bot_id})")
 
     def _init_db(self):
         with self._conn() as conn:
@@ -166,7 +175,10 @@ class TradingMemory:
     def _conn(self):
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # Phase E concurrency hardening
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")   # wait up to 5s if lock contested
+        conn.execute("PRAGMA synchronous=NORMAL")  # vs FULL: faster, safe for our use
         try:
             yield conn
             conn.commit()
