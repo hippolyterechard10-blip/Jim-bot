@@ -13,7 +13,7 @@ manage_open_positions() simplifié : détecte fermeture par comparaison
 positions OKX ↔ DB. Aucun price-check bot-side.
 """
 from __future__ import annotations
-import logging, json, threading, uuid, datetime
+import logging, json, uuid, datetime
 from collections import defaultdict
 import numpy as np
 import pandas as pd
@@ -26,7 +26,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT_MIN = 120  # 2h time-stop (default — bull/choppy override via GEO_LOWVOL_TIMEOUT_MIN)
+TIMEOUT_MIN = 240  # 4h time-stop
 
 
 def _smart_round(price: float) -> float:
@@ -60,21 +60,9 @@ class GeometricExpert:
         self.geometry = geometry
         self.regime   = regime
         # Pending limit orders : zone_key → {order_id, symbol, level, stop, target, qty, deploy}
-        # Shared between slow loop (writes via evaluate/_reconcile) and fast loop
-        # (reads/deletes via manage_pending). RLock pour mutations cross-thread.
         self._pending: dict = {}
-        self._pending_lock = threading.RLock()
         # Zone touch tracking
         self._touches: defaultdict = defaultdict(int)
-        # Crypto-native regime engine (PAPER only — gated by config.USE_CRYPTO_REGIME_GATE)
-        self.crypto_regime = None
-        if getattr(config, "USE_CRYPTO_REGIME_GATE", False):
-            try:
-                from crypto_regime import CryptoRegime
-                self.crypto_regime = CryptoRegime(broker)
-                logger.info("[CRYPTO_REGIME] gate ENABLED — paper validation mode")
-            except Exception as e:
-                logger.warning(f"[CRYPTO_REGIME] init failed, falling back to old regime: {e}")
         # Réconciliation au démarrage
         self._reconcile_state()
 
@@ -83,21 +71,16 @@ class GeometricExpert:
     def _reconcile_state(self):
         """Au démarrage, recharge les ordres GTC ouverts et les positions orphelines."""
         try:
-            # 1. Recharger les ordres limit ouverts dans self._pending
+            # 1. Recharger les ordres limit buy ouverts dans self._pending
             open_orders = self.broker.list_open_orders()
             for o in open_orders:
-                if o.type == "limit" and o.limit_price:
+                if o.side == "buy" and o.type == "limit" and o.limit_price:
                     lim    = float(o.limit_price)
                     symbol = o.db_symbol
-                    side   = getattr(o, "side", "buy")
-                    if side == "buy":
-                        stop   = round(lim * 0.997, 4)
-                        target = round(lim * 1.009, 4)
-                    else:
-                        stop   = round(lim * 1.003, 4)
-                        target = round(lim * 0.991, 4)
-                    zk     = self._zone_key(lim) if side == "buy" else -self._zone_key(lim)
-                    self._pending_add(zk, {
+                    stop   = round(lim * 0.997, 4)
+                    target = round(lim * 1.009, 4)
+                    zk     = self._zone_key(lim)
+                    self._pending[zk] = {
                         "order_id": o.id,
                         "symbol":   symbol,
                         "level":    lim,
@@ -106,9 +89,8 @@ class GeometricExpert:
                         "target":   target,
                         "qty":      o.filled_qty or 0,
                         "deploy":   lim * (o.qty_contracts or 0) * self.broker._ct(o.okx_symbol),
-                        "side":     "long" if side == "buy" else "short",
-                    })
-                    logger.info(f"[GEO] 🔄 Recovered pending order: {symbol} {side.upper()} GTC@{lim}")
+                    }
+                    logger.info(f"[GEO] 🔄 Recovered pending order: {symbol} GTC@{lim}")
 
             # 2. Réconcilier les positions OKX sans trade DB correspondant
             positions   = self.broker.get_positions()
@@ -142,7 +124,6 @@ class GeometricExpert:
                     center = entry / (1 + config.GEO_ZONE_PCT)
                     stop   = round(center * (1 - config.GEO_ZONE_PCT) * 0.999, 4)
                     target = round(entry * (1 + config.GEO_TARGET_PCT), 4)
-                    _reco_target_pct = (target - entry) / entry if entry else None
                     self.memory.log_trade_open(
                         trade_id=str(uuid.uuid4()),
                         symbol=sym, side="buy",
@@ -153,9 +134,6 @@ class GeometricExpert:
                             "side": "long", "level": entry,
                             "stop": stop, "target": target,
                             "reconciled": True,
-                            "mode": self._mode_from_target_pct(_reco_target_pct),
-                            "broker_mode": self._broker_mode(),
-                            "target_pct_used": _reco_target_pct,
                         }
                     )
                     logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} qty={qty:.4f} entry={entry}")
@@ -236,45 +214,6 @@ class GeometricExpert:
             try: return json.loads(raw)
             except: return {}
         return raw
-
-    # ── Thread-safe accessors for _pending ────────────────────────────────────
-
-    def _pending_add(self, zk, data: dict):
-        with self._pending_lock:
-            self._pending[zk] = data
-
-    def _pending_del(self, zk):
-        with self._pending_lock:
-            self._pending.pop(zk, None)
-
-    def _pending_snapshot(self) -> dict:
-        with self._pending_lock:
-            return dict(self._pending)
-
-    def _pending_has(self, zk) -> bool:
-        with self._pending_lock:
-            return zk in self._pending
-
-    def _pending_len(self) -> int:
-        with self._pending_lock:
-            return len(self._pending)
-
-    def _pending_for_symbol(self, symbol: str) -> int:
-        with self._pending_lock:
-            return sum(1 for p in self._pending.values() if p.get("symbol") == symbol)
-
-    @staticmethod
-    def _mode_from_target_pct(target_pct: float) -> str:
-        """Mappe target_pct utilisé à l'entrée → label du mode stratégie."""
-        if target_pct is None: return "unknown"
-        if 0.004 <= target_pct <= 0.006: return "lowvol"
-        if 0.008 <= target_pct <= 0.010: return "normal"
-        if target_pct >= 0.014:          return "trend"
-        return "unknown"
-
-    @staticmethod
-    def _broker_mode() -> str:
-        return "paper" if getattr(config, "KRAKEN_PAPER", True) else "live"
 
     def _zone_key(self, center: float) -> float:
         mag = max(1, int(round(-np.log10(center * 0.001))))
@@ -413,18 +352,9 @@ class GeometricExpert:
         # Pool global
         open_count_global = len([t for t in self.memory.get_open_trades()
                                   if self._ctx(t).get("strategy_source") == "geo_v4"])
-        open_count_global += self._pending_len()
+        open_count_global += len(self._pending)
         if open_count_global >= config.GEO_MAX_SIM:
             logger.info(f"[GEO] Pool global plein ({open_count_global}/{config.GEO_MAX_SIM}) — skip {symbol}")
-            return
-
-        # Per-symbol cap: max 1 position+pending par symbole (anti-concentration)
-        symbol_active = sum(1 for t in self.memory.get_open_trades()
-                            if t.get("symbol") == symbol
-                            and self._ctx(t).get("strategy_source") == "geo_v4")
-        symbol_active += self._pending_for_symbol(symbol)
-        if symbol_active >= 1:
-            logger.info(f"[GEO] {symbol} déjà actif ({symbol_active}) — skip")
             return
 
         # Circuit-breaker 3% jour
@@ -449,56 +379,6 @@ class GeometricExpert:
             logger.info(f"[GEO] Capital insuffisant (${self.get_available():.0f})")
             return
 
-        # ── Crypto-native regime gate (PAPER validation) ──────────────────────
-        cr_decision = None
-        cr_allow_long  = True
-        cr_allow_short = True
-        cr_size_mult   = 1.0          # auto-switch from regime
-        cr_target_pct  = None         # None = keep legacy lowvol_target_pct
-        if self.crypto_regime is not None:
-            try:
-                cr_decision = self.crypto_regime.evaluate(symbol)
-            except Exception as e:
-                logger.warning(f"[CRYPTO_REGIME] evaluate({symbol}) failed: {e} — fail-safe block")
-                cr_decision = None
-            if cr_decision is not None:
-                min_conf = getattr(config, "CRYPTO_REGIME_MIN_CONFIDENCE", 50)
-                state      = cr_decision.get("state", "neutral")
-                conf       = cr_decision.get("confidence", 0)
-                dir_       = cr_decision.get("direction", 0)
-                eth_signal = cr_decision.get("eth_signal", "weak")
-                btc_state  = cr_decision.get("btc_state",  "unknown")
-                cr_allow_long  = bool(cr_decision.get("allow_long",  False))
-                cr_allow_short = bool(cr_decision.get("allow_short", False))
-                cr_size_mult   = float(cr_decision.get("size_multiplier", 0.0))
-                cr_target_pct_in = cr_decision.get("target_pct", 0.0)
-                if cr_target_pct_in and cr_target_pct_in > 0:
-                    cr_target_pct = float(cr_target_pct_in)
-                old_regime_label = (regime or "unknown").upper()
-                policy_reason = cr_decision.get("policy_reason", "—")
-                # Hard block: confidence too low OR policy disallows everything
-                block_all = not (cr_allow_long or cr_allow_short)
-                if block_all or conf < min_conf:
-                    logger.info(
-                        f"[CRYPTO_REGIME] {symbol} BLOCKED "
-                        f"old={old_regime_label} new={state} eth={eth_signal} btc={btc_state} "
-                        f"conf={conf:.0f} dir={dir_:+.2f} vol={cr_decision.get('vol_state')} "
-                        f"long={cr_allow_long} short={cr_allow_short} "
-                        f"reason=\"{policy_reason}\""
-                    )
-                    return
-                logger.info(
-                    f"[CRYPTO_REGIME] {symbol} ALLOWED "
-                    f"old={old_regime_label} new={state} eth={eth_signal} btc={btc_state} "
-                    f"conf={conf:.0f} dir={dir_:+.2f} long={cr_allow_long} short={cr_allow_short} "
-                    f"size×{cr_size_mult:.2f} tp={cr_target_pct or 'inherit'} "
-                    f"reason=\"{policy_reason}\""
-                )
-            else:
-                # Evaluator failed → fail-safe: block trading
-                logger.info(f"[CRYPTO_REGIME] {symbol} BLOCKED — evaluator returned None (fail-safe)")
-                return
-
         # ── Données communes (fetch une seule fois) ───────────────────────────
         bars_1h = self.broker.get_bars(symbol, "1Hour", limit=50)
         if bars_1h is None or bars_1h.empty or len(bars_1h) < 10:
@@ -516,8 +396,6 @@ class GeometricExpert:
         lows_15m   = bars_15m["low"].values
         closes_15m = bars_15m["close"].values
         closes_5m  = bars_5m["close"].values
-        lows_5m    = bars_5m["low"].values
-        highs_5m   = bars_5m["high"].values
         current    = float(closes_15m[-1])
         rsi_now    = _rsi(closes_5m, 14)
         ema5       = float(pd.Series(closes_5m).ewm(span=5,  adjust=False).mean().iloc[-1])
@@ -526,23 +404,14 @@ class GeometricExpert:
         support_zones    = self._find_zones(highs_15m, lows_15m, closes_15m, min_tests=1)
         resistance_zones = self._find_resistance_zones(highs_15m, lows_15m, closes_15m, min_tests=1)
 
-        low_vol_mode = (_r in ("choppy", "bull"))
-        lowvol_target_pct = getattr(config, "GEO_LOWVOL_TARGET_PCT", config.GEO_TARGET_PCT)
-        # Auto-switch : the crypto regime engine emits a target_pct per state
-        # (lowvol 0.005 → range_quiet, normal 0.009 → calm signals, trend 0.015 → aligned trends).
-        # When provided, override the legacy lowvol default so the strategy adapts.
-        if cr_target_pct is not None:
-            lowvol_target_pct = cr_target_pct
-        zone_gap = 0.0 if low_vol_mode else 0.0
-
         open_count = open_count_global
 
         # ── LONGS : bounce sur support ────────────────────────────────────────
         # Pas d'entrée long si downtrend 1h confirmé (LH + LL)
         lh = h1h[-1] < h1h[-4]; ll = l1h[-1] < l1h[-4]
-        if not (lh and ll) and _r not in ("bear", "panic") and cr_allow_long:
+        if not (lh and ll) and _r not in ("bear", "panic"):
             n_zones = len(support_zones)
-            n_dist = n_touches = n_pending = n_rsi = n_div = n_pass3b = n_risk = n_rr = 0
+            n_dist = n_touches = n_pending = n_rsi = n_div = n_ema = n_rr = 0
 
             for zone in support_zones:
                 if open_count >= config.GEO_MAX_SIM:
@@ -550,50 +419,36 @@ class GeometricExpert:
                 zk = self._zone_key(zone["center"])
 
                 dist_pct = (current - zone["high"]) / zone["high"]
-                dist_low  = -0.015 if low_vol_mode else -0.015
-                dist_high =  0.015 if low_vol_mode else  0.015
-                if not (dist_low <= dist_pct <= dist_high):
+                if not (-0.012 <= dist_pct <= 0.002):
                     n_dist += 1; continue
                 if self._touches[zk] >= config.GEO_MAX_TOUCHES:
                     n_touches += 1; continue
-                if self._pending_has(zk):
+                if zk in self._pending:
                     n_pending += 1; continue
                 if not (config.GEO_RSI_LOW <= rsi_now <= config.GEO_RSI_HIGH):
                     n_rsi += 1; continue
-                if not config.DEBUG_MODE:
-                    if not self._rsi_divergence(closes_5m, rsi_now):
-                        if not low_vol_mode:
-                            n_div += 1; continue
+                if not self._rsi_divergence(closes_5m, rsi_now):
+                    n_div += 1; continue
+                if ema5 < ema10 * 0.9985:
+                    n_ema += 1; continue
 
-                # Pass 3b exact: last 8 candles touched the entry zone,
-                # and the current 5m close is still above the zone low.
-                pass_3b = bool(np.any(lows_5m[-8:] <= zone["high"] + zone_gap) and closes_5m[-1] > zone["low"])
-                if not config.DEBUG_MODE:
-                    if not pass_3b:
-                        n_pass3b += 1; continue
+                stop = self._dynamic_stop(bars_5m["low"].values, zone["center"], zone["wick_low"])
 
-                stop = self._dynamic_stop(lows_5m, zone["center"], zone["wick_low"])
-
-                # TP lower in low-vol mode.
-                target = _smart_round(zone["high"] * (1 + lowvol_target_pct))
-
-                # Min R:R depuis fill probable (current). Le broker paper market-fill
-                # au current → si reward/risk depuis fill < seuil, c'est un trade
-                # asymétrique défavorable, skip.
-                actual_risk   = current - stop
-                actual_reward = target - current
-                min_rr        = getattr(config, "GEO_MIN_RR", 1.2)
-                if actual_risk <= 0 or actual_reward <= 0 or actual_reward / actual_risk < min_rr:
-                    n_rr += 1; continue
+                # TP = prochaine résistance au-dessus (R:R ~5:1)
+                res_above = [r for r in resistance_zones if r["low"] > zone["high"] * 1.002]
+                if res_above:
+                    target = _smart_round(res_above[0]["low"])
+                else:
+                    target = _smart_round(zone["high"] * 1.045)  # fallback +4.5%
 
                 risk   = abs(zone["high"] - stop)
                 reward = abs(target - zone["high"])
-                if risk <= 0:
-                    n_risk += 1; continue
+                if risk <= 0 or reward / risk < 4.5:
+                    n_rr += 1; continue
 
                 available = self.get_available()
                 if available < 30: break
-                deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT * cr_size_mult)
+                deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT)
                 limit_price = _smart_round(zone["high"])
                 if deploy / limit_price < 0.001: continue
 
@@ -605,26 +460,16 @@ class GeometricExpert:
                     continue
 
                 self._touches[zk] += 1
-                self._pending_add(zk, {
+                self._pending[zk] = {
                     "order_id": order_id, "symbol": symbol,
                     "level": zone["center"], "high": zone["high"],
                     "stop": stop, "target": target, "deploy": deploy,
                     "side": "long",
-                    "mode": self._mode_from_target_pct(lowvol_target_pct),
-                    "broker_mode": self._broker_mode(),
-                    "target_pct_used": float(lowvol_target_pct),
-                    "size_mult_used":  float(cr_size_mult),
-                    "crypto_regime":     (cr_decision or {}).get("state"),
-                    "crypto_confidence": (cr_decision or {}).get("confidence"),
-                    "crypto_direction":  (cr_decision or {}).get("direction"),
-                    "crypto_vol_state":  (cr_decision or {}).get("vol_state"),
-                    "crypto_eth_signal": (cr_decision or {}).get("eth_signal"),
-                    "crypto_btc_state":  (cr_decision or {}).get("btc_state"),
-                })
+                }
                 logger.info(
                     f"[GEO] 📋 LONG {symbol} @ ${limit_price:.4f} "
                     f"SL=${_smart_round(stop):.4f} TP=${_smart_round(target):.4f} "
-                    f"R:R={round(reward/risk,1)}x RSI={rsi_now:.0f} tests={zone['tests']} lowvol={low_vol_mode}"
+                    f"R:R={round(reward/risk,1)}x RSI={rsi_now:.0f} tests={zone['tests']}"
                 )
                 self._log_decision("BUY", symbol, limit_price, stop, target,
                                    reward/risk, _r, rsi_now, zone)
@@ -632,26 +477,24 @@ class GeometricExpert:
                     notify.trade_opened(symbol, "long", deploy/limit_price,
                                         limit_price, stop, target, reward/risk)
                 open_count += 1
-                break  # per-symbol cap : max 1 entrée par evaluate()
 
             if open_count == open_count_global:
                 parts = []
                 for label, val in [("dist",n_dist),("touches",n_touches),
                                    ("pending",n_pending),("rsi",n_rsi),
-                                   ("div",n_div),("pass3b",n_pass3b),
-                                   ("risk",n_risk),("rr",n_rr)]:
+                                   ("div",n_div),("ema",n_ema),("rr",n_rr)]:
                     if val: parts.append(f"{label}:{val}")
                 logger.info(
                     f"[GEO] {symbol} — no long | zones={n_zones} "
-                    f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'} lowvol={low_vol_mode}"
+                    f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'}"
                 )
 
         # ── SHORTS : bounce sur résistance ────────────────────────────────────
         # Pas d'entrée short si uptrend 1h fort (HH + HL)
         lh_up = h1h[-1] > h1h[-4]; ll_up = l1h[-1] > l1h[-4]
-        if not (lh_up and ll_up) and cr_allow_short:
+        if not (lh_up and ll_up) and _r not in ("bull",):
             n_res = len(resistance_zones)
-            n_dist_s = n_rsi_s = n_div_s = n_pass3b_s = n_risk_s = n_rr_s = 0
+            n_dist_s = n_rsi_s = n_div_s = n_ema_s = n_rr_s = 0
 
             for zone in resistance_zones:
                 if open_count >= config.GEO_MAX_SIM:
@@ -659,47 +502,38 @@ class GeometricExpert:
                 zk_s = -self._zone_key(zone["center"])  # clé négative pour shorts
 
                 dist_pct = (zone["low"] - current) / zone["low"]
-                dist_low_s  = -0.004 if low_vol_mode else -0.004
-                dist_high_s = 0.015 if low_vol_mode else 0.015
-                if not (dist_low_s <= dist_pct <= dist_high_s):
+                if not (-0.002 <= dist_pct <= 0.012):
                     n_dist_s += 1; continue
                 if self._touches[zk_s] >= config.GEO_MAX_TOUCHES:
                     continue
-                if self._pending_has(zk_s):
+                if zk_s in self._pending:
                     continue
-                if not (config.GEO_RSI_SHORT_LOW <= rsi_now <= config.GEO_RSI_SHORT_HIGH):
+                if not (35 <= rsi_now <= 80):
                     n_rsi_s += 1; continue
                 if not self._rsi_bearish_divergence(closes_5m, rsi_now):
                     n_div_s += 1; continue
-
-                # Pass 3b symmetry: recent highs test resistance, and price
-                # stays below the zone high on the current close.
-                pass_3b = bool(np.any(highs_5m[-8:] >= zone["low"] - zone_gap) and closes_5m[-1] < zone["high"])
-                if not pass_3b:
-                    n_pass3b_s += 1; continue
+                if ema5 > ema10 * 1.0015:
+                    n_ema_s += 1; continue
 
                 stop_s = self._dynamic_stop_short(
                     bars_5m["high"].values, zone["low"], zone["wick_high"]
                 )
 
-                # TP lower in low-vol mode.
-                target_s = _smart_round(zone["low"] * (1 - lowvol_target_pct))
-
-                # Min R:R depuis fill probable (symétrie longs).
-                actual_risk_s   = stop_s - current
-                actual_reward_s = current - target_s
-                min_rr          = getattr(config, "GEO_MIN_RR", 1.2)
-                if actual_risk_s <= 0 or actual_reward_s <= 0 or actual_reward_s / actual_risk_s < min_rr:
-                    n_rr_s += 1; continue
+                # TP = prochain support en-dessous (R:R ~5:1)
+                sup_below = [s for s in support_zones if s["high"] < zone["low"] * 0.998]
+                if sup_below:
+                    target_s = _smart_round(sup_below[0]["high"])
+                else:
+                    target_s = _smart_round(zone["low"] * 0.955)  # fallback -4.5%
 
                 risk_s   = abs(stop_s - zone["low"])
                 reward_s = abs(zone["low"] - target_s)
-                if risk_s <= 0:
-                    n_risk_s += 1; continue
+                if risk_s <= 0 or reward_s / risk_s < 4.5:
+                    n_rr_s += 1; continue
 
                 available = self.get_available()
                 if available < 30: break
-                deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT * cr_size_mult)
+                deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT)
                 limit_price = _smart_round(zone["low"])
                 if deploy / limit_price < 0.001: continue
 
@@ -711,26 +545,16 @@ class GeometricExpert:
                     continue
 
                 self._touches[zk_s] += 1
-                self._pending_add(zk_s, {
+                self._pending[zk_s] = {
                     "order_id": order_id, "symbol": symbol,
                     "level": zone["center"], "high": zone["high"],
                     "stop": stop_s, "target": target_s, "deploy": deploy,
                     "side": "short",
-                    "mode": self._mode_from_target_pct(lowvol_target_pct),
-                    "broker_mode": self._broker_mode(),
-                    "target_pct_used": float(lowvol_target_pct),
-                    "size_mult_used":  float(cr_size_mult),
-                    "crypto_regime":     (cr_decision or {}).get("state"),
-                    "crypto_confidence": (cr_decision or {}).get("confidence"),
-                    "crypto_direction":  (cr_decision or {}).get("direction"),
-                    "crypto_vol_state":  (cr_decision or {}).get("vol_state"),
-                    "crypto_eth_signal": (cr_decision or {}).get("eth_signal"),
-                    "crypto_btc_state":  (cr_decision or {}).get("btc_state"),
-                })
+                }
                 logger.info(
                     f"[GEO] 📋 SHORT {symbol} @ ${limit_price:.4f} "
                     f"SL=${stop_s:.4f} TP=${target_s:.4f} "
-                    f"R:R={round(reward_s/risk_s,1)}x RSI={rsi_now:.0f} tests={zone['tests']} lowvol={low_vol_mode}"
+                    f"R:R={round(reward_s/risk_s,1)}x RSI={rsi_now:.0f} tests={zone['tests']}"
                 )
                 self._log_decision("SELL", symbol, limit_price, stop_s, target_s,
                                    reward_s/risk_s, _r, rsi_now, zone)
@@ -738,26 +562,24 @@ class GeometricExpert:
                     notify.trade_opened(symbol, "short", deploy/limit_price,
                                         limit_price, stop_s, target_s, reward_s/risk_s)
                 open_count += 1
-                break  # per-symbol cap : max 1 entrée par evaluate()
 
             if open_count == open_count_global:
                 parts = []
                 for label, val in [("dist",n_dist_s),("rsi",n_rsi_s),
-                                   ("div",n_div_s),("pass3b",n_pass3b_s),
-                                   ("risk",n_risk_s),("rr",n_rr_s)]:
+                                   ("div",n_div_s),("ema",n_ema_s),("rr",n_rr_s)]:
                     if val: parts.append(f"{label}:{val}")
                 logger.info(
                     f"[GEO] {symbol} — no short | res_zones={n_res} "
-                    f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'} lowvol={low_vol_mode}"
+                    f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'}"
                 )
 
     # ── MANAGE PENDING ────────────────────────────────────────────────────────
 
     def manage_pending_orders(self):
         """Vérifie les ordres GTC en attente : fill → log trade.
-        SL + TP sont déjà attachés à l'ordre OKX → aucun ordre supplémentaire à placer.
-        Itère sur un snapshot pour éviter mutation concurrente avec evaluate()."""
-        for zk, p in self._pending_snapshot().items():
+        SL + TP sont déjà attachés à l'ordre OKX → aucun ordre supplémentaire à placer."""
+        for zk in list(self._pending.keys()):
+            p = self._pending[zk]
             try:
                 order = self.broker.get_order(p["symbol"], p["order_id"])
                 if order is None:
@@ -769,41 +591,30 @@ class GeometricExpert:
                     fill  = float(order.filled_avg_price or p.get("high", p["level"]))
                     qty   = float(order.filled_qty or 0)
                     symbol= p["symbol"]
-                    entry_side = p.get("side", "long")
-                    mem_side   = "buy" if entry_side == "long" else "sell"
-                    ctx_side   = "long" if entry_side == "long" else "short"
-                    logger.info(f"[GEO] ✅ FILLED: {symbol} {entry_side.upper()} @ ${fill:.4f} qty={qty:.4f}")
+                    logger.info(f"[GEO] ✅ FILLED: {symbol} @ ${fill:.4f} qty={qty:.4f}")
                     if self.memory:
                         self.memory.log_trade_open(
                             trade_id=str(uuid.uuid4()),
-                            symbol=symbol, side=mem_side,
+                            symbol=symbol, side="buy",
                             qty=qty, entry_price=fill,
                             stop_loss=p["stop"], take_profit=p["target"],
                             alpaca_order_id=p["order_id"],
                             market_context={
                                 "strategy_source": "geo_v4",
-                                "side":   ctx_side,
+                                "side":   "long",
                                 "level":  float(p["level"]),
                                 "stop":   float(p["stop"]),
                                 "target": float(p["target"]),
-                                "broker": config.ACTIVE_BROKER,
-                                "mode":   p.get("mode", "unknown"),
-                                "broker_mode": p.get("broker_mode", self._broker_mode()),
-                                "target_pct_used":   p.get("target_pct_used"),
-                                "size_mult_used":    p.get("size_mult_used"),
-                                "crypto_regime":     p.get("crypto_regime"),
-                                "crypto_confidence": p.get("crypto_confidence"),
-                                "crypto_direction":  p.get("crypto_direction"),
-                                "crypto_vol_state":  p.get("crypto_vol_state"),
-                                "crypto_eth_signal": p.get("crypto_eth_signal"),
-                                "crypto_btc_state":  p.get("crypto_btc_state"),
+                                "broker": "okx",
                             }
                         )
-                    self._pending_del(zk)
+                    entry_side = p.get("side", "long")
+                    order_side = "buy" if entry_side == "long" else "sell"
+                    del self._pending[zk]
 
                 elif state in ("cancelled", "expired", "rejected"):
                     logger.info(f"[GEO] 🗑 Order {state}: {p['symbol']}")
-                    self._pending_del(zk)
+                    del self._pending[zk]
 
                 else:  # "live" ou "partially_filled"
                     # Vérifier si le niveau est cassé → annuler
@@ -816,7 +627,7 @@ class GeometricExpert:
                         if broken:
                             logger.info(f"[GEO] 🚫 Niveau cassé {p['symbol']} ({p_side}) — annulation")
                             self._cancel_order(p["symbol"], p["order_id"])
-                            self._pending_del(zk)
+                            del self._pending[zk]
 
             except Exception as e:
                 logger.debug(f"[GEO] manage_pending {p.get('symbol')}: {e}")
@@ -836,8 +647,6 @@ class GeometricExpert:
             open_trades      = self.memory.get_open_trades()
             now_utc          = datetime.datetime.now(datetime.timezone.utc)
             native_brackets  = getattr(self.broker, "NATIVE_BRACKETS", True)
-            current_regime   = self.regime.get_cache().get("regime") if hasattr(self.regime, "get_cache") else None
-            low_vol_mode     = current_regime in ("choppy", "bull")
 
             for t in open_trades:
                 ctx = self._ctx(t)
@@ -917,16 +726,16 @@ class GeometricExpert:
                         self.memory.log_trade_close(trade_id, live, reason, pnl=pnl)
                     continue
 
-                # ── 3. Time-stop : default 2h, low-vol 1h ─────────────────────
+                # ── 3. Time-stop : > 4h ────────────────────────────────────────
                 try:
-                    timeout_min = getattr(config, "GEO_LOWVOL_TIMEOUT_MIN", TIMEOUT_MIN) if low_vol_mode else TIMEOUT_MIN
                     elapsed_min = (now_utc - entry_dt).total_seconds() / 60
-                    if elapsed_min >= timeout_min:
+                    if elapsed_min >= TIMEOUT_MIN:
                         pos     = broker_positions[symbol]
                         curr_px = float(pos.current_price)
-                        logger.info(f"[GEO] ⏰ TIME-STOP {trade_side} {symbol} après {elapsed_min:.0f}min (lowvol={low_vol_mode})")
+                        qty_p   = float(pos.qty)
+                        logger.info(f"[GEO] ⏰ TIME-STOP {trade_side} {symbol} après {elapsed_min:.0f}min")
                         if self.broker.close_position(symbol):
-                            pnl = mult * (curr_px - entry) * qty_t
+                            pnl = mult * (curr_px - entry) * qty_p
                             self.memory.log_trade_close(trade_id, curr_px, "timeout", pnl=pnl)
                 except Exception as e:
                     logger.error(f"[GEO] time-stop {symbol}: {e}")

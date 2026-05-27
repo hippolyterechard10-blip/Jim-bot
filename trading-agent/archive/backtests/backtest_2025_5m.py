@@ -34,9 +34,14 @@ MAX_TOUCHES = 2
 RSI_LOW     = 20
 RSI_HIGH    = 65
 TARGET_PCT  = 0.009
+LOWVOL_TARGET_PCT = 0.005
 TIMEOUT_B   = 48   # 48 barres × 5min = 4h
+LOWVOL_TIMEOUT_B = 24
 WARMUP_DAYS = 90   # 3 mois de warmup pour les zones
 CACHE_DIR   = "binance_us_cache_2025"
+# Provisional fee model for Kraken-Pro-like conditions until exact tier is confirmed.
+FEE_MAKER = 0.0025
+FEE_TAKER = 0.0040
 
 PERIODS = [
     ("2025 Q1 (Jan–Fév)",   "2025-01-01", "2025-03-01"),
@@ -200,7 +205,7 @@ def get_signal_fast(sym, i5, arr5, arr15, arr1h):
     return None
 
 # ── BACKTEST ──────────────────────────────────────────────────────────────────
-def run(symbols, all_data, test_start_ts):
+def run(symbols, all_data, test_start_ts, lowvol=False):
     # Pré-calcul des arrays numpy pour accès rapide
     arrays = {}
     for sym in symbols:
@@ -261,18 +266,30 @@ def run(symbols, all_data, test_start_ts):
             ni   = pm[t_next]
             arr  = arrays[sym]
             hi = arr["h5"][ni]; lo = arr["l5"][ni]; cl = arr["c5"][ni]
-            sh = lo <= p["stop"]; th = hi >= p["target"]; to = (i - p["bar"]) >= TIMEOUT_B
+            sh = lo <= p["stop"]; th = hi >= p["target"]
+            timeout_b = LOWVOL_TIMEOUT_B if p.get("lowvol") else TIMEOUT_B
+            to = (i - p["bar"]) >= timeout_b
             ep = er = None
             if sh and th: ep, er = p["stop"],   "stop"
             elif sh:      ep, er = p["stop"],   "stop"
             elif th:      ep, er = p["target"], "target"
             elif to:      ep, er = cl,          "timeout"
             if ep:
-                pnl = (ep - p["entry"]) * p["qty"]
+                gross = (ep - p["entry"]) * p["qty"]
+                entry_notional = p["entry"] * p["qty"]
+                exit_notional  = ep * p["qty"]
+                entry_fee = entry_notional * FEE_MAKER
+                exit_fee  = exit_notional * (FEE_MAKER if er == "target" else FEE_TAKER)
+                pnl = gross - entry_fee - exit_fee
                 capital += pnl
+                trade_r = pnl / p["risk_usdt"] if p.get("risk_usdt") else 0.0
                 trades.append({
                     "sym": sym, "entry": p["entry"], "exit": ep,
-                    "pnl": round(pnl, 4), "reason": er, "day": t_now.date(),
+                    "gross_pnl": round(gross, 4), "pnl": round(pnl, 4),
+                    "fees": round(entry_fee + exit_fee, 4),
+                    "fee_model": f"maker/{'maker' if er == 'target' else 'taker'}",
+                    "reason": er, "day": t_now.date(),
+                    "r": round(trade_r, 4), "lowvol": bool(p.get("lowvol")),
                 })
                 del open_pos[zk]
 
@@ -310,22 +327,35 @@ def run(symbols, all_data, test_start_ts):
             if lo_next <= zone["high"]:
                 fill = min(op_next, zone["center"])
                 qty  = (CAPITAL * POS_PCT) / fill
+                risk_usdt = abs(fill - sig["stop"]) * qty
                 touches[key] += 1
                 open_pos[key] = {
                     "sym": sym, "entry": fill,
                     "stop": sig["stop"], "target": sig["target"],
                     "qty": qty, "bar": i,
+                    "risk_usdt": risk_usdt,
+                    "lowvol": lowvol,
                 }
 
     for key, p in open_pos.items():
         sym  = p["sym"]
         last = float(arrays[sym]["c5"][-1])
-        pnl  = (last - p["entry"]) * p["qty"]
+        gross = (last - p["entry"]) * p["qty"]
+        entry_notional = p["entry"] * p["qty"]
+        exit_notional  = last * p["qty"]
+        entry_fee = entry_notional * FEE_MAKER
+        exit_fee  = exit_notional * FEE_MAKER
+        pnl  = gross - entry_fee - exit_fee
         capital += pnl
+        trade_r = pnl / p["risk_usdt"] if p.get("risk_usdt") else 0.0
         trades.append({
             "sym": sym, "entry": p["entry"], "exit": last,
-            "pnl": round(pnl, 4), "reason": "end",
+            "gross_pnl": round(gross, 4), "pnl": round(pnl, 4),
+            "fees": round(entry_fee + exit_fee, 4),
+            "fee_model": "maker/maker-end",
+            "reason": "end",
             "day": ref_idx[-1].date(),
+            "r": round(trade_r, 4), "lowvol": bool(p.get("lowvol")),
         })
 
     return trades, capital
@@ -337,6 +367,8 @@ def stats(trades, capital, days):
     wins   = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
     total  = sum(t["pnl"] for t in trades)
+    gross_total = sum(t.get("gross_pnl", t["pnl"]) for t in trades)
+    fees_total  = sum(t.get("fees", 0) for t in trades)
     wr     = len(wins) / n * 100
     sum_l  = sum(t["pnl"] for t in losses)
     pf     = abs(sum(t["pnl"] for t in wins) / sum_l) if sum_l else 99.0
@@ -349,11 +381,25 @@ def stats(trades, capital, days):
     touts  = len([t for t in trades if t["reason"] == "timeout"])
     avg_w  = sum(t["pnl"] for t in wins)  / len(wins)   if wins   else 0
     avg_l  = sum(t["pnl"] for t in losses)/ len(losses) if losses else 0
+    avg_r  = sum(t.get("r", 0) for t in trades) / n
+    wins_r = [t.get("r", 0) for t in trades if t["pnl"] > 0]
+    losses_r = [t.get("r", 0) for t in trades if t["pnl"] <= 0]
+    exp_gross = (wr/100 * avg_w) + ((100-wr)/100 * avg_l)
+    net_exp_per_trade = total / n
+    fee_drag_pct = (fees_total / gross_total * 100) if gross_total else 0
     return {
         "n": n, "wr": round(wr, 1), "pf": round(pf, 2),
-        "total": round(total, 2), "ann": round(ann, 1), "mdd": round(mdd, 1),
+        "total": round(total, 2), "gross_total": round(gross_total, 2),
+        "fees_total": round(fees_total, 2),
+        "fee_drag_pct": round(fee_drag_pct, 1),
+        "ann": round(ann, 1), "mdd": round(mdd, 1),
         "stops": stops, "targets": tgts, "timeouts": touts,
         "avg_win": round(avg_w, 4), "avg_loss": round(avg_l, 4),
+        "avg_r": round(avg_r, 4),
+        "exp_gross": round(exp_gross, 4),
+        "net_expectancy": round(net_exp_per_trade, 4),
+        "avg_r_win": round(sum(wins_r)/len(wins_r), 4) if wins_r else 0,
+        "avg_r_loss": round(sum(losses_r)/len(losses_r), 4) if losses_r else 0,
     }
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
