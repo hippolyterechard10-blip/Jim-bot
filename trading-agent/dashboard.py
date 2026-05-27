@@ -1679,7 +1679,7 @@ header{
 
   <!-- Regime -->
   <div class="card" style="animation-delay:.12s">
-    <div class="sec-label">Market Regime</div>
+    <div class="sec-label">Crypto Market State <span style="color:var(--text3);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— ETH/SOL crypto-native regime</span></div>
     <div class="regime-panel">
       <div class="regime-ring ring-neutral" id="reg-ring"><span id="reg-icon">◔</span></div>
       <div class="regime-name regime-name-neutral" id="reg-name">—</div>
@@ -1784,10 +1784,15 @@ setInterval(tick, 1000); tick();
 
 /* ── Regime ─────────────────────────────────────────────────────────────── */
 async function loadRegime() {
-  const d = await api('/api/regime');
-  if (!d) return;
-  const r = (d.regime || 'UNKNOWN').toUpperCase();
-  const pill = $('regime-pill');
+  // Fetch BOTH the macro (legacy VIX/SPY) and crypto regime in parallel.
+  // The header pill + mid-grid Regime card now reflect CRYPTO state — macro
+  // VIX is shown as small secondary context only.
+  const [macro, crypto] = await Promise.all([
+    api('/api/regime'),
+    api('/api/crypto-regime'),
+  ]);
+
+  const pill  = $('regime-pill');
   const ring  = $('reg-ring');
   const name  = $('reg-name');
   const icon  = $('reg-icon');
@@ -1795,20 +1800,68 @@ async function loadRegime() {
   const vixEl = $('reg-vix');
   const vixV  = $('reg-vix-val');
 
-  $('regime-pill-text').textContent = r;
-  pill.className = 'regime-pill ' + (r==='BULL'?'rp-bull':r==='BEAR'||r==='PANIC'?'rp-bear':'rp-neutral');
-  ring.className  = 'regime-ring ' + (r==='BULL'?'ring-bull':r==='BEAR'||r==='PANIC'?'ring-bear':'ring-neutral');
-  name.className  = 'regime-name ' + (r==='BULL'?'regime-name-bull':r==='BEAR'||r==='PANIC'?'regime-name-bear':'regime-name-neutral');
-  name.textContent = r;
+  // Default safe state
+  let headerLabel = '—';
+  let headerCls   = 'rp-neutral';
+  let ringCls     = 'ring-neutral';
+  let nameCls     = 'regime-name-neutral';
+  let nameText    = '—';
+  let iconText    = '◔';
+  let descText    = 'En attente du régime crypto…';
 
-  if (r==='BULL')       { icon.textContent='↗'; desc.textContent='Tendance haussière confirmée — conditions favorables aux longs'; }
-  else if (r==='BEAR')  { icon.textContent='↘'; desc.textContent='Tendance baissière — le bot passe en mode défensif'; }
-  else if (r==='PANIC') { icon.textContent='⚡'; desc.textContent='Panique détectée — circuit breaker actif, pas de nouveaux trades'; }
-  else                  { icon.textContent='◔'; desc.textContent='Régime indéterminé — analyse des données en cours'; }
+  if (crypto && crypto.enabled && crypto.by_symbol) {
+    const symbols = Object.values(crypto.by_symbol);
+    if (symbols.length > 0) {
+      const anyLong   = symbols.some(s => s.allow_long);
+      const anyShort  = symbols.some(s => s.allow_short);
+      const allBlock  = symbols.every(s => !s.allow_long && !s.allow_short);
 
-  if (d.vix !== null && d.vix !== undefined) {
+      // Color the pill by directional bias
+      if (anyLong && !anyShort)        { headerCls='rp-bull';    ringCls='ring-bull';    nameCls='regime-name-bull';    iconText='↗'; }
+      else if (anyShort && !anyLong)   { headerCls='rp-bear';    ringCls='ring-bear';    nameCls='regime-name-bear';    iconText='↘'; }
+      else if (anyLong && anyShort)    { headerCls='rp-neutral'; ringCls='ring-neutral'; nameCls='regime-name-neutral'; iconText='⇅'; }
+      else                              { headerCls='rp-neutral'; ringCls='ring-neutral'; nameCls='regime-name-neutral'; iconText='◔'; }
+
+      // Header pill : compact symbol summary "ETH↓80 SOL↓75"
+      headerLabel = symbols.map(s => {
+        const sym = (s.symbol || '').split('/')[0];
+        const d   = s.direction || 0;
+        const arr = d > 0.3 ? '↑' : d < -0.3 ? '↓' : '·';
+        return `${sym}${arr}${Math.abs((s.confidence || 0)).toFixed(0)}`;
+      }).join(' ');
+
+      // Mid-grid card : worst-state symbol as primary, full text
+      // Pick the symbol with lowest confidence (most uncertain)
+      const primary = [...symbols].sort((a,b) => (a.confidence||0) - (b.confidence||0))[0];
+      const state    = primary.state || 'unknown';
+      const conf     = primary.confidence || 0;
+      const dir      = primary.direction || 0;
+      const ethSig   = primary.eth_signal || '—';
+      const btc      = primary.btc_state || '—';
+      const reason   = primary.policy_reason || '';
+
+      nameText = state.replace(/_/g,' ');
+      descText = `${(primary.symbol||'').split('/')[0]} dir ${dir>0?'+':''}${dir.toFixed(2)} · conf ${conf.toFixed(0)} · eth=${ethSig} · btc=${btc}`;
+      if (allBlock) descText += ' · no trade';
+    }
+  } else if (crypto && !crypto.enabled) {
+    headerLabel = 'crypto gate OFF';
+    descText    = 'Crypto regime gate disabled — old VIX/SPY regime active';
+  }
+
+  // Apply
+  $('regime-pill-text').textContent = headerLabel;
+  pill.className = 'regime-pill ' + headerCls;
+  ring.className = 'regime-ring ' + ringCls;
+  name.className = 'regime-name ' + nameCls;
+  name.textContent = nameText;
+  icon.textContent = iconText;
+  desc.textContent = descText;
+
+  // VIX as small footnote (macro context)
+  if (macro && macro.vix !== null && macro.vix !== undefined) {
     vixEl.style.display = 'inline-flex';
-    vixV.textContent = parseFloat(d.vix).toFixed(1);
+    vixV.textContent = `${parseFloat(macro.vix).toFixed(1)} · macro ${(macro.regime||'?').toLowerCase()}`;
   }
 }
 
