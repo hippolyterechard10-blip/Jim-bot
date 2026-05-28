@@ -146,7 +146,23 @@ def _vol_quality_factor(vol_state: str) -> float:
 
 # ─── Bars cache ───────────────────────────────────────────────────────────────
 
-def _cached_bars(broker, symbol: str, tf: str, limit: int):
+def _cached_bars(broker, symbol: str, tf: str, limit: int, as_of=None):
+    """Live mode (as_of=None): TTL-cached call to broker.get_bars(symbol, tf, limit).
+    Offline mode (as_of=timestamp): bypass module cache, call broker.get_bars(symbol, tf, limit, as_of=as_of)
+    Backtester is expected to manage its own slicing."""
+    if as_of is not None:
+        try:
+            bars = broker.get_bars(symbol, tf, limit=limit, as_of=as_of)
+        except TypeError:
+            # Fallback if broker.get_bars doesn't yet accept as_of
+            bars = broker.get_bars(symbol, tf, limit=limit)
+        except Exception as e:
+            logger.warning(f"[CRYPTO_REGIME] get_bars({symbol},{tf},as_of={as_of}) failed: {e}")
+            return None
+        if bars is None or len(bars) == 0:
+            return None
+        return bars
+
     key = (symbol, tf)
     now = time.time()
     if key in _CACHE:
@@ -201,7 +217,7 @@ def _fetch_btc_kraken(interval: str = "4h", limit: int = 50) -> tuple | None:
     return highs, lows, closes
 
 
-def _classify_btc() -> tuple[str, dict]:
+def _classify_btc(fetch_btc=None, as_of=None) -> tuple[str, dict]:
     """Classify BTC into one of 5 states:
         unknown    : fetch fail or invalid data
         calm       : small move, low/normal vol
@@ -210,22 +226,35 @@ def _classify_btc() -> tuple[str, dict]:
         chaos      : large move + extreme vol OR no direction
     Returns (state_label, debug_info). State carries directional information
     AND structural quality — caller maps it to a trading policy.
+
+    Live mode (fetch_btc=None, as_of=None): use TTL-cached default fetcher.
+    Offline mode (fetch_btc=callable, as_of=timestamp): bypass module cache,
+    use custom fetcher (typically a closure over preloaded historical bars).
     """
     global _BTC_CACHE
-    now = time.time()
-    if _BTC_CACHE and (now - _BTC_CACHE["ts"]) < _BTC_CACHE_TTL:
-        return _BTC_CACHE["state"], _BTC_CACHE["info"]
+    offline = as_of is not None
 
-    fetched = _fetch_btc_kraken("4h", limit=50)
+    if not offline:
+        now = time.time()
+        if _BTC_CACHE and (now - _BTC_CACHE["ts"]) < _BTC_CACHE_TTL:
+            return _BTC_CACHE["state"], _BTC_CACHE["info"]
+
+    fetcher = fetch_btc or _fetch_btc_kraken
+    try:
+        fetched = fetcher("4h", limit=50, as_of=as_of) if offline else fetcher("4h", limit=50)
+    except TypeError:
+        fetched = fetcher("4h", limit=50)
     if fetched is None:
         info = {"available": False, "source": "kraken_futures", "error": "fetch_failed"}
-        _BTC_CACHE = {"ts": now, "state": "unknown", "info": info}
+        if not offline:
+            _BTC_CACHE = {"ts": time.time(), "state": "unknown", "info": info}
         return "unknown", info
 
     highs, lows, closes = fetched
     if closes[-4] <= 0 or closes[-1] <= 0 or len(closes) < 30:
         info = {"available": False, "source": "kraken_futures", "error": "insufficient_data"}
-        _BTC_CACHE = {"ts": now, "state": "unknown", "info": info}
+        if not offline:
+            _BTC_CACHE = {"ts": time.time(), "state": "unknown", "info": info}
         return "unknown", info
 
     move_4bars = (closes[-1] - closes[-4]) / closes[-4]
@@ -247,14 +276,15 @@ def _classify_btc() -> tuple[str, dict]:
 
     info = {
         "available":  True,
-        "source":     "kraken_futures",
+        "source":     "offline_backtest" if offline else "kraken_futures",
         "symbol":     "PF_XBTUSD",
         "last_close": round(closes[-1], 2),
         "move_4bars": round(move_4bars * 100, 2),
         "atr_pct":    round(atr_pct * 100, 3),
         "adx_4h":     round(adx_4h, 1),
     }
-    _BTC_CACHE = {"ts": now, "state": state, "info": info}
+    if not offline:
+        _BTC_CACHE = {"ts": time.time(), "state": state, "info": info}
     return state, info
 
 
@@ -359,16 +389,29 @@ def _decide_policy(eth_signal: str, btc_state: str, vol_state: str,
 # ─── Main class ───────────────────────────────────────────────────────────────
 
 class CryptoRegime:
-    """Crypto-native regime evaluator. One per process is enough."""
+    """Crypto-native regime evaluator. One per process is enough.
 
-    def __init__(self, broker):
+    Live mode (default): broker is the live runtime broker; fetch_btc=None uses
+    the module-level Kraken Futures public chart API.
+
+    Offline mode (backtest): broker must implement get_bars(symbol, tf, limit, as_of=ts);
+    fetch_btc must be a callable fetcher(interval, limit, as_of=ts) returning
+    (highs, lows, closes). Pass as_of= to evaluate() to mark the historical timestamp.
+    """
+
+    def __init__(self, broker, fetch_btc=None):
         self.broker = broker
+        self._fetch_btc = fetch_btc
 
-    def evaluate(self, symbol: str) -> dict:
+    def evaluate(self, symbol: str, as_of=None) -> dict:
         """Evaluate regime for one symbol. Returns the full decision dict.
-        Also writes to _LAST_EVAL[symbol] for dashboard consumption."""
-        bars_4h = _cached_bars(self.broker, symbol, "4Hour", limit=80)
-        bars_1h = _cached_bars(self.broker, symbol, "1Hour", limit=80)
+        Also writes to _LAST_EVAL[symbol] for dashboard consumption.
+
+        as_of=None → live mode (TTL cache active).
+        as_of=timestamp → offline backtest mode (module cache bypassed,
+        broker.get_bars and self._fetch_btc must accept as_of)."""
+        bars_4h = _cached_bars(self.broker, symbol, "4Hour", limit=80, as_of=as_of)
+        bars_1h = _cached_bars(self.broker, symbol, "1Hour", limit=80, as_of=as_of)
 
         # Defensive: if data missing, return safe neutral
         if bars_4h is None or len(bars_4h) < 55 or bars_1h is None or len(bars_1h) < 55:
@@ -412,8 +455,9 @@ class CryptoRegime:
         confidence = 100.0 * abs(direction) * struct_agreement * vol_factor * (0.5 + 0.5 * adx_factor)
         confidence = max(0.0, min(100.0, confidence))
 
-        # BTC classification (direct Kraken Futures API)
-        btc_state, btc_dbg = _classify_btc()
+        # BTC classification (direct Kraken Futures API in live mode,
+        # injected fetcher + historical as_of in offline mode)
+        btc_state, btc_dbg = _classify_btc(fetch_btc=self._fetch_btc, as_of=as_of)
         btc_known = btc_state != "unknown"
         btc_bias = _btc_directional_bias(btc_state)
 
