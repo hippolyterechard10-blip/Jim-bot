@@ -232,6 +232,92 @@ def _dyn_stop_short(highs_5m, entry_level, wick_high):
     return max(ceil_, recent_high) * 1.002
 
 
+def _ema_array(closes, period):
+    """Returns the full EMA series (same length as input)."""
+    n = len(closes)
+    if n == 0: return np.array([])
+    a = 2.0 / (period + 1)
+    out = np.empty(n)
+    out[0] = closes[0]
+    for i in range(1, n):
+        out[i] = closes[i] * a + out[i-1] * (1 - a)
+    return out
+
+
+def _atr_array(highs, lows, closes, period=14):
+    """Returns ATR series (Wilder smoothing). Returns last value only for simplicity."""
+    n = len(closes)
+    if n < period + 1: return 0.0
+    tr = np.zeros(n)
+    tr[0] = highs[0] - lows[0]
+    for i in range(1, n):
+        tr[i] = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1])
+        )
+    atr = np.mean(tr[1:period+1])
+    for i in range(period+1, n):
+        atr = (atr * (period - 1) + tr[i]) / period
+    return float(atr)
+
+
+def _swing_high_5m(highs_5m, lookback=8):
+    """Index relatif du swing high local sur les `lookback` derniers bars 5m + valeur."""
+    if len(highs_5m) < lookback: return None, None
+    sub = highs_5m[-lookback:]
+    idx_rel = int(np.argmax(sub))
+    return idx_rel, float(sub[idx_rel])
+
+
+def _swing_low_1h(lows_1h, lookback=10):
+    """Plus bas swing low sur lookback 1h bars."""
+    if len(lows_1h) < lookback: return None
+    sub = lows_1h[-lookback:]
+    return float(np.min(sub))
+
+
+def _nearest_support_1h_below(lows_1h, current_price, lookback=20, min_dist_pct=0.001):
+    """Find the NEAREST pivot low 1h that is just below current_price.
+
+    Returns the local-min pivot closest to current_price from below.
+    This is the "support to break" — what T3 cares about, NOT the absolute plancher.
+    """
+    if len(lows_1h) < 5: return None
+    sub = lows_1h[-lookback:]
+    pivots = []
+    for i in range(2, len(sub) - 2):
+        if sub[i] < sub[i-1] and sub[i] < sub[i-2] and sub[i] < sub[i+1] and sub[i] < sub[i+2]:
+            if sub[i] < current_price * (1 - min_dist_pct):
+                pivots.append(sub[i])
+    if not pivots: return None
+    return max(pivots)    # closest below (highest among those < current)
+
+
+def _find_next_lower_support(lows_1h, current_price, lookback=50, max_dist_pct=0.05):
+    """Find next 1h support below current_price, within max_dist_pct."""
+    if len(lows_1h) < 5: return None
+    sub = lows_1h[-lookback:]
+    # find local minima (pivot lows)
+    pivots = []
+    for i in range(2, len(sub) - 2):
+        if sub[i] < sub[i-1] and sub[i] < sub[i-2] and sub[i] < sub[i+1] and sub[i] < sub[i+2]:
+            if sub[i] < current_price * 0.998:    # at least 0.2% below
+                if (current_price - sub[i]) / current_price <= max_dist_pct:
+                    pivots.append(sub[i])
+    if not pivots: return None
+    # closest below
+    return max(pivots)
+
+
+def _rsi_at(closes, idx_rel_from_end, period=14):
+    """RSI calculé sur closes[: -idx_rel_from_end] (idx_rel_from_end ≥ 0)."""
+    if idx_rel_from_end <= 0:
+        return _rsi(closes, period)
+    sub = closes[:-idx_rel_from_end] if idx_rel_from_end > 0 else closes
+    return _rsi(sub, period)
+
+
 # ─── SHARED POOL (P3) ─────────────────────────────────────────────────────────
 
 class SharedPool:
@@ -259,7 +345,7 @@ class SharedPool:
         return {"deploy": deploy, "cap_factor": cap_f}
 
     def open(self, expert_id, thesis_id, symbol, side, deploy, entry_price,
-             stop, target, bar_idx, fee_entry):
+             stop, target, bar_idx, fee_entry, timeout_bars=None):
         pid = self.next_id; self.next_id += 1
         qty = deploy / entry_price
         self.open_positions.append({
@@ -267,6 +353,7 @@ class SharedPool:
             "symbol": symbol, "side": side,
             "deploy": deploy, "entry": entry_price, "stop": stop, "target": target,
             "bar_idx": bar_idx, "qty": qty, "fee_entry": fee_entry,
+            "timeout_bars": timeout_bars,    # None = default global TIMEOUT_BARS
         })
         return pid
 
@@ -363,60 +450,343 @@ def get_short_signal_t1(arr_5m, arr_15m, arr_1h):
     return None
 
 
-# STUBS — to be implemented in Phase 1c
+# ─── T2: TREND FOLLOW (pullback EMA20 1h in trend_down_smooth) ────────────────
+
+# T2 params
+T2_PULLBACK_BUFFER_PCT = 0.002    # 0.2%
+T2_SWING_LOOKBACK_1H   = 10
+T2_STOP_BUFFER_PCT     = 0.003    # 0.3%
+T2_TIMEOUT_MIN         = 90
+T2_RSI_5M_MAX          = 70
+T2_TARGET_PCT_DEFAULT  = 0.015    # fallback if regime doesn't carry target_pct
+T2_INITIAL_CAP         = 0.7
+
+
 def get_short_signal_t2(arr_5m, arr_15m, arr_1h, regime_decision):
-    """T2 trend-follow short. Pullback to EMA20 1h in trend_down_smooth."""
-    return None
+    """T2 trend-follow short: pullback to EMA20 1h in trend_down_smooth.
+
+    Spec: shared/trading/short-thesis-t2-trend-follow.md
+    """
+    h5, l5, c5, v5 = arr_5m
+    h15, l15, c15 = arr_15m
+    h1h, l1h = arr_1h
+    if len(c5) < 30 or len(h1h) < 25: return None
+
+    # Need 1h closes for EMA — we infer from highs+lows midpoint or use a separate
+    # series. For simplicity use a synthetic close = (high+low)/2 1h.
+    # Better: backtester should pass 1h closes. For now reconstruct typical price.
+    closes_1h = (h1h + l1h) / 2.0    # approximation, refined when c1h is plumbed in
+
+    # 1. EMA20 1h
+    ema20_1h_series = _ema_array(closes_1h, 20)
+    ema20_1h = float(ema20_1h_series[-1])
+
+    # 2. Slope EMA20 1h DESCENDANT on last 6 bars
+    if len(ema20_1h_series) < 6: return None
+    if ema20_1h_series[-1] >= ema20_1h_series[-6]: return None
+
+    # 3. Pullback to EMA20 1h: high_5m_last_3 >= ema20_1h * (1 - buffer)
+    #    AND current_close < ema20_1h
+    recent_high_5m = float(np.max(h5[-3:]))
+    current_close  = float(c5[-1])
+    threshold      = ema20_1h * (1 - T2_PULLBACK_BUFFER_PCT)
+    if recent_high_5m < threshold: return None
+    if current_close >= ema20_1h: return None
+
+    # 4. RSI 5m ∈ [40, 70]
+    cl5 = c5[-30:]
+    rsi = _rsi(cl5, 14)
+    if not (40 <= rsi <= T2_RSI_5M_MAX): return None
+
+    # 5. RSI 5m not surachat persistent — last 3 bars not all > 70
+    rsi_prev1 = _rsi(c5[:-1][-30:], 14) if len(c5) > 30 else rsi
+    if rsi_prev1 > T2_RSI_5M_MAX + 5: return None
+
+    # 6. Volume present: last bar 5m >= 50% avg(20)
+    if len(v5) >= 21:
+        avgv = float(np.mean(v5[-21:-1]))
+        if avgv > 0 and v5[-1] < avgv * 0.5: return None
+
+    # 7. Swing high 1h on lookback for stop placement
+    swing_high_1h = float(np.max(h1h[-T2_SWING_LOOKBACK_1H:]))
+
+    # 8. Stop placement
+    stop_raw = max(swing_high_1h, current_close * 1.008) * (1 + T2_STOP_BUFFER_PCT)
+
+    # 9. Target = current * (1 - target_pct from regime, fallback default)
+    tp = float(regime_decision.get("target_pct") or T2_TARGET_PCT_DEFAULT)
+    if tp <= 0: tp = T2_TARGET_PCT_DEFAULT
+    target = current_close * (1 - tp)
+
+    # 10. R:R check
+    risk   = stop_raw - current_close
+    reward = current_close - target
+    if risk <= 0 or reward <= 0 or reward / risk < MIN_RR: return None
+
+    return {
+        "thesis": "T2", "side": "short",
+        "entry": current_close, "stop": stop_raw, "target": target,
+        "ema20_1h": ema20_1h, "swing_high_1h": swing_high_1h,
+        "timeout_min": T2_TIMEOUT_MIN, "size_cap": T2_INITIAL_CAP,
+    }
+
+
+# ─── T3: BREAKDOWN (support break with volume) ────────────────────────────────
+
+T3_BREAKDOWN_BUFFER_PCT = 0.002    # 0.2%
+T3_VOLUME_MULTIPLIER    = 1.5
+T3_SUPPORT_LOOKBACK_1H  = 10
+T3_RETEST_BUFFER_PCT    = 0.005    # 0.5%
+T3_TARGET_PCT_FIXED     = 0.020    # TG3-B
+T3_MIN_RR               = 1.5
+T3_TIMEOUT_MIN          = 60
+T3_RSI_5M_MAX           = 50
+T3_INITIAL_CAP          = 0.5
 
 
 def get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision):
-    """T3 breakdown short. Break of recent 1h support with volume confirm."""
-    return None
+    """T3 breakdown short: 1h support break with volume confirm.
+
+    Spec: shared/trading/short-thesis-t3-breakdown.md
+    Uses TG3-B target variant (fixed pct from entry).
+    """
+    h5, l5, c5, v5 = arr_5m
+    h15, l15, c15 = arr_15m
+    h1h, l1h = arr_1h
+    if len(c5) < 30 or len(h1h) < T3_SUPPORT_LOOKBACK_1H + 5: return None
+
+    current_close = float(c5[-1])
+    prev_close    = float(c5[-2]) if len(c5) >= 2 else current_close
+
+    # 1. Identify NEAREST support 1h below current price (not absolute plancher).
+    #    The "support to break" is the closest pivot low just under us.
+    support_level = _nearest_support_1h_below(l1h, current_close,
+                                              lookback=20, min_dist_pct=0.001)
+    if support_level is None: return None
+
+    # 2. Confirmation breakdown:
+    threshold_break = support_level * (1 - T3_BREAKDOWN_BUFFER_PCT)
+    if current_close >= threshold_break: return None
+    if prev_close <= support_level * (1 - T3_BREAKDOWN_BUFFER_PCT): return None
+
+    # 3. Volume confirm: bar 5m de breakdown >= 1.5 * avg(20)
+    if len(v5) < 21: return None
+    avgv = float(np.mean(v5[-21:-1]))
+    if avgv > 0 and v5[-1] < avgv * T3_VOLUME_MULTIPLIER: return None
+
+    # 4. Not a fresh retest:
+    #    Quick check — was support tested in the last 4 hours (48 bars 5m) by bouncing up?
+    #    Test: lows in [-50:-3] reached support and recovered above it
+    if len(l5) >= 50:
+        sub_lows  = l5[-50:-3]
+        sub_highs = h5[-50:-3]
+        recent_touch = any(sub_lows <= support_level * 1.002) and any(sub_highs >= support_level * 1.008)
+        if recent_touch: return None    # already retested+bounced, T1 territory
+
+    # 5. RSI 5m < 50
+    cl5 = c5[-30:]
+    rsi = _rsi(cl5, 14)
+    if rsi >= T3_RSI_5M_MAX: return None
+
+    # 6. Anti flash-crash: ATR 5m < 3 × avg ATR (proxy: range last 5 bars vs avg)
+    if len(h5) >= 30:
+        atr_now = _atr_array(h5[-15:], l5[-15:], c5[-15:], period=10)
+        atr_avg = _atr_array(h5[-30:], l5[-30:], c5[-30:], period=14)
+        if atr_avg > 0 and atr_now > atr_avg * 3.0: return None
+
+    # 7. Stop placement: retest of broken support
+    stop = support_level * (1 + T3_RETEST_BUFFER_PCT)
+
+    # 8. Target: TG3-B fixed pct from entry
+    target = current_close * (1 - T3_TARGET_PCT_FIXED)
+
+    # 9. R:R check (T3 has stricter MIN_RR)
+    risk   = stop - current_close
+    reward = current_close - target
+    if risk <= 0 or reward <= 0 or reward / risk < T3_MIN_RR: return None
+
+    return {
+        "thesis": "T3", "side": "short",
+        "entry": current_close, "stop": stop, "target": target,
+        "support_level": support_level, "vol_ratio": v5[-1] / avgv if avgv > 0 else 0,
+        "timeout_min": T3_TIMEOUT_MIN, "size_cap": T3_INITIAL_CAP,
+    }
+
+
+# ─── T4: RALLY FAIL (lower-high after pump in downtrend) ──────────────────────
+
+T4_PREV_HIGH_LOOKBACK   = (-30, -10)    # bars [-30:-10]
+T4_CURRENT_HIGH_LOOKBACK = 8
+T4_REJECTION_BUFFER_PCT = 0.005    # 0.5%
+T4_STOP_BUFFER_PCT      = 0.003    # 0.3%
+T4_TARGET_PCT           = 0.012    # 1.2%
+T4_MIN_RR_T4            = 1.3
+T4_TIMEOUT_MIN          = 45
+T4_RSI_AT_SWING_MIN     = 65
+T4_INITIAL_CAP          = 0.6
 
 
 def get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision):
-    """T4 rally fail short. Lower-high after pump in downtrend."""
-    return None
+    """T4 rally fail short: lower-high after pump in downtrend.
+
+    Spec: shared/trading/short-thesis-t4-rally-fail.md
+    """
+    h5, l5, c5, v5 = arr_5m
+    h15, l15, c15 = arr_15m
+    h1h, l1h = arr_1h
+    if len(c5) < 35 or len(h1h) < 10: return None
+
+    # 1. Identify previous swing high (bars [-30:-10])
+    s, e = T4_PREV_HIGH_LOOKBACK
+    if abs(s) > len(h5): return None
+    prev_high = float(np.max(h5[s:e]))
+
+    # 2. Identify current swing high (last 8 bars)
+    idx_rel, current_swing_high = _swing_high_5m(h5, T4_CURRENT_HIGH_LOOKBACK)
+    if current_swing_high is None: return None
+    # Swing should be in last 5 bars (recent rejection)
+    if T4_CURRENT_HIGH_LOOKBACK - idx_rel > 5: return None
+
+    # 3. Lower-high check
+    if current_swing_high >= prev_high: return None    # not a lower-high
+
+    current_close = float(c5[-1])
+
+    # 4. Rally amplitude check: must be at least 0.5% rally
+    if current_swing_high < current_close * 1.005: return None
+
+    # 5. Rally not excessive (anti-squeeze): no more than 4% above current
+    if current_swing_high > current_close * 1.04: return None
+
+    # 6. RSI at swing high > 65 (surachat local)
+    # RSI calculé sur la fenêtre se terminant au swing high
+    bars_back_from_end = T4_CURRENT_HIGH_LOOKBACK - idx_rel - 1
+    if bars_back_from_end < 0: bars_back_from_end = 0
+    sub_for_rsi_at_swing = c5[:len(c5) - bars_back_from_end] if bars_back_from_end > 0 else c5
+    rsi_at_swing = _rsi(sub_for_rsi_at_swing[-30:], 14)
+    if rsi_at_swing < T4_RSI_AT_SWING_MIN: return None
+
+    # 7. Current RSI < RSI at swing (bear divergence intra-rally)
+    rsi_now = _rsi(c5[-30:], 14)
+    if rsi_now >= rsi_at_swing: return None
+
+    # 8. Rejection confirmed: current_close < current_swing_high * (1 - buffer)
+    if current_close >= current_swing_high * (1 - T4_REJECTION_BUFFER_PCT): return None
+
+    # 9. Volume present
+    if len(v5) >= 21:
+        avgv = float(np.mean(v5[-21:-1]))
+        if avgv > 0 and v5[-1] < avgv * 0.8: return None
+
+    # 10. EMA20 1h slope still descending
+    closes_1h = (h1h + l1h) / 2.0
+    ema20_1h_series = _ema_array(closes_1h, 20)
+    if len(ema20_1h_series) >= 4:
+        if ema20_1h_series[-1] >= ema20_1h_series[-4]: return None
+
+    # 11. Stop placement
+    stop = current_swing_high * (1 + T4_STOP_BUFFER_PCT)
+
+    # 12. Target
+    target = current_close * (1 - T4_TARGET_PCT)
+
+    # 13. R:R check
+    risk   = stop - current_close
+    reward = current_close - target
+    if risk <= 0 or reward <= 0 or reward / risk < T4_MIN_RR_T4: return None
+
+    return {
+        "thesis": "T4", "side": "short",
+        "entry": current_close, "stop": stop, "target": target,
+        "prev_high": prev_high, "current_swing_high": current_swing_high,
+        "rsi_at_swing": rsi_at_swing, "rsi_now": rsi_now,
+        "timeout_min": T4_TIMEOUT_MIN, "size_cap": T4_INITIAL_CAP,
+    }
 
 
-# ─── ROUTER (multi-thesis with mutual exclusion) ──────────────────────────────
+# ─── ROUTER (multi-thesis with mutual exclusion per matrix) ───────────────────
+
+# States where ALL shorts are hard-blocked (regime gate strict)
+_HARD_BLOCK_STATES = {
+    "btc_unknown", "btc_chaos", "vol_extreme",
+    "counter_cyclical_block", "btc_trend_eth_weak",
+    "trend_up_smooth", "trend_up_choppy",
+    "aligned_long_trend", "btc_led_long",
+}
+
+# T1 elligible states (zone bounce works)
+_T1_ELIGIBLE_STATES = {
+    "range_quiet", "aligned_short_trend", "btc_led_short", "trend_down_choppy",
+}
+
 
 def route_short_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
-    """Returns (thesis_id, signal) or (None, None). Enforces mutual exclusion
-    via activation domain check on regime_decision.
+    """Returns (thesis_id, signal_dict) or (None, None).
+    Enforces AT MOST 1 signal per evaluation via state guards + priority order.
 
-    Domain layout (preliminary):
-        T1: state ∈ {neutral, range_quiet, btc_unknown_*}
-        T2: state == trend_down_smooth ∧ conf ≥ 75 ∧ dir ≤ -0.85
-        T3: state ∈ {neutral, distribution_top, trend_down_smooth} ∧ breakdown event
-        T4: state == trend_down_smooth ∧ price > ema20_1h recent
+    Matrix per shared/trading/short-thesis-matrix.md:
+        - hard block states: nothing fires
+        - trend_down_smooth: T2 → T4 → T3
+        - trend_down_choppy: T4 → T3 → T1
+        - neutral: T3 only
+        - {range_quiet, aligned_short_trend, btc_led_short}: T1 only
     """
     state = regime_decision.get("state", "")
     conf  = regime_decision.get("confidence", 0)
     dirn  = regime_decision.get("direction", 0)
-    allow_short = regime_decision.get("allow_short", False)
 
-    if not allow_short and state not in ("neutral", "range_quiet"):
-        # Regime explicitly blocks shorts → no T_n fires
+    if state in _HARD_BLOCK_STATES:
         return None, None
 
-    # T2 takes priority in its narrow domain
-    if "t2" in enabled and state == "trend_down_smooth" and conf >= 75 and dirn <= -0.85:
-        sig = get_short_signal_t2(arr_5m, arr_15m, arr_1h, regime_decision)
-        if sig: return "T2", sig
+    # ── trend_down_smooth branch ──────────────────────────────────────────────
+    if state == "trend_down_smooth":
+        # T2 priority — strict gate on conf + dir
+        if "t2" in enabled and conf >= 75 and dirn <= -0.85:
+            sig = get_short_signal_t2(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T2", sig
+        # T4 secondary
+        if "t4" in enabled:
+            sig = get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T4", sig
+        # T3 fallback
+        if "t3" in enabled:
+            sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T3", sig
+        return None, None
 
-    # T4 also in trend_down_smooth but specific to rally fail
-    if "t4" in enabled and state == "trend_down_smooth":
-        sig = get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision)
-        if sig: return "T4", sig
+    # ── trend_down_choppy branch ──────────────────────────────────────────────
+    if state == "trend_down_choppy":
+        if "t4" in enabled:
+            sig = get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T4", sig
+        if "t3" in enabled:
+            sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T3", sig
+        if "t1" in enabled:
+            sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
+            if sig: return "T1", sig
+        return None, None
 
-    # T3 breakdown — neutral or trend_down_smooth
-    if "t3" in enabled and state in ("neutral", "trend_down_smooth"):
-        sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
-        if sig: return "T3", sig
+    # ── neutral branch ────────────────────────────────────────────────────────
+    if state == "neutral":
+        if "t3" in enabled:
+            sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T3", sig
+        return None, None
 
-    # T1 fallback — zone bounce in range/neutral
-    if "t1" in enabled and (state in ("neutral", "range_quiet") or allow_short):
+    # ── T1-only states ────────────────────────────────────────────────────────
+    if state in _T1_ELIGIBLE_STATES - {"trend_down_choppy"}:
+        if "t1" in enabled:
+            sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
+            if sig: return "T1", sig
+        # Optional T3 in range_quiet (off by default; enable with "t3_range")
+        if state == "range_quiet" and "t3_range" in enabled:
+            sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
+            if sig: return "T3", sig
+        return None, None
+
+    # Unknown / uncovered state → safe fallback (try T1 only if explicitly allowed)
+    if "t1" in enabled and regime_decision.get("allow_short", False):
         sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
         if sig: return "T1", sig
 
@@ -512,7 +882,12 @@ def run_backtest(symbols, start, end, enabled, verbose=True):
                 sh, th = lo <= p["stop"], hi >= p["target"]
             else:
                 sh, th = hi >= p["stop"], lo <= p["target"]
-            timeout = (i - p["bar_idx"]) >= TIMEOUT_BARS
+            # Per-thesis timeout: stored as `timeout_bars` on position (set at open).
+            # None → use default global TIMEOUT_BARS.
+            timeout_bars_pos = p.get("timeout_bars")
+            if timeout_bars_pos is None:
+                timeout_bars_pos = TIMEOUT_BARS
+            timeout = (i - p["bar_idx"]) >= timeout_bars_pos
             ep, er = None, None
             if sh and th:
                 if rng.random() < 0.5:
@@ -599,20 +974,25 @@ def _try_enter(pool, expert_id, thesis_id, symbol, signal, regime, i,
                common_5m, arr_sym, closed_trades, rng):
     """Common entry path: pool.acquire → simulate fill → pool.open."""
     size_mult = max(0.3, regime.get("size_multiplier", 1.0)) if regime.get("allow_long") or regime.get("allow_short") else 1.0
-    acq = pool.acquire(expert_id, symbol, signal["side"], POS_PCT, size_mult)
+    # Per-thesis size cap (e.g. T2 = 0.7, T3 = 0.5, T4 = 0.6) for paper validation
+    size_cap = float(signal.get("size_cap", 1.0))
+    effective_size_mult = size_mult * size_cap
+    acq = pool.acquire(expert_id, symbol, signal["side"], POS_PCT, effective_size_mult)
     if acq is None: return False
-    # Simulate fill at signal["entry"] price + fee maker
     entry = signal["entry"]
     deploy = acq["deploy"]
     qty = deploy / entry
     if qty <= 0 or qty * entry < 5: return False
     fee_entry = entry * qty * FEE_MAKER
+    # Per-thesis timeout (T2 = 90 min = 18 bars, T3 = 60 min = 12, T4 = 45 min = 9)
+    timeout_min = signal.get("timeout_min")
+    timeout_bars = (timeout_min // 5) if timeout_min else None    # 5min bars
     pool.open(
         expert_id=expert_id, thesis_id=thesis_id,
         symbol=symbol, side=signal["side"],
         deploy=deploy, entry_price=entry,
         stop=signal["stop"], target=signal["target"],
-        bar_idx=i, fee_entry=fee_entry,
+        bar_idx=i, fee_entry=fee_entry, timeout_bars=timeout_bars,
     )
     return True
 
