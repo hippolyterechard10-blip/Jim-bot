@@ -44,6 +44,34 @@ GEO_RSI_SHORT_HIGH = 80      # Short mode : accepte rejection depuis overbought
 USE_CRYPTO_REGIME_GATE        = True   # False = rollback to old VIX/SPY regime
 CRYPTO_REGIME_MIN_CONFIDENCE  = 50     # below → no_trade regardless of state
 
+# ── Multi-thesis short expert (Phase 4 paper port from backtest validation) ───
+# Validated via 2022-2024 backtest grids (cf. vault doc short-expert-validation-2026-05-28).
+# T2 trend-follow thesis: complement to T1 zone-bounce, fires only in trend_down_smooth.
+# Sweet spot config validated by C3 grid: Sharpe 9.71 backtest, MaxDD -2.56%.
+
+# T2 trend-follow constants (validated via T2 refinement grid Phase 2c)
+T2_PULLBACK_BUFFER_PCT   = 0.012   # Best per refinement grid (vs 0.002 initial)
+T2_STOP_BUFFER_PCT       = 0.003   # Best per refinement grid
+T2_SWING_LOOKBACK_1H     = 12      # Best per refinement grid (vs 10 initial)
+T2_RSI_5M_MAX            = 65      # Best per refinement grid
+T2_TIMEOUT_MIN           = 120     # Best per refinement grid (vs 90 initial)
+T2_TARGET_PCT_DEFAULT    = 0.015   # Fallback if regime decision.target_pct not provided
+T2_INITIAL_CAP           = 0.7     # Per-thesis size cap (paper validation safety)
+T2_COOLDOWN_MIN          = 60      # Anti-spam: skip T2 on same symbol within N min after last T2 trade
+ENABLE_T2_SHORT          = True    # Master flag for T2 thesis (False = pure T1L+T1S, rollback)
+
+# Router variant (validated via C3 exposure grid Phase 2 C3)
+# - "strict"            : current behavior (T1 only in eligible states, no fallback). Sharpe 3.87.
+# - "t1_trend_fallback" : T1 short fires as fallback in trend_down_smooth if T2 misses. Sharpe 9.71. SWEET SPOT.
+# - "t1_neutral"        : T1 short fires also in neutral state. Sharpe 21 but unrealistic in live.
+ROUTER_VARIANT = os.getenv("ROUTER_VARIANT", "t1_trend_fallback")
+
+# T1S regime hard-block override (validated via C2 over-protection diagnostic)
+# When True, T1 short ALSO fires in states normally hard-blocked by regime gate
+# (btc_chaos, btc_trend_eth_weak, aligned_long_trend, btc_led_long).
+# Shadow log showed these states have 64.4% WR + 0.479% avg expectancy on T1S.
+T1S_INCLUDE_HARD_BLOCK = os.getenv("T1S_INCLUDE_HARD_BLOCK", "1") == "1"
+
 # ── Boucles ───────────────────────────────────────────────────────────────────
 FAST_LOOP_SECONDS = 30     # manage_pending + manage_positions
 SLOW_LOOP_SECONDS = 300    # evaluate() — nouveau signal

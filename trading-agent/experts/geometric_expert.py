@@ -13,7 +13,7 @@ manage_open_positions() simplifié : détecte fermeture par comparaison
 positions OKX ↔ DB. Aucun price-check bot-side.
 """
 from __future__ import annotations
-import logging, json, threading, uuid, datetime
+import logging, json, threading, uuid, datetime, time
 from collections import defaultdict
 import numpy as np
 import pandas as pd
@@ -52,6 +52,26 @@ def _rsi(closes: np.ndarray, period: int = 14) -> float:
     return round(100 - 100 / (1 + ag / al), 2)
 
 
+def _ema_array(closes, period):
+    """Returns the full EMA series (same length as input). Used by T2 for slope check."""
+    n = len(closes)
+    if n == 0: return np.array([])
+    a = 2.0 / (period + 1)
+    out = np.empty(n)
+    out[0] = closes[0]
+    for i in range(1, n):
+        out[i] = closes[i] * a + out[i-1] * (1 - a)
+    return out
+
+
+def _swing_high_5m(highs_5m, lookback=8):
+    """Return (idx_rel, value) of swing high in last `lookback` bars."""
+    if len(highs_5m) < lookback: return None, None
+    sub = highs_5m[-lookback:]
+    idx_rel = int(np.argmax(sub))
+    return idx_rel, float(sub[idx_rel])
+
+
 class GeometricExpert:
 
     def __init__(self, broker, memory, geometry, regime):
@@ -75,6 +95,8 @@ class GeometricExpert:
                 logger.info("[CRYPTO_REGIME] gate ENABLED — paper validation mode")
             except Exception as e:
                 logger.warning(f"[CRYPTO_REGIME] init failed, falling back to old regime: {e}")
+        # T2 trend-follow anti-spam: track last T2 entry timestamp per symbol
+        self._last_t2_entry_ts = {}    # symbol -> unix timestamp
         # Réconciliation au démarrage
         self._reconcile_state()
 
@@ -333,6 +355,88 @@ class GeometricExpert:
         if entry_level < zone_stop <= ceiling: return zone_stop
         return entry_level * 1.003
 
+    def _get_short_signal_t2(self, symbol, bars_5m, bars_1h, cr_decision):
+        """T2 trend-follow short — port from backtest_short_expert.py.
+
+        Activation domain: state == "trend_down_smooth" AND conf >= 75 AND dir <= -0.85.
+        Trigger: pullback to EMA20 1h from below, RSI 5m in [40, 65], slope desc,
+        BTC trend stable, volume present.
+
+        Returns dict with entry/stop/target/timeout_min/size_cap or None.
+        """
+        # Anti-spam cooldown
+        last = self._last_t2_entry_ts.get(symbol, 0)
+        if (time.time() - last) < config.T2_COOLDOWN_MIN * 60:
+            return None
+
+        h5 = bars_5m["high"].values
+        l5 = bars_5m["low"].values
+        c5 = bars_5m["close"].values
+        v5 = bars_5m["volume"].values
+        c1h = bars_1h["close"].values
+        h1h = bars_1h["high"].values
+
+        if len(c5) < 30 or len(c1h) < 25:
+            return None
+
+        # 1. EMA20 1h using REAL closes
+        ema20_1h_series = _ema_array(c1h, 20)
+        ema20_1h = float(ema20_1h_series[-1])
+
+        # 2. Slope EMA20 1h DESCENDING over last 6 bars
+        if len(ema20_1h_series) < 6: return None
+        if ema20_1h_series[-1] >= ema20_1h_series[-6]: return None
+
+        # 3. Pullback to EMA20 1h: high_5m_last_3 >= ema20_1h * (1 - buffer)
+        #    AND current_close < ema20_1h
+        recent_high_5m = float(np.max(h5[-3:]))
+        current_close = float(c5[-1])
+        threshold = ema20_1h * (1 - config.T2_PULLBACK_BUFFER_PCT)
+        if recent_high_5m < threshold: return None
+        if current_close >= ema20_1h: return None
+
+        # 4. RSI 5m in [40, RSI_MAX]
+        cl5 = c5[-30:]
+        rsi = _rsi(cl5, 14)
+        if not (40 <= rsi <= config.T2_RSI_5M_MAX): return None
+
+        # 5. RSI 5m not persistently overbought
+        rsi_prev1 = _rsi(c5[:-1][-30:], 14) if len(c5) > 30 else rsi
+        if rsi_prev1 > config.T2_RSI_5M_MAX + 5: return None
+
+        # 6. Volume present
+        if len(v5) >= 21:
+            avgv = float(np.mean(v5[-21:-1]))
+            if avgv > 0 and v5[-1] < avgv * 0.5: return None
+
+        # 7. Swing high 1h for stop placement
+        swing_high_1h = float(np.max(h1h[-config.T2_SWING_LOOKBACK_1H:]))
+
+        # 8. Stop placement
+        stop_raw = max(swing_high_1h, current_close * 1.008) * (1 + config.T2_STOP_BUFFER_PCT)
+
+        # 9. Target = current * (1 - target_pct from regime, fallback default)
+        tp = float((cr_decision or {}).get("target_pct") or 0)
+        if tp <= 0: tp = config.T2_TARGET_PCT_DEFAULT
+        target = current_close * (1 - tp)
+
+        # 10. R:R check
+        risk = stop_raw - current_close
+        reward = current_close - target
+        if risk <= 0 or reward <= 0 or reward / risk < config.GEO_MIN_RR:
+            return None
+
+        return {
+            "thesis": "T2",
+            "entry": current_close,
+            "stop": stop_raw,
+            "target": target,
+            "ema20_1h": ema20_1h,
+            "swing_high_1h": swing_high_1h,
+            "timeout_min": config.T2_TIMEOUT_MIN,
+            "size_cap": config.T2_INITIAL_CAP,
+        }
+
     def _find_resistance_zones(self, highs, lows, closes, min_tests=1):
         """Swing highs au-dessus du prix actuel — zones de résistance."""
         current = closes[-1]
@@ -455,6 +559,11 @@ class GeometricExpert:
         cr_allow_short = True
         cr_size_mult   = 1.0          # auto-switch from regime
         cr_target_pct  = None         # None = keep legacy lowvol_target_pct
+        # Regime state variables — set to safe defaults; overwritten if crypto_regime active
+        state = "neutral"
+        conf  = 0.0
+        dir_  = 0.0
+        t1s_hard_block_override = False
         if self.crypto_regime is not None:
             try:
                 cr_decision = self.crypto_regime.evaluate(symbol)
@@ -476,6 +585,26 @@ class GeometricExpert:
                     cr_target_pct = float(cr_target_pct_in)
                 old_regime_label = (regime or "unknown").upper()
                 policy_reason = cr_decision.get("policy_reason", "—")
+                # T1S hard-block override (cf. config.T1S_INCLUDE_HARD_BLOCK + C2 over-protection finding)
+                # Certain states are normally hard-blocked but show 64.4% WR on T1S zone bounces.
+                # btc_unknown and vol_extreme remain blocked (safety-critical).
+                t1s_hard_block_override = False
+                if not cr_allow_short and config.T1S_INCLUDE_HARD_BLOCK and conf >= min_conf:
+                    HARD_BLOCK_OVERRIDE_STATES = {
+                        "btc_chaos", "vol_extreme",
+                        "counter_cyclical_block", "btc_trend_eth_weak",
+                        "aligned_long_trend", "btc_led_long",
+                    }
+                    # btc_unknown and vol_extreme stay blocked even with override
+                    ALWAYS_BLOCK_STATES = {"btc_unknown", "vol_extreme"}
+                    if state in (HARD_BLOCK_OVERRIDE_STATES - ALWAYS_BLOCK_STATES):
+                        t1s_hard_block_override = True
+                        cr_allow_short = True   # local override for T1S only
+                        logger.info(
+                            f"[CRYPTO_REGIME] {symbol} T1S_HARD_BLOCK_OVERRIDE applied "
+                            f"state={state} conf={conf:.0f} — T1S short enabled despite hard block"
+                        )
+
                 # Hard block: confidence too low OR policy disallows everything
                 block_all = not (cr_allow_long or cr_allow_short)
                 if block_all or conf < min_conf:
@@ -512,6 +641,7 @@ class GeometricExpert:
 
         h1h        = bars_1h["high"].values
         l1h        = bars_1h["low"].values
+        c1h        = bars_1h["close"].values   # real 1h closes (used by T2 EMA20)
         highs_15m  = bars_15m["high"].values
         lows_15m   = bars_15m["low"].values
         closes_15m = bars_15m["close"].values
@@ -646,110 +776,193 @@ class GeometricExpert:
                     f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'} lowvol={low_vol_mode}"
                 )
 
-        # ── SHORTS : bounce sur résistance ────────────────────────────────────
-        # Pas d'entrée short si uptrend 1h fort (HH + HL)
+        # ── SHORTS : multi-thesis router ──────────────────────────────────────
+        # Validated config: ROUTER_VARIANT="t1_trend_fallback", T1S_INCLUDE_HARD_BLOCK=True
+        # Pas d'entrée short si uptrend 1h fort (HH + HL) — SAUF T2 (trend-follow) et T1S hard-block override
         lh_up = h1h[-1] > h1h[-4]; ll_up = l1h[-1] > l1h[-4]
-        if not (lh_up and ll_up) and cr_allow_short:
-            n_res = len(resistance_zones)
-            n_dist_s = n_rsi_s = n_div_s = n_pass3b_s = n_risk_s = n_rr_s = 0
 
-            for zone in resistance_zones:
-                if open_count >= config.GEO_MAX_SIM:
-                    break
-                zk_s = -self._zone_key(zone["center"])  # clé négative pour shorts
+        # ── SHORT ROUTER (multi-thesis per ROUTER_VARIANT) ─────────────────────
+        # Branches:
+        #   trend_down_smooth + conf>=75 + dir<=-0.85: T2 priority, T1 fallback if T2 misses
+        #   T1-eligible states (incl hard-block override): T1 zone bounce
+        #   neutral with ROUTER_VARIANT="t1_neutral": T1 zone bounce
 
-                dist_pct = (zone["low"] - current) / zone["low"]
-                dist_low_s  = -0.004 if low_vol_mode else -0.004
-                dist_high_s = 0.015 if low_vol_mode else 0.015
-                if not (dist_low_s <= dist_pct <= dist_high_s):
-                    n_dist_s += 1; continue
-                if self._touches[zk_s] >= config.GEO_MAX_TOUCHES:
-                    continue
-                if self._pending_has(zk_s):
-                    continue
-                if not (config.GEO_RSI_SHORT_LOW <= rsi_now <= config.GEO_RSI_SHORT_HIGH):
-                    n_rsi_s += 1; continue
-                if not self._rsi_bearish_divergence(closes_5m, rsi_now):
-                    n_div_s += 1; continue
+        t2_signal = None
+        t2_fired = False
+        tp_used = None  # track which target_pct was used for logging
 
-                # Pass 3b symmetry: recent highs test resistance, and price
-                # stays below the zone high on the current close.
-                pass_3b = bool(np.any(highs_5m[-8:] >= zone["low"] - zone_gap) and closes_5m[-1] < zone["high"])
-                if not pass_3b:
-                    n_pass3b_s += 1; continue
+        if (config.ENABLE_T2_SHORT and cr_decision is not None
+                and state == "trend_down_smooth"
+                and conf >= 75 and dir_ <= -0.85
+                and cr_allow_short
+                and open_count < config.GEO_MAX_SIM):
+            t2_signal = self._get_short_signal_t2(symbol, bars_5m, bars_1h, cr_decision)
+            if t2_signal:
+                tp_used = float((cr_decision or {}).get("target_pct") or 0)
+                if tp_used <= 0: tp_used = config.T2_TARGET_PCT_DEFAULT
+                deploy_pct = config.GEO_POS_PCT * float(cr_size_mult or 1.0) * t2_signal["size_cap"]
+                deploy = min(self.get_available() * 0.995, self._live_capital() * deploy_pct)
+                if deploy / t2_signal["entry"] >= 0.001:
+                    qty = deploy / t2_signal["entry"]
+                    # Use place_limit_sell with current price as market-fill (paper accepts)
+                    order_id = self.broker.place_limit_sell(
+                        symbol=symbol, price=t2_signal["entry"],
+                        stop_loss=t2_signal["stop"], take_profit=t2_signal["target"],
+                        deploy_usdt=deploy,
+                    )
+                    if order_id:
+                        # Track T2 entry for anti-spam cooldown
+                        self._last_t2_entry_ts[symbol] = time.time()
+                        # Use T2-specific pending key (different from T1 zone keys)
+                        zk_t2 = ("T2_short", symbol, int(time.time()))
+                        self._pending_add(zk_t2, {
+                            "order_id": order_id, "symbol": symbol,
+                            "level": t2_signal["entry"], "high": t2_signal["entry"],
+                            "stop": t2_signal["stop"], "target": t2_signal["target"],
+                            "deploy": deploy,
+                            "side": "short", "thesis": "T2",
+                            "timeout_min": t2_signal["timeout_min"],
+                            "mode": "trend_follow",
+                            "broker_mode": self._broker_mode(),
+                            "target_pct_used": float(tp_used),
+                            "size_mult_used": float(cr_size_mult or 1.0),
+                            "crypto_regime":     (cr_decision or {}).get("state"),
+                            "crypto_confidence": (cr_decision or {}).get("confidence"),
+                            "crypto_direction":  (cr_decision or {}).get("direction"),
+                            "crypto_vol_state":  (cr_decision or {}).get("vol_state"),
+                            "crypto_eth_signal": (cr_decision or {}).get("eth_signal"),
+                            "crypto_btc_state":  (cr_decision or {}).get("btc_state"),
+                        })
+                        t2_fired = True
+                        logger.info(
+                            f"[GEO] SHORT_T2 {symbol} @ ${t2_signal['entry']:.4f} "
+                            f"SL=${t2_signal['stop']:.4f} TP=${t2_signal['target']:.4f} "
+                            f"timeout={t2_signal['timeout_min']}min size_cap={t2_signal['size_cap']}"
+                        )
+                        open_count += 1
 
-                stop_s = self._dynamic_stop_short(
-                    bars_5m["high"].values, zone["low"], zone["wick_high"]
-                )
+        # T1 zone bounce short: fires as fallback in trend_down_smooth (per ROUTER_VARIANT),
+        # OR in T1-eligible states, OR if T1S_INCLUDE_HARD_BLOCK overrides.
+        if not t2_fired and open_count < config.GEO_MAX_SIM:
+            # Eligibility check for T1 short:
+            #   (1) Regime allows short (covers normal states + T1S hard-block override)
+            #   (2) ROUTER_VARIANT == "t1_neutral" AND state == "neutral"
+            #   (3) ROUTER_VARIANT == "t1_trend_fallback" AND state == "trend_down_smooth" (T2 missed)
+            t1_eligible = False
+            if cr_allow_short:    # covers cases 1 + T1S hard-block override (cr_allow_short was set True above)
+                t1_eligible = True
+            if config.ROUTER_VARIANT == "t1_neutral" and state == "neutral":
+                t1_eligible = True
+            if config.ROUTER_VARIANT == "t1_trend_fallback" and state == "trend_down_smooth":
+                t1_eligible = True
 
-                # TP lower in low-vol mode.
-                target_s = _smart_round(zone["low"] * (1 - lowvol_target_pct))
+            # T1 zone bounce short also respects the standard uptrend filter
+            # (skip T1 if strong 1h uptrend AND no hard-block override active)
+            if t1_eligible and (lh_up and ll_up) and not t1s_hard_block_override and state != "trend_down_smooth":
+                t1_eligible = False
 
-                # Min R:R depuis fill probable (symétrie longs).
-                actual_risk_s   = stop_s - current
-                actual_reward_s = current - target_s
-                min_rr          = getattr(config, "GEO_MIN_RR", 1.2)
-                if actual_risk_s <= 0 or actual_reward_s <= 0 or actual_reward_s / actual_risk_s < min_rr:
-                    n_rr_s += 1; continue
+            if t1_eligible:
+                # ── T1 ZONE BOUNCE SHORT (existing logic) ──────────────────────
+                n_res = len(resistance_zones)
+                n_dist_s = n_rsi_s = n_div_s = n_pass3b_s = n_risk_s = n_rr_s = 0
 
-                risk_s   = abs(stop_s - zone["low"])
-                reward_s = abs(zone["low"] - target_s)
-                if risk_s <= 0:
-                    n_risk_s += 1; continue
+                for zone in resistance_zones:
+                    if open_count >= config.GEO_MAX_SIM:
+                        break
+                    zk_s = -self._zone_key(zone["center"])  # clé négative pour shorts
 
-                available = self.get_available()
-                if available < 30: break
-                deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT * cr_size_mult)
-                limit_price = _smart_round(zone["low"])
-                if deploy / limit_price < 0.001: continue
+                    dist_pct = (zone["low"] - current) / zone["low"]
+                    dist_low_s  = -0.004 if low_vol_mode else -0.004
+                    dist_high_s = 0.015 if low_vol_mode else 0.015
+                    if not (dist_low_s <= dist_pct <= dist_high_s):
+                        n_dist_s += 1; continue
+                    if self._touches[zk_s] >= config.GEO_MAX_TOUCHES:
+                        continue
+                    if self._pending_has(zk_s):
+                        continue
+                    if not (config.GEO_RSI_SHORT_LOW <= rsi_now <= config.GEO_RSI_SHORT_HIGH):
+                        n_rsi_s += 1; continue
+                    if not self._rsi_bearish_divergence(closes_5m, rsi_now):
+                        n_div_s += 1; continue
 
-                order_id = self.broker.place_limit_sell(
-                    symbol=symbol, price=limit_price,
-                    stop_loss=stop_s, take_profit=target_s, deploy_usdt=deploy,
-                )
-                if not order_id:
-                    continue
+                    # Pass 3b symmetry: recent highs test resistance, and price
+                    # stays below the zone high on the current close.
+                    pass_3b = bool(np.any(highs_5m[-8:] >= zone["low"] - zone_gap) and closes_5m[-1] < zone["high"])
+                    if not pass_3b:
+                        n_pass3b_s += 1; continue
 
-                self._touches[zk_s] += 1
-                self._pending_add(zk_s, {
-                    "order_id": order_id, "symbol": symbol,
-                    "level": zone["center"], "high": zone["high"],
-                    "stop": stop_s, "target": target_s, "deploy": deploy,
-                    "side": "short",
-                    "mode": self._mode_from_target_pct(lowvol_target_pct),
-                    "broker_mode": self._broker_mode(),
-                    "target_pct_used": float(lowvol_target_pct),
-                    "size_mult_used":  float(cr_size_mult),
-                    "crypto_regime":     (cr_decision or {}).get("state"),
-                    "crypto_confidence": (cr_decision or {}).get("confidence"),
-                    "crypto_direction":  (cr_decision or {}).get("direction"),
-                    "crypto_vol_state":  (cr_decision or {}).get("vol_state"),
-                    "crypto_eth_signal": (cr_decision or {}).get("eth_signal"),
-                    "crypto_btc_state":  (cr_decision or {}).get("btc_state"),
-                })
-                logger.info(
-                    f"[GEO] 📋 SHORT {symbol} @ ${limit_price:.4f} "
-                    f"SL=${stop_s:.4f} TP=${target_s:.4f} "
-                    f"R:R={round(reward_s/risk_s,1)}x RSI={rsi_now:.0f} tests={zone['tests']} lowvol={low_vol_mode}"
-                )
-                self._log_decision("SELL", symbol, limit_price, stop_s, target_s,
-                                   reward_s/risk_s, _r, rsi_now, zone)
-                if _NOTIFY:
-                    notify.trade_opened(symbol, "short", deploy/limit_price,
-                                        limit_price, stop_s, target_s, reward_s/risk_s)
-                open_count += 1
-                break  # per-symbol cap : max 1 entrée par evaluate()
+                    stop_s = self._dynamic_stop_short(
+                        bars_5m["high"].values, zone["low"], zone["wick_high"]
+                    )
 
-            if open_count == open_count_global:
-                parts = []
-                for label, val in [("dist",n_dist_s),("rsi",n_rsi_s),
-                                   ("div",n_div_s),("pass3b",n_pass3b_s),
-                                   ("risk",n_risk_s),("rr",n_rr_s)]:
-                    if val: parts.append(f"{label}:{val}")
-                logger.info(
-                    f"[GEO] {symbol} — no short | res_zones={n_res} "
-                    f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'} lowvol={low_vol_mode}"
-                )
+                    # TP lower in low-vol mode.
+                    target_s = _smart_round(zone["low"] * (1 - lowvol_target_pct))
+
+                    # Min R:R depuis fill probable (symétrie longs).
+                    actual_risk_s   = stop_s - current
+                    actual_reward_s = current - target_s
+                    min_rr          = getattr(config, "GEO_MIN_RR", 1.2)
+                    if actual_risk_s <= 0 or actual_reward_s <= 0 or actual_reward_s / actual_risk_s < min_rr:
+                        n_rr_s += 1; continue
+
+                    risk_s   = abs(stop_s - zone["low"])
+                    reward_s = abs(zone["low"] - target_s)
+                    if risk_s <= 0:
+                        n_risk_s += 1; continue
+
+                    available = self.get_available()
+                    if available < 30: break
+                    deploy      = min(available * 0.995, self._live_capital() * config.GEO_POS_PCT * cr_size_mult)
+                    limit_price = _smart_round(zone["low"])
+                    if deploy / limit_price < 0.001: continue
+
+                    order_id = self.broker.place_limit_sell(
+                        symbol=symbol, price=limit_price,
+                        stop_loss=stop_s, take_profit=target_s, deploy_usdt=deploy,
+                    )
+                    if not order_id:
+                        continue
+
+                    self._touches[zk_s] += 1
+                    self._pending_add(zk_s, {
+                        "order_id": order_id, "symbol": symbol,
+                        "level": zone["center"], "high": zone["high"],
+                        "stop": stop_s, "target": target_s, "deploy": deploy,
+                        "side": "short", "thesis": "T1",
+                        "mode": self._mode_from_target_pct(lowvol_target_pct),
+                        "broker_mode": self._broker_mode(),
+                        "target_pct_used": float(lowvol_target_pct),
+                        "size_mult_used":  float(cr_size_mult),
+                        "crypto_regime":     (cr_decision or {}).get("state"),
+                        "crypto_confidence": (cr_decision or {}).get("confidence"),
+                        "crypto_direction":  (cr_decision or {}).get("direction"),
+                        "crypto_vol_state":  (cr_decision or {}).get("vol_state"),
+                        "crypto_eth_signal": (cr_decision or {}).get("eth_signal"),
+                        "crypto_btc_state":  (cr_decision or {}).get("btc_state"),
+                    })
+                    logger.info(
+                        f"[GEO] SHORT_T1 {symbol} @ ${limit_price:.4f} "
+                        f"SL=${stop_s:.4f} TP=${target_s:.4f} "
+                        f"R:R={round(reward_s/risk_s,1)}x RSI={rsi_now:.0f} tests={zone['tests']} lowvol={low_vol_mode}"
+                    )
+                    self._log_decision("SELL", symbol, limit_price, stop_s, target_s,
+                                       reward_s/risk_s, _r, rsi_now, zone)
+                    if _NOTIFY:
+                        notify.trade_opened(symbol, "short", deploy/limit_price,
+                                            limit_price, stop_s, target_s, reward_s/risk_s)
+                    open_count += 1
+                    break  # per-symbol cap : max 1 entrée par evaluate()
+
+                if open_count == open_count_global:
+                    parts = []
+                    for label, val in [("dist",n_dist_s),("rsi",n_rsi_s),
+                                       ("div",n_div_s),("pass3b",n_pass3b_s),
+                                       ("risk",n_risk_s),("rr",n_rr_s)]:
+                        if val: parts.append(f"{label}:{val}")
+                    logger.info(
+                        f"[GEO] {symbol} — no short | res_zones={n_res} "
+                        f"price={current:.4f} | {', '.join(parts) or 'no_zones_in_range'} lowvol={low_vol_mode}"
+                    )
 
     # ── MANAGE PENDING ────────────────────────────────────────────────────────
 
@@ -791,6 +1004,8 @@ class GeometricExpert:
                                 "broker_mode": p.get("broker_mode", self._broker_mode()),
                                 "target_pct_used":   p.get("target_pct_used"),
                                 "size_mult_used":    p.get("size_mult_used"),
+                                "thesis":            p.get("thesis"),
+                                "timeout_min":       p.get("timeout_min"),
                                 "crypto_regime":     p.get("crypto_regime"),
                                 "crypto_confidence": p.get("crypto_confidence"),
                                 "crypto_direction":  p.get("crypto_direction"),
@@ -917,9 +1132,14 @@ class GeometricExpert:
                         self.memory.log_trade_close(trade_id, live, reason, pnl=pnl)
                     continue
 
-                # ── 3. Time-stop : default 2h, low-vol 1h ─────────────────────
+                # ── 3. Time-stop : per-thesis if set, else default 2h / low-vol 1h ──
                 try:
-                    timeout_min = getattr(config, "GEO_LOWVOL_TIMEOUT_MIN", TIMEOUT_MIN) if low_vol_mode else TIMEOUT_MIN
+                    # T2 trades store timeout_min in market_context; use it if present
+                    ctx_timeout = ctx.get("timeout_min")
+                    if ctx_timeout and int(ctx_timeout) > 0:
+                        timeout_min = int(ctx_timeout)
+                    else:
+                        timeout_min = getattr(config, "GEO_LOWVOL_TIMEOUT_MIN", TIMEOUT_MIN) if low_vol_mode else TIMEOUT_MIN
                     elapsed_min = (now_utc - entry_dt).total_seconds() / 60
                     if elapsed_min >= timeout_min:
                         pos     = broker_positions[symbol]
