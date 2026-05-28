@@ -1,0 +1,15 @@
+{
+  "name": "T2 trend-follow coarse grid 2022-2024 (32 combos)",
+  "symbols": ["ETH/USD", "SOL/USD"],
+  "start": "2022-01-01",
+  "end":   "2024-12-31",
+  "enabled": ["t2"],
+  "output_csv": "grid_t2_full.csv",
+  "grid": {
+    "T2_PULLBACK_BUFFER_PCT": [0.002, 0.005],
+    "T2_RSI_5M_MAX":          [65, 75],
+    "T2_TIMEOUT_MIN":         [60, 120],
+    "T2_STOP_BUFFER_PCT":     [0.002, 0.005],
+    "T2_SWING_LOOKBACK_1H":   [8, 12]
+  }
+}

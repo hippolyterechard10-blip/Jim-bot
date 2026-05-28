@@ -43,6 +43,10 @@ MIN_RR           = 1.2
 
 FEE_MAKER        = 0.0002      # Kraken Futures perp maker 0.02%
 FEE_TAKER        = 0.0005      # Kraken Futures perp taker 0.05%
+SLIPPAGE_BPS     = 5           # 0.05% slippage applied to MARKET fills only
+                               # (T2/T3/T4 entries, all stop/timeout exits).
+                               # Limit fills (T1 entries, all TARGET exits) = 0 slippage.
+SLIPPAGE_PCT     = SLIPPAGE_BPS / 10000.0
 
 CRYPTO_REGIME_MIN_CONFIDENCE = 50
 
@@ -413,7 +417,8 @@ def get_long_signal_t1(arr_5m, arr_15m, arr_1h):
         reward = abs(target - zone["center"])
         if risk <= 0 or reward / risk < MIN_RR: continue
         return {"thesis": "T1", "side": "long", "zone": zone,
-                "entry": zone["center"], "stop": stop, "target": target}
+                "entry": zone["center"], "stop": stop, "target": target,
+                "fill_type": "limit"}
     return None
 
 
@@ -446,7 +451,8 @@ def get_short_signal_t1(arr_5m, arr_15m, arr_1h):
         reward = abs(zone["center"] - target)
         if risk <= 0 or reward / risk < MIN_RR: continue
         return {"thesis": "T1", "side": "short", "zone": zone,
-                "entry": zone["center"], "stop": stop, "target": target}
+                "entry": zone["center"], "stop": stop, "target": target,
+                "fill_type": "limit"}
     return None
 
 
@@ -528,6 +534,7 @@ def get_short_signal_t2(arr_5m, arr_15m, arr_1h, regime_decision):
         "entry": current_close, "stop": stop_raw, "target": target,
         "ema20_1h": ema20_1h, "swing_high_1h": swing_high_1h,
         "timeout_min": T2_TIMEOUT_MIN, "size_cap": T2_INITIAL_CAP,
+        "fill_type": "market",
     }
 
 
@@ -610,6 +617,7 @@ def get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision):
         "entry": current_close, "stop": stop, "target": target,
         "support_level": support_level, "vol_ratio": v5[-1] / avgv if avgv > 0 else 0,
         "timeout_min": T3_TIMEOUT_MIN, "size_cap": T3_INITIAL_CAP,
+        "fill_type": "market",
     }
 
 
@@ -701,6 +709,7 @@ def get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision):
         "prev_high": prev_high, "current_swing_high": current_swing_high,
         "rsi_at_swing": rsi_at_swing, "rsi_now": rsi_now,
         "timeout_min": T4_TIMEOUT_MIN, "size_cap": T4_INITIAL_CAP,
+        "fill_type": "market",
     }
 
 
@@ -828,10 +837,14 @@ def load_data_for_period(symbols, start, end, verbose=True):
 
 # ─── MAIN BACKTEST LOOP ───────────────────────────────────────────────────────
 
-def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=None):
+def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=None,
+                 regime_cache_shared=None):
     """Returns dict with trades, equity_curve, final equity, stats per thesis.
 
     For grid search: pass pre-loaded `data` and `df_btc` to avoid re-loading.
+    Pass `regime_cache_shared` (mutable dict) to persist regime evaluations
+    across multiple runs (params don't affect regime). Cache is populated
+    on first run, reused on subsequent. Cuts per-combo runtime ~10×.
     """
     if verbose:
         print(f"\n{'='*72}\nBacktest range: {start} → {end}\nSymbols: {symbols}\nEnabled: {enabled}\n{'='*72}")
@@ -873,8 +886,15 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
     closed_trades = []
     equity_curve = []
 
-    # Regime evaluation cache (1 per 5m bar per symbol — could be cheaper but fine for now)
-    regime_cache_per_symbol = {s: {} for s in symbols}
+    # Regime evaluation cache (1 per 5m bar per symbol).
+    # If regime_cache_shared is provided, reuse across runs (params don't
+    # affect regime decisions — they only affect signal triggers downstream).
+    if regime_cache_shared is None:
+        regime_cache_per_symbol = {s: {} for s in symbols}
+    else:
+        for s in symbols:
+            regime_cache_shared.setdefault(s, {})
+        regime_cache_per_symbol = regime_cache_shared
 
     # Main loop
     REGIME_REFRESH_EVERY = 12   # 1 regime eval per hour (every 12 × 5min)
@@ -913,9 +933,19 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
             elif th:    ep, er = p["target"], "target"
             elif timeout: ep, er = cl, "timeout"
             if ep is not None:
-                fee_rate = FEE_MAKER if er == "target" else FEE_TAKER
-                fee_exit = ep * p["qty"] * fee_rate
-                closed = pool.close(p["id"], ep, er, fee_exit)
+                # Slippage on stop and timeout (market exits), none on target (limit fill)
+                if er == "target":
+                    ep_adj = ep
+                    fee_rate = FEE_MAKER
+                else:
+                    # Market exit — worse fill
+                    if p["side"] == "long":
+                        ep_adj = ep * (1 - SLIPPAGE_PCT)     # sell lower
+                    else:
+                        ep_adj = ep * (1 + SLIPPAGE_PCT)     # buy back higher
+                    fee_rate = FEE_TAKER
+                fee_exit = ep_adj * p["qty"] * fee_rate
+                closed = pool.close(p["id"], ep_adj, er, fee_exit)
                 if closed:
                     closed_trades.append({
                         **closed,
@@ -987,21 +1017,36 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
 
 def _try_enter(pool, expert_id, thesis_id, symbol, signal, regime, i,
                common_5m, arr_sym, closed_trades, rng):
-    """Common entry path: pool.acquire → simulate fill → pool.open."""
+    """Common entry path: pool.acquire → simulate fill → pool.open.
+    Slippage applied for market fills (T2/T3/T4), not for limit fills (T1)."""
     size_mult = max(0.3, regime.get("size_multiplier", 1.0)) if regime.get("allow_long") or regime.get("allow_short") else 1.0
-    # Per-thesis size cap (e.g. T2 = 0.7, T3 = 0.5, T4 = 0.6) for paper validation
     size_cap = float(signal.get("size_cap", 1.0))
     effective_size_mult = size_mult * size_cap
     acq = pool.acquire(expert_id, symbol, signal["side"], POS_PCT, effective_size_mult)
     if acq is None: return False
-    entry = signal["entry"]
+
+    entry_raw = signal["entry"]
+    fill_type = signal.get("fill_type", "limit")
+    # Apply slippage on market fills:
+    #   - long market entry: worse fill = pay higher
+    #   - short market entry: worse fill = sell at lower price
+    if fill_type == "market":
+        if signal["side"] == "long":
+            entry = entry_raw * (1 + SLIPPAGE_PCT)
+        else:
+            entry = entry_raw * (1 - SLIPPAGE_PCT)
+        fee_rate = FEE_TAKER    # market = taker
+    else:
+        entry = entry_raw
+        fee_rate = FEE_MAKER    # limit = maker
+
     deploy = acq["deploy"]
     qty = deploy / entry
     if qty <= 0 or qty * entry < 5: return False
-    fee_entry = entry * qty * FEE_MAKER
-    # Per-thesis timeout (T2 = 90 min = 18 bars, T3 = 60 min = 12, T4 = 45 min = 9)
+    fee_entry = entry * qty * fee_rate
+
     timeout_min = signal.get("timeout_min")
-    timeout_bars = (timeout_min // 5) if timeout_min else None    # 5min bars
+    timeout_bars = (timeout_min // 5) if timeout_min else None
     pool.open(
         expert_id=expert_id, thesis_id=thesis_id,
         symbol=symbol, side=signal["side"],

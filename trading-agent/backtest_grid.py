@@ -105,7 +105,7 @@ def compute_metrics(result: dict) -> dict:
         else:
             streak = 0
 
-    return {
+    out = {
         "n_trades": n,
         "win_rate": round(win_rate, 4),
         "pf": round(pf, 3) if pf != float("inf") else 99.0,
@@ -121,6 +121,38 @@ def compute_metrics(result: dict) -> dict:
         "calmar": round(calmar, 3),
         "longest_loss_streak": max_streak,
     }
+
+    # ── Per-symbol splits ──
+    if "symbol" in df.columns:
+        for sym in df["symbol"].unique():
+            sub = df[df["symbol"] == sym]
+            sym_label = sym.replace("/", "")    # ETH/USD → ETHUSD
+            wins_s = sub[sub["win"]]
+            losses_s = sub[~sub["win"]]
+            gw = float(wins_s["pnl_net"].sum())
+            gl = float(abs(losses_s["pnl_net"].sum()))
+            out[f"{sym_label}_n"]   = int(sub.shape[0])
+            out[f"{sym_label}_wr"]  = round(wins_s.shape[0]/sub.shape[0], 3) if sub.shape[0] else 0
+            out[f"{sym_label}_pnl"] = round(float(sub["pnl_net"].sum()), 2)
+            out[f"{sym_label}_pf"]  = round(gw/gl, 3) if gl > 1e-9 else (99.0 if gw > 0 else 0.0)
+            out[f"{sym_label}_exp"] = round(float(sub["pnl_net"].mean()), 3)
+
+    # ── Per-year splits ──
+    if "entry_time" in df.columns:
+        df["_year"] = pd.to_datetime(df["entry_time"]).dt.year
+        for yr in sorted(df["_year"].unique()):
+            sub = df[df["_year"] == yr]
+            wins_y = sub[sub["win"]]
+            losses_y = sub[~sub["win"]]
+            gw = float(wins_y["pnl_net"].sum())
+            gl = float(abs(losses_y["pnl_net"].sum()))
+            out[f"y{yr}_n"]   = int(sub.shape[0])
+            out[f"y{yr}_wr"]  = round(wins_y.shape[0]/sub.shape[0], 3) if sub.shape[0] else 0
+            out[f"y{yr}_pnl"] = round(float(sub["pnl_net"].sum()), 2)
+            out[f"y{yr}_pf"]  = round(gw/gl, 3) if gl > 1e-9 else (99.0 if gw > 0 else 0.0)
+            out[f"y{yr}_exp"] = round(float(sub["pnl_net"].mean()), 3)
+
+    return out
 
 
 # ─── PARAM INJECTION ──────────────────────────────────────────────────────────
@@ -169,17 +201,21 @@ def load_existing_hashes(csv_path: str) -> set:
 
 # ─── ONE RUN ──────────────────────────────────────────────────────────────────
 
-def run_one(params, symbols, start, end, enabled, data, df_btc, defaults) -> dict:
+def run_one(params, symbols, start, end, enabled, data, df_btc, defaults,
+            regime_cache_shared=None, expected_keys=None) -> dict:
     """Run one backtest with overridden params. Returns a flat result dict
-    (params + metrics + meta) for CSV row append."""
+    (params + metrics + meta) for CSV row append.
+
+    If `expected_keys` is provided, missing keys in the row are filled with 0
+    (ensures CSV schema consistency across runs where some symbols/years are absent).
+    """
     t0 = time.time()
     try:
-        # Reset to baseline then apply this combo
         set_params(defaults)
         set_params(params)
-
         result = bse.run_backtest(symbols, start, end, enabled,
-                                  verbose=False, data=data, df_btc=df_btc)
+                                  verbose=False, data=data, df_btc=df_btc,
+                                  regime_cache_shared=regime_cache_shared)
         metrics = compute_metrics(result)
         ok, err = True, ""
     except Exception as e:
@@ -200,7 +236,24 @@ def run_one(params, symbols, start, end, enabled, data, df_btc, defaults) -> dic
         **params,
         **metrics,
     }
+
+    if expected_keys:
+        for k in expected_keys:
+            if k not in row:
+                row[k] = 0
     return row
+
+
+def make_expected_keys(symbols, start, end):
+    """Build the union of all expected per-symbol + per-year metric keys."""
+    keys = []
+    for sym in symbols:
+        sl = sym.replace("/", "")
+        keys += [f"{sl}_n", f"{sl}_wr", f"{sl}_pnl", f"{sl}_pf", f"{sl}_exp"]
+    y0 = int(start[:4]); y1 = int(end[:4])
+    for yr in range(y0, y1 + 1):
+        keys += [f"y{yr}_n", f"y{yr}_wr", f"y{yr}_pnl", f"y{yr}_pf", f"y{yr}_exp"]
+    return keys
 
 
 # ─── GRID SEARCH DRIVER ───────────────────────────────────────────────────────
@@ -222,6 +275,14 @@ def grid_search(grid, symbols, start, end, enabled, output_csv,
     defaults = snapshot_default_params(list(grid.keys()))
     print(f"\nDefaults snapshot: {defaults}")
 
+    # Expected per-symbol + per-year metric keys (for stable CSV schema)
+    expected_keys = make_expected_keys(symbols, start, end)
+    print(f"Expected schema includes {len(expected_keys)} per-symbol/per-year keys")
+
+    # Shared regime cache — persisted across runs since params don't affect regime
+    regime_cache_shared = {}
+    print("Regime cache shared across runs (params don't affect crypto_regime)")
+
     # Resume support
     existing = load_existing_hashes(output_csv) if resume else set()
     if existing:
@@ -240,7 +301,9 @@ def grid_search(grid, symbols, start, end, enabled, output_csv,
 
             if verbose:
                 print(f"  [{i}/{n_total}] {dict(combo)} ...", end=" ", flush=True)
-            row = run_one(combo, symbols, start, end, enabled, data, df_btc, defaults)
+            row = run_one(combo, symbols, start, end, enabled, data, df_btc, defaults,
+                          regime_cache_shared=regime_cache_shared,
+                          expected_keys=expected_keys)
 
             if writer is None:
                 field_keys = list(row.keys())
@@ -289,7 +352,14 @@ def main():
                    help="Run a mini 2×2 grid on T2 over 2023 Q1 for smoke test")
     p.add_argument("--no-resume", action="store_true",
                    help="Disable resume (overwrite existing CSV)")
+    p.add_argument("--analyze", help="CSV path to analyze (no grid run)")
+    p.add_argument("--min-trades", type=int, default=30,
+                   help="Minimum N trades for top-K filter (default 30)")
     args = p.parse_args()
+
+    if args.analyze:
+        analyze_grid_csv(args.analyze, min_trades=args.min_trades)
+        return
 
     if args.smoke:
         cfg = {
@@ -317,12 +387,79 @@ def main():
         resume=not args.no_resume,
     )
 
-    # Quick analysis
-    df = pd.read_csv(cfg["output_csv"])
-    print(f"\n── Top 5 combos by Sharpe ──")
-    print(df.nlargest(5, "sharpe")[["params_hash","n_trades","win_rate","pf","return_pct","max_dd_pct","sharpe"]].to_string(index=False))
-    print(f"\n── Top 5 by expectancy ──")
-    print(df.nlargest(5, "expectancy")[["params_hash","n_trades","win_rate","pf","expectancy","sharpe"]].to_string(index=False))
+    # Full analysis
+    analyze_grid_csv(cfg["output_csv"], min_trades=30)
+
+
+def analyze_grid_csv(csv_path: str, min_trades: int = 30, top_k: int = 10):
+    """Standalone analyzer: top-K by 3 criteria, per-symbol + per-year splits."""
+    df = pd.read_csv(csv_path)
+    total = len(df)
+    df_ok = df[df["ok"] == True] if "ok" in df.columns else df
+    df_min = df_ok[df_ok["n_trades"] >= min_trades]
+    print(f"\n{'='*80}")
+    print(f"Grid analysis: {csv_path}")
+    print(f"Total combos: {total} | Valid (ok): {len(df_ok)} | N≥{min_trades}: {len(df_min)}")
+    print(f"{'='*80}")
+
+    if len(df_min) == 0:
+        print(f"\n⚠ No combo with N≥{min_trades} trades. Showing N≥1 instead.")
+        df_min = df_ok[df_ok["n_trades"] >= 1]
+        if len(df_min) == 0:
+            print("⚠ No trades produced by any combo."); return
+
+    # Find param columns: everything between 'enabled' and 'n_trades'
+    cols = list(df.columns)
+    try:
+        i_enabled = cols.index("enabled")
+        i_metric  = cols.index("n_trades")
+        param_cols = cols[i_enabled+1:i_metric]
+    except ValueError:
+        param_cols = []
+
+    base_cols = param_cols + ["n_trades", "win_rate", "pf", "expectancy",
+                              "return_pct", "max_dd_pct", "sharpe", "calmar"]
+
+    print(f"\n── TOP {top_k} BY EXPECTANCY (N ≥ {min_trades}) ──")
+    print(df_min.nlargest(top_k, "expectancy")[base_cols].to_string(index=False))
+
+    print(f"\n── TOP {top_k} BY PROFIT FACTOR (N ≥ {min_trades}) ──")
+    print(df_min.nlargest(top_k, "pf")[base_cols].to_string(index=False))
+
+    print(f"\n── TOP {top_k} BY |MAX DD| (lowest absolute DD, N ≥ {min_trades}) ──")
+    # Note: max_dd_pct is negative; we want closest to 0 = smallest |dd|
+    print(df_min.nlargest(top_k, "max_dd_pct")[base_cols].to_string(index=False))
+
+    print(f"\n── TOP {top_k} BY SHARPE (N ≥ {min_trades}) ──")
+    print(df_min.nlargest(top_k, "sharpe")[base_cols].to_string(index=False))
+
+    # Per-symbol split for the best combo by expectancy
+    best = df_min.nlargest(1, "expectancy").iloc[0]
+    print(f"\n── PER-SYMBOL SPLIT (best by expectancy, params_hash={best['params_hash']}) ──")
+    for sym in ("ETHUSD", "SOLUSD", "ETH/USD".replace("/",""), "SOL/USD".replace("/","")):
+        n_key = f"{sym}_n"
+        if n_key in best.index:
+            print(f"  {sym}: N={int(best[n_key]):4d}  WR={best.get(f'{sym}_wr', 0)*100:5.1f}%  "
+                  f"PF={best.get(f'{sym}_pf', 0):5.2f}  PnL=${best.get(f'{sym}_pnl', 0):+8.2f}  "
+                  f"exp={best.get(f'{sym}_exp', 0):+5.2f}")
+
+    # Per-year split
+    print(f"\n── PER-YEAR SPLIT (best by expectancy) ──")
+    for yr in (2022, 2023, 2024):
+        n_key = f"y{yr}_n"
+        if n_key in best.index:
+            print(f"  {yr}: N={int(best[n_key]):4d}  WR={best.get(f'y{yr}_wr', 0)*100:5.1f}%  "
+                  f"PF={best.get(f'y{yr}_pf', 0):5.2f}  PnL=${best.get(f'y{yr}_pnl', 0):+8.2f}  "
+                  f"exp={best.get(f'y{yr}_exp', 0):+5.2f}")
+
+    # Stability heuristic: combos profitable in ALL 3 years
+    if all(f"y{yr}_pnl" in df_min.columns for yr in (2022, 2023, 2024)):
+        all_yrs_pos = df_min[
+            (df_min["y2022_pnl"] > 0) & (df_min["y2023_pnl"] > 0) & (df_min["y2024_pnl"] > 0)
+        ]
+        print(f"\n── COMBOS PROFITABLE IN ALL 3 YEARS (N ≥ {min_trades}): {len(all_yrs_pos)} ──")
+        if len(all_yrs_pos) > 0:
+            print(all_yrs_pos.nlargest(min(top_k, len(all_yrs_pos)), "expectancy")[base_cols].to_string(index=False))
 
 
 if __name__ == "__main__":
