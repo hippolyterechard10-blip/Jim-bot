@@ -310,6 +310,9 @@ def api_open_trades():
             try: raw = json.loads(raw)
             except: raw = {}
         t["strategy_source"] = raw.get("strategy_source")
+        t["thesis"]          = raw.get("thesis", "T1")    # default T1 for legacy trades
+        t["timeout_min"]     = raw.get("timeout_min")
+        t["crypto_regime"]   = raw.get("crypto_regime")
         t["deployed"] = round(
             float(t.get("entry_price") or 0) * float(t.get("qty") or 0), 2
         )
@@ -318,7 +321,16 @@ def api_open_trades():
 @app.route("/api/trades/recent")
 def api_recent_trades():
     if not _memory: return jsonify([])
-    return jsonify(_memory.get_recent_trades(limit=20))
+    trades = _memory.get_recent_trades(limit=20)
+    for t in trades:
+        raw = t.get("market_context") or {}
+        if isinstance(raw, str):
+            try: raw = json.loads(raw)
+            except: raw = {}
+        t["strategy_source"] = raw.get("strategy_source")
+        t["thesis"]          = raw.get("thesis", "T1")    # default T1 for legacy trades
+        t["crypto_regime"]   = raw.get("crypto_regime")
+    return jsonify(trades)
 
 @app.route("/api/decisions/recent")
 def api_recent_decisions():
@@ -329,9 +341,44 @@ def api_recent_decisions():
         try:
             ctx = json.loads(md) if isinstance(md, str) else (md or {})
             d["strategy_source"] = ctx.get("strategy_source")
+            d["thesis"]          = ctx.get("thesis", "T1")
         except Exception:
             d["strategy_source"] = None
+            d["thesis"] = "T1"
     return jsonify(decisions)
+
+
+@app.route("/api/phase4-status")
+def api_phase4_status():
+    """Phase 4 multi-thesis short expert config — for dashboard status banner."""
+    return jsonify({
+        "phase": "4 — paper multi-thesis",
+        "router_variant": getattr(config, "ROUTER_VARIANT", "strict"),
+        "t1s_include_hard_block": getattr(config, "T1S_INCLUDE_HARD_BLOCK", False),
+        "enable_t2_short": getattr(config, "ENABLE_T2_SHORT", False),
+        "validated_params": {
+            "T2_PULLBACK_BUFFER_PCT": getattr(config, "T2_PULLBACK_BUFFER_PCT", None),
+            "T2_STOP_BUFFER_PCT":      getattr(config, "T2_STOP_BUFFER_PCT", None),
+            "T2_SWING_LOOKBACK_1H":    getattr(config, "T2_SWING_LOOKBACK_1H", None),
+            "T2_RSI_5M_MAX":           getattr(config, "T2_RSI_5M_MAX", None),
+            "T2_TIMEOUT_MIN":          getattr(config, "T2_TIMEOUT_MIN", None),
+            "T2_TARGET_PCT_DEFAULT":   getattr(config, "T2_TARGET_PCT_DEFAULT", None),
+            "T2_INITIAL_CAP":          getattr(config, "T2_INITIAL_CAP", None),
+            "T2_COOLDOWN_MIN":         getattr(config, "T2_COOLDOWN_MIN", None),
+        },
+        "validation_source": "shared/trading/short-expert-validation-2026-05-28.md",
+        "backtest_sweet_spot": {
+            "sharpe": 9.71,
+            "max_dd_pct": -2.56,
+            "trades_3y": 1566,
+            "wr": 0.693,
+        },
+        "live_expected_after_discount": {
+            "sharpe": "~5",
+            "max_dd_pct": "-5 to -7%",
+            "cagr_net_pfu": "~16%/yr",
+        },
+    })
 
 @app.route("/api/analyses/recent")
 def api_recent_analyses():
