@@ -803,15 +803,12 @@ def route_long_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
     return None, None
 
 
-# ─── MAIN BACKTEST LOOP ───────────────────────────────────────────────────────
+# ─── DATA LOADING (callable separately for grid search reuse) ──────────────────
 
-def run_backtest(symbols, start, end, enabled, verbose=True):
-    """Returns dict with trades, equity_curve, final equity, stats per thesis."""
-    print(f"\n{'='*72}\nBacktest range: {start} → {end}\nSymbols: {symbols}\nEnabled: {enabled}\n{'='*72}")
-    rng = random.Random(RNG_SEED)
-
-    # Load data
-    print("Loading data...")
+def load_data_for_period(symbols, start, end, verbose=True):
+    """Load all symbols' 5m+resamples + BTC 4h. Returns (data_dict, df_btc).
+    Reusable across multiple backtest runs (grid search)."""
+    if verbose: print(f"Loading data for {symbols} {start} → {end}...")
     data = {}
     for sym in symbols:
         sym_usd = sym.replace("/", "")
@@ -822,9 +819,27 @@ def run_backtest(symbols, start, end, enabled, verbose=True):
             "1h":    resample_ohlcv(df5, "1h"),
             "4h":    resample_ohlcv(df5, "4h"),
         }
-        print(f"  {sym}: 5m={len(df5)} | 15m={len(data[sym]['15min'])} | 1h={len(data[sym]['1h'])} | 4h={len(data[sym]['4h'])}")
+        if verbose:
+            print(f"  {sym}: 5m={len(df5)} | 15m={len(data[sym]['15min'])} | 1h={len(data[sym]['1h'])} | 4h={len(data[sym]['4h'])}")
     df_btc = load_btc_4h()
-    print(f"  BTC 4h: {len(df_btc)} bars")
+    if verbose: print(f"  BTC 4h: {len(df_btc)} bars")
+    return data, df_btc
+
+
+# ─── MAIN BACKTEST LOOP ───────────────────────────────────────────────────────
+
+def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=None):
+    """Returns dict with trades, equity_curve, final equity, stats per thesis.
+
+    For grid search: pass pre-loaded `data` and `df_btc` to avoid re-loading.
+    """
+    if verbose:
+        print(f"\n{'='*72}\nBacktest range: {start} → {end}\nSymbols: {symbols}\nEnabled: {enabled}\n{'='*72}")
+    rng = random.Random(RNG_SEED)
+
+    # Load data (or reuse pre-loaded)
+    if data is None or df_btc is None:
+        data, df_btc = load_data_for_period(symbols, start, end, verbose=verbose)
 
     # Build broker + regime engine
     broker = BacktestBroker(data)

@@ -1,0 +1,329 @@
+"""
+backtest_grid.py — Grid search infrastructure for short expert thesis tuning
+============================================================================
+
+Workflow:
+  1. Define a param grid (Python dict OR YAML config)
+  2. Load data once for the target period
+  3. For each Cartesian product of params:
+       - Monkey-patch module constants in backtest_short_expert
+       - Run a backtest with same enabled theses
+       - Compute metrics (N, WR, PF, expectancy, max DD, Sharpe, annualized %)
+       - Append one row to a results CSV
+  4. Resume capability: skip combos already in the CSV
+
+Run examples:
+    # Define a grid in a JSON file:
+    python3 backtest_grid.py --config grid_t2.json
+
+    # Or use built-in mini grid for smoke test:
+    python3 backtest_grid.py --smoke
+"""
+import warnings; warnings.filterwarnings("ignore")
+import argparse, csv, hashlib, itertools, json, os, sys, time
+from collections import OrderedDict
+from datetime import datetime
+import numpy as np
+import pandas as pd
+
+import backtest_short_expert as bse
+
+
+# ─── METRICS COMPUTATION ──────────────────────────────────────────────────────
+
+def compute_metrics(result: dict) -> dict:
+    """Computes standard backtest metrics from a backtest result dict.
+    Result must have: trades (list of dict), equity_curve (list of (ts, equity)),
+    final_equity, start_capital.
+    """
+    trades = result.get("trades", [])
+    final = result["final_equity"]; start = result["start_capital"]
+    equity = result.get("equity_curve", [])
+
+    n = len(trades)
+    if n == 0:
+        return {
+            "n_trades": 0, "win_rate": 0.0, "pf": 0.0, "expectancy": 0.0,
+            "expectancy_pct": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+            "total_pnl": 0.0, "final_equity": final, "return_pct": 0.0,
+            "max_dd_pct": 0.0, "sharpe": 0.0, "calmar": 0.0,
+            "longest_loss_streak": 0,
+        }
+
+    df = pd.DataFrame(trades)
+    df["win"] = df["pnl_net"] > 0
+    wins = df[df["win"]]
+    losses = df[~df["win"]]
+
+    win_rate = float(wins.shape[0] / n)
+    avg_win = float(wins["pnl_net"].mean()) if len(wins) else 0.0
+    avg_loss = float(losses["pnl_net"].mean()) if len(losses) else 0.0
+    gross_win = float(wins["pnl_net"].sum())
+    gross_loss = float(abs(losses["pnl_net"].sum()))
+    pf = (gross_win / gross_loss) if gross_loss > 1e-9 else float("inf") if gross_win > 0 else 0.0
+    expectancy = float(df["pnl_net"].mean())
+    expectancy_pct = expectancy / (start * bse.POS_PCT)    # rough per-position-size %
+    total_pnl = float(df["pnl_net"].sum())
+    return_pct = (final - start) / start
+
+    # Max drawdown on equity curve
+    if equity:
+        eq_series = pd.Series([e for _, e in equity])
+        peak = eq_series.cummax()
+        dd_pct = (eq_series - peak) / peak
+        max_dd_pct = float(dd_pct.min())    # negative number
+    else:
+        max_dd_pct = 0.0
+
+    # Sharpe : daily aggregation
+    sharpe = 0.0
+    if equity and len(equity) > 30:
+        eq_df = pd.DataFrame(equity, columns=["ts", "equity"]).set_index("ts")
+        daily_eq = eq_df["equity"].resample("1D").last().dropna()
+        if len(daily_eq) > 5:
+            daily_ret = daily_eq.pct_change().dropna()
+            if daily_ret.std() > 1e-9:
+                sharpe = float(daily_ret.mean() / daily_ret.std() * np.sqrt(365))
+
+    # Calmar: annualized return / |max DD|
+    if equity and max_dd_pct < -1e-6:
+        days = (equity[-1][0] - equity[0][0]).total_seconds() / 86400
+        if days > 30:
+            ann_return = (final / start) ** (365 / days) - 1
+            calmar = float(ann_return / abs(max_dd_pct))
+        else:
+            calmar = 0.0
+    else:
+        calmar = 0.0
+
+    # Longest loss streak
+    streak = max_streak = 0
+    for w in df["win"].values:
+        if not w:
+            streak += 1
+            max_streak = max(max_streak, streak)
+        else:
+            streak = 0
+
+    return {
+        "n_trades": n,
+        "win_rate": round(win_rate, 4),
+        "pf": round(pf, 3) if pf != float("inf") else 99.0,
+        "expectancy": round(expectancy, 3),
+        "expectancy_pct": round(expectancy_pct, 5),
+        "avg_win": round(avg_win, 3),
+        "avg_loss": round(avg_loss, 3),
+        "total_pnl": round(total_pnl, 2),
+        "final_equity": round(final, 2),
+        "return_pct": round(return_pct, 4),
+        "max_dd_pct": round(max_dd_pct, 4),
+        "sharpe": round(sharpe, 3),
+        "calmar": round(calmar, 3),
+        "longest_loss_streak": max_streak,
+    }
+
+
+# ─── PARAM INJECTION ──────────────────────────────────────────────────────────
+
+def set_params(params: dict):
+    """Monkey-patch module-level constants in backtest_short_expert.
+    Any key matching a module attribute is overridden.
+    Raises if a key doesn't correspond to a known constant (prevents typos).
+    """
+    for k, v in params.items():
+        if not hasattr(bse, k):
+            raise AttributeError(f"Unknown param '{k}' (not in backtest_short_expert module)")
+        setattr(bse, k, v)
+
+
+def snapshot_default_params(keys: list) -> dict:
+    """Get current values of named module attributes (for resume / re-baseline)."""
+    return {k: getattr(bse, k) for k in keys if hasattr(bse, k)}
+
+
+# ─── GRID ITERATION ───────────────────────────────────────────────────────────
+
+def cartesian_grid(grid: dict):
+    """Yield each Cartesian product of a {param: [values]} dict."""
+    keys = list(grid.keys())
+    vals = [grid[k] for k in keys]
+    for combo in itertools.product(*vals):
+        yield OrderedDict(zip(keys, combo))
+
+
+def params_hash(params: dict) -> str:
+    """Stable hash of params (for resume dedup)."""
+    s = json.dumps(params, sort_keys=True, default=str)
+    return hashlib.sha1(s.encode()).hexdigest()[:12]
+
+
+def load_existing_hashes(csv_path: str) -> set:
+    """Read existing CSV and return set of already-computed param hashes."""
+    if not os.path.isfile(csv_path): return set()
+    try:
+        df = pd.read_csv(csv_path)
+        return set(df.get("params_hash", pd.Series(dtype=str)).astype(str).tolist())
+    except Exception:
+        return set()
+
+
+# ─── ONE RUN ──────────────────────────────────────────────────────────────────
+
+def run_one(params, symbols, start, end, enabled, data, df_btc, defaults) -> dict:
+    """Run one backtest with overridden params. Returns a flat result dict
+    (params + metrics + meta) for CSV row append."""
+    t0 = time.time()
+    try:
+        # Reset to baseline then apply this combo
+        set_params(defaults)
+        set_params(params)
+
+        result = bse.run_backtest(symbols, start, end, enabled,
+                                  verbose=False, data=data, df_btc=df_btc)
+        metrics = compute_metrics(result)
+        ok, err = True, ""
+    except Exception as e:
+        metrics = compute_metrics({"trades": [], "equity_curve": [],
+                                    "final_equity": 1000.0, "start_capital": 1000.0})
+        ok, err = False, f"{type(e).__name__}: {e}"
+
+    runtime = time.time() - t0
+
+    row = {
+        "params_hash": params_hash(params),
+        "ok": ok,
+        "error": err,
+        "runtime_s": round(runtime, 1),
+        "symbols": ",".join(symbols),
+        "period": f"{start}_{end}",
+        "enabled": ",".join(sorted(enabled)),
+        **params,
+        **metrics,
+    }
+    return row
+
+
+# ─── GRID SEARCH DRIVER ───────────────────────────────────────────────────────
+
+def grid_search(grid, symbols, start, end, enabled, output_csv,
+                resume=True, verbose=True):
+    """Run grid search, appending one row per combo to output_csv.
+    Resume skips combos whose hash already exists in the CSV."""
+    combos = list(cartesian_grid(grid))
+    n_total = len(combos)
+    print(f"\nGrid search: {n_total} combos × ~3-5s each (est. ~{n_total*5/60:.0f}-{n_total*10/60:.0f} min)")
+    print(f"Output: {output_csv}")
+
+    # Pre-load data once
+    print("\nPre-loading data...")
+    data, df_btc = bse.load_data_for_period(symbols, start, end, verbose=verbose)
+
+    # Get default param values (for reset between runs)
+    defaults = snapshot_default_params(list(grid.keys()))
+    print(f"\nDefaults snapshot: {defaults}")
+
+    # Resume support
+    existing = load_existing_hashes(output_csv) if resume else set()
+    if existing:
+        print(f"\nResuming: {len(existing)} combos already in CSV, will skip")
+
+    # CSV header
+    field_keys = None
+    file_exists = os.path.isfile(output_csv)
+    f = open(output_csv, "a", newline="")
+    writer = None
+    try:
+        for i, combo in enumerate(combos, 1):
+            h = params_hash(combo)
+            if h in existing:
+                continue
+
+            if verbose:
+                print(f"  [{i}/{n_total}] {dict(combo)} ...", end=" ", flush=True)
+            row = run_one(combo, symbols, start, end, enabled, data, df_btc, defaults)
+
+            if writer is None:
+                field_keys = list(row.keys())
+                writer = csv.DictWriter(f, fieldnames=field_keys)
+                if not file_exists or os.path.getsize(output_csv) == 0:
+                    writer.writeheader()
+            writer.writerow(row)
+            f.flush()
+
+            if verbose:
+                print(f"N={row['n_trades']:4d} WR={row['win_rate']*100:5.1f}% "
+                      f"PF={row['pf']:5.2f} ret={row['return_pct']*100:+6.2f}% "
+                      f"DD={row['max_dd_pct']*100:+5.2f}% in {row['runtime_s']:.1f}s")
+    finally:
+        f.close()
+
+    print(f"\n✅ Grid search complete. Results in {output_csv}")
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+def load_config(path: str) -> dict:
+    """Load grid config from JSON file. Schema:
+    {
+      "name": "T2 grid search",
+      "symbols": ["ETH/USD", "SOL/USD"],
+      "start": "2022-01-01",
+      "end": "2024-12-31",
+      "enabled": ["t2"],
+      "output_csv": "grid_t2_results.csv",
+      "grid": {
+        "T2_PULLBACK_BUFFER_PCT": [0.001, 0.002, 0.005],
+        "T2_TIMEOUT_MIN": [60, 90, 120],
+        ...
+      }
+    }
+    """
+    with open(path) as f:
+        return json.load(f)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", help="Path to grid config JSON")
+    p.add_argument("--smoke", action="store_true",
+                   help="Run a mini 2×2 grid on T2 over 2023 Q1 for smoke test")
+    p.add_argument("--no-resume", action="store_true",
+                   help="Disable resume (overwrite existing CSV)")
+    args = p.parse_args()
+
+    if args.smoke:
+        cfg = {
+            "name": "smoke",
+            "symbols": ["ETH/USD", "SOL/USD"],
+            "start": "2023-01-01",
+            "end": "2023-03-31",
+            "enabled": ["t2"],
+            "output_csv": "grid_smoke_t2.csv",
+            "grid": {
+                "T2_PULLBACK_BUFFER_PCT": [0.001, 0.005],
+                "T2_TIMEOUT_MIN":         [60, 90],
+            }
+        }
+    elif args.config:
+        cfg = load_config(args.config)
+    else:
+        print("Either --config or --smoke required.")
+        sys.exit(1)
+
+    print(f"\n{'='*72}\nGrid search: {cfg.get('name', 'unnamed')}\n{'='*72}")
+    grid_search(
+        cfg["grid"], cfg["symbols"], cfg["start"], cfg["end"],
+        set(cfg["enabled"]), cfg["output_csv"],
+        resume=not args.no_resume,
+    )
+
+    # Quick analysis
+    df = pd.read_csv(cfg["output_csv"])
+    print(f"\n── Top 5 combos by Sharpe ──")
+    print(df.nlargest(5, "sharpe")[["params_hash","n_trades","win_rate","pf","return_pct","max_dd_pct","sharpe"]].to_string(index=False))
+    print(f"\n── Top 5 by expectancy ──")
+    print(df.nlargest(5, "expectancy")[["params_hash","n_trades","win_rate","pf","expectancy","sharpe"]].to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
