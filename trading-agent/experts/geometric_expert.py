@@ -13,7 +13,7 @@ manage_open_positions() simplifié : détecte fermeture par comparaison
 positions OKX ↔ DB. Aucun price-check bot-side.
 """
 from __future__ import annotations
-import logging, json, threading, uuid, datetime, time
+import logging, json, threading, uuid, datetime, time, os
 from collections import defaultdict
 import numpy as np
 import pandas as pd
@@ -681,14 +681,26 @@ class GeometricExpert:
         support_zones    = self._find_zones(highs_15m, lows_15m, closes_15m, min_tests=1)
         resistance_zones = self._find_resistance_zones(highs_15m, lows_15m, closes_15m, min_tests=1)
 
-        low_vol_mode = (_r in ("choppy", "bull"))
-        lowvol_target_pct = getattr(config, "GEO_LOWVOL_TARGET_PCT", config.GEO_TARGET_PCT)
+        # ── Backtest/live parity for Phase 4 paper validation ────────────────────
+        # The C3 grid was validated WITHOUT low_vol mode (used GEO_TARGET_PCT=0.009
+        # fixed, no dynamic adaptation). To match the validated strategy exactly,
+        # force low_vol_mode=False for T1 zone bounce. T2 has its own params and
+        # is unaffected. Set GEO_DISABLE_LOWVOL=0 in env to restore legacy behavior.
+        force_disable_lowvol = (os.getenv("GEO_DISABLE_LOWVOL", "1") == "1")
+        if force_disable_lowvol:
+            low_vol_mode = False
+            lowvol_target_pct = config.GEO_TARGET_PCT     # 0.009 — the backtested value
+        else:
+            low_vol_mode = (_r in ("choppy", "bull"))
+            lowvol_target_pct = getattr(config, "GEO_LOWVOL_TARGET_PCT", config.GEO_TARGET_PCT)
         # Auto-switch : the crypto regime engine emits a target_pct per state
         # (lowvol 0.005 → range_quiet, normal 0.009 → calm signals, trend 0.015 → aligned trends).
-        # When provided, override the legacy lowvol default so the strategy adapts.
+        # When provided, override default so the strategy adapts to regime engine.
+        # The crypto_regime target_pct override applies even with lowvol forced off
+        # (because it's an explicit regime signal, not the legacy lowvol mode).
         if cr_target_pct is not None:
             lowvol_target_pct = cr_target_pct
-        zone_gap = 0.0 if low_vol_mode else 0.0
+        zone_gap = 0.0
 
         open_count = open_count_global
 
@@ -1077,7 +1089,12 @@ class GeometricExpert:
             now_utc          = datetime.datetime.now(datetime.timezone.utc)
             native_brackets  = getattr(self.broker, "NATIVE_BRACKETS", True)
             current_regime   = self.regime.get_cache().get("regime") if hasattr(self.regime, "get_cache") else None
-            low_vol_mode     = current_regime in ("choppy", "bull")
+            # Backtest/live parity: force low_vol_mode off (same as evaluate())
+            # so timeout matches the validated GEO_TARGET_PCT=0.009 + TIMEOUT_MIN=120 config.
+            if os.getenv("GEO_DISABLE_LOWVOL", "1") == "1":
+                low_vol_mode = False
+            else:
+                low_vol_mode = current_regime in ("choppy", "bull")
 
             for t in open_trades:
                 ctx = self._ctx(t)
