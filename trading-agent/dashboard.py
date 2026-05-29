@@ -362,6 +362,47 @@ def api_stats_periods():
         logger.error(f"api_stats_periods error: {e}")
         return jsonify({"error": str(e)})
 
+# ── Phase 4 cost model (placeholder estimates, computed at dashboard layer) ───
+# DB stores GROSS pnl from manage_open_positions. We compute estimated net here
+# without modifying the live runtime. Reversible.
+TAX_RATE_PLACEHOLDER = 0.30   # NOT real tax advice — placeholder
+FEE_TAKER_PCT        = 0.0005 # Kraken Futures perp taker — most likely fill type
+SLIPPAGE_BPS_LIVE    = 5      # 0.05% each leg, paper Kraken may differ
+
+def _compute_estimated_costs(trade: dict) -> dict:
+    """Compute fees, slippage, net, post-tax estimates for a single trade.
+    Uses the trade's stored gross pnl (from DB) and entry/exit/qty fields.
+    Returns dict with new fields to merge into the trade response."""
+    out = {
+        "fees_est": None,
+        "slip_est": None,
+        "net_pnl_est": None,
+        "post_tax_pnl_est": None,
+        "tax_rate_used": TAX_RATE_PLACEHOLDER,
+        "estimates_note": "Estimates only. Real Kraken fees+slippage may differ. Tax 30% is placeholder, not advice.",
+    }
+    try:
+        entry = float(trade.get("entry_price") or 0)
+        exit_ = float(trade.get("exit_price") or 0)
+        qty   = float(trade.get("qty") or 0)
+        gross = trade.get("pnl")
+        if gross is None or entry <= 0 or qty <= 0:
+            return out
+        fees = (entry * qty * FEE_TAKER_PCT) + ((exit_ if exit_ > 0 else entry) * qty * FEE_TAKER_PCT)
+        slip = (entry + (exit_ if exit_ > 0 else entry)) * qty * (SLIPPAGE_BPS_LIVE / 10000.0)
+        net  = float(gross) - fees - slip
+        post_tax = net * (1 - TAX_RATE_PLACEHOLDER) if net > 0 else net
+        out.update({
+            "fees_est":         round(fees, 2),
+            "slip_est":         round(slip, 2),
+            "net_pnl_est":      round(net, 2),
+            "post_tax_pnl_est": round(post_tax, 2),
+        })
+    except Exception:
+        pass
+    return out
+
+
 @app.route("/api/trades/open")
 def api_open_trades():
     if not _memory: return jsonify([])
@@ -400,6 +441,8 @@ def api_recent_trades():
         t["strategy_source"] = raw.get("strategy_source")
         t["thesis"]          = raw.get("thesis", "T1")
         t["crypto_regime"]   = raw.get("crypto_regime")
+        # Estimated cost breakdown (gross → fees + slip → net → post-tax)
+        t.update(_compute_estimated_costs(t))
         filtered.append(t)
         if len(filtered) >= 20: break
     return jsonify(filtered)
@@ -819,8 +862,12 @@ def api_trades_individual():
                 "exit_at":        r["exit_at"],
                 "exit_vs_target": r["exit_vs_target"],
                 "strategy_source": mc.get("strategy_source"),
+                "thesis":          mc.get("thesis", "T1"),
                 "geo_context":     geo_ctx,
             })
+        # Add estimated cost breakdown (fees, slip, net, post-tax) to each trade
+        for t in trades:
+            t.update(_compute_estimated_costs(t))
         return jsonify({"trades": trades, "period": period})
     except Exception as e:
         logger.error(f"api_trades_individual error: {e}")
@@ -2032,11 +2079,16 @@ header{
         <thead>
           <tr>
             <th>Symbole</th><th>Dir.</th><th>Entrée</th><th>Sortie</th>
-            <th>P&L $</th><th>P&L %</th><th>Durée</th><th>Raison</th>
+            <th title="Gross PnL = (entry - exit) × qty, no fees or slippage applied">Gross</th>
+            <th title="Estimated fees: taker 0.05% × entry + taker 0.05% × exit">Fees est.</th>
+            <th title="Estimated slippage: 5 bps each leg (entry+exit) — paper Kraken may differ">Slip est.</th>
+            <th title="Net PnL est. = Gross − Fees est. − Slip est.">Net est.</th>
+            <th title="In the pocket = Net est. × (1 − 0.30 tax). Placeholder 30%, not real tax advice.">In pocket</th>
+            <th>P&L %</th><th>Durée</th><th>Raison</th>
           </tr>
         </thead>
         <tbody id="trades-body">
-          <tr><td class="tbl-empty" colspan="8">Chargement...</td></tr>
+          <tr><td class="tbl-empty" colspan="13">Chargement...</td></tr>
         </tbody>
       </table>
     </div>
@@ -2397,7 +2449,7 @@ async function loadTrades(period) {
   }
   const body = $('trades-body');
   if (!trades || !trades.length) {
-    body.innerHTML = '<tr><td class="tbl-empty" colspan="8">Aucun trade sur cette période</td></tr>';
+    body.innerHTML = '<tr><td class="tbl-empty" colspan="13">Aucun trade sur cette période</td></tr>';
     return;
   }
   body.innerHTML = trades.map(t => {
@@ -2407,12 +2459,24 @@ async function loadTrades(period) {
     const isLong = side === 'buy' || side === 'long';
     const pnlCss = pnl!==null ? (parseFloat(pnl)>=0?'color:var(--green)':'color:var(--red)') : '';
     const reason = (t.close_reason||'').replace(/_/g,' ');
+    // Use API-computed cost fields if present (Phase 4 instrumentation); fall back to '—' for legacy
+    const feesEst = t.fees_est;
+    const slipEst = t.slip_est;
+    const netEst  = t.net_pnl_est;
+    const pocketEst = t.post_tax_pnl_est;
+    const netCss  = netEst != null ? (parseFloat(netEst)>=0?'color:var(--green)':'color:var(--red)') : '';
+    const pocketCss = pocketEst != null ? (parseFloat(pocketEst)>=0?'color:var(--green)':'color:var(--red)') : '';
+    const fmt = (v, signed=false) => v == null ? '—' : (signed && parseFloat(v)>=0 ? '+' : '') + '$' + Math.abs(parseFloat(v)).toFixed(2);
     return `<tr>
       <td style="font-weight:700">${t.symbol||'—'}</td>
       <td><span class="side-tag ${isLong?'side-long':'side-short'}" style="font-size:10px;padding:2px 7px">${isLong?'L':'S'}</span></td>
       <td>$${parseFloat(t.entry_price||0).toFixed(2)}</td>
       <td style="color:var(--blue)">${isOpen?'ouvert':(t.exit_price?'$'+parseFloat(t.exit_price).toFixed(2):'—')}</td>
       <td style="${pnlCss}">${pnl!==null?(parseFloat(pnl)>=0?'+':'')+'$'+Math.abs(parseFloat(pnl)).toFixed(2):'—'}</td>
+      <td style="color:var(--text3)">−${fmt(feesEst)}</td>
+      <td style="color:var(--text3)">−${fmt(slipEst)}</td>
+      <td style="${netCss};font-weight:600">${fmt(netEst, true)}</td>
+      <td style="${pocketCss};font-weight:700">${fmt(pocketEst, true)}</td>
       <td style="${pnlCss}">${(t.pnl_pct!=null&&t.pnl_pct!==undefined)?(parseFloat(t.pnl_pct)>=0?'+':'')+parseFloat(t.pnl_pct).toFixed(2)+'%':'—'}</td>
       <td style="color:var(--text3)">${fDur(t.hold_duration_min||t.hold_min)}</td>
       <td><span class="reason-tag">${reason||'—'}</span></td>
