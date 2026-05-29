@@ -358,13 +358,22 @@ def api_recent_decisions():
 @app.route("/api/thesis/breakdown")
 def api_thesis_breakdown():
     """Per-thesis stats breakdown: T1L (long zone bounce), T1S (short zone), T2 (trend follow).
-    Reflects the actual strategies active in Phase 4."""
+    Reflects the actual strategies active in Phase 4.
+
+    CLEAN SLATE: only counts trades AFTER Phase 4 multi-thesis activation (2026-05-28 21:37 UTC).
+    Pre-Phase 4 trades used the old strict router + adaptive low_vol mode — they're
+    not representative of the current strategy. Set include_legacy=1 to see all.
+    """
     if not _memory: return jsonify({})
     try:
+        # Phase 4 cutover: 2026-05-28 21:37 UTC (multi-thesis activation)
+        PHASE4_CUTOVER = "2026-05-28T21:37:00"
+        include_legacy = request.args.get("include_legacy", "0") == "1"
+        cutover_clause = "" if include_legacy else f"AND entry_at >= '{PHASE4_CUTOVER}'"
         conn = _ro_conn(_memory.db_path)
         # Per-thesis aggregation. Legacy trades have no thesis field — they're T1
         # by definition (only T1 long and T1 short existed before Phase 4).
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 COALESCE(json_extract(market_context, '$.thesis'), 'T1') AS thesis,
                 json_extract(market_context, '$.side') AS side,
@@ -377,6 +386,7 @@ def api_thesis_breakdown():
             FROM trades
             WHERE status = 'closed' AND pnl IS NOT NULL
               AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+              {cutover_clause}
             GROUP BY thesis, side
             ORDER BY thesis, side
         """).fetchall()
@@ -409,6 +419,9 @@ def api_thesis_breakdown():
                 "pf": round(pf, 2) if pf < 999 else 999.0,
             })
         return jsonify({
+            "phase": "4 — multi-thesis paper",
+            "cutover_date": PHASE4_CUTOVER + "Z",
+            "data_includes_legacy": include_legacy,
             "available_strategies": [
                 {"id": "T1L", "label": "T1 long zone bounce (Geo V4 long)"},
                 {"id": "T1S", "label": "T1 short zone bounce (Geo V4 short)"},
@@ -417,6 +430,7 @@ def api_thesis_breakdown():
             "removed_strategies": [
                 {"id": "T3", "reason": "DROPPED — breakdown thesis structurally negative in crypto"},
                 {"id": "T4", "reason": "DROPPED — rally fail thesis structurally negative"},
+                {"id": "low_vol_mode", "reason": "KILLED on 2026-05-29 — forced off for backtest/live parity"},
                 {"id": "gapper", "reason": "REMOVED — old equity gapper expert archived"},
                 {"id": "alpaca", "reason": "REMOVED — Alpaca broker archived (Kraken Futures only)"},
             ],
@@ -425,6 +439,99 @@ def api_thesis_breakdown():
         })
     except Exception as e:
         logger.error(f"api_thesis_breakdown error: {e}")
+        return jsonify({"error": str(e)})
+
+
+@app.route("/api/t1l/distance-gate-stats")
+def api_t1l_distance_gate_stats():
+    """T1L distance gate parity tracking.
+    Splits T1L closed trades by distance_gate_trigger_permissive flag to measure
+    impact of the live's wider distance gate vs the backtest's narrower range.
+
+    distance_gate_trigger_permissive = True : dist_pct > -0.001 from zone.high
+                                              → would NOT have fired in backtest
+    distance_gate_trigger_permissive = False : dist_pct <= -0.001
+                                              → would have fired in backtest too (parity)
+    """
+    if not _memory: return jsonify({})
+    try:
+        conn = _ro_conn(_memory.db_path)
+        rows = conn.execute("""
+            SELECT
+                COALESCE(json_extract(market_context, '$.distance_gate_trigger_permissive'), 0) AS gate_permissive,
+                COUNT(*) AS n,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                COALESCE(SUM(pnl), 0) AS total_pnl,
+                COALESCE(AVG(pnl), 0) AS avg_pnl,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) AS gross_win,
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN -pnl ELSE 0 END), 0) AS gross_loss
+            FROM trades
+            WHERE status='closed' AND pnl IS NOT NULL
+              AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+              AND json_extract(market_context, '$.side') = 'long'
+              AND COALESCE(json_extract(market_context, '$.thesis'), 'T1') = 'T1'
+            GROUP BY gate_permissive
+            ORDER BY gate_permissive
+        """).fetchall()
+
+        # Also get raw dist_pct distribution (last 50 T1L trades)
+        dist_rows = conn.execute("""
+            SELECT
+                id, symbol, entry_at, pnl,
+                json_extract(market_context, '$.dist_pct_at_entry') AS dist_pct,
+                json_extract(market_context, '$.distance_gate_trigger_permissive') AS gate_permissive
+            FROM trades
+            WHERE status='closed'
+              AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+              AND json_extract(market_context, '$.side') = 'long'
+              AND json_extract(market_context, '$.dist_pct_at_entry') IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 50
+        """).fetchall()
+        conn.close()
+
+        breakdown = []
+        for r in rows:
+            n = int(r[1]) if r[1] else 0
+            wins = int(r[2]) if r[2] else 0
+            wr = (wins / n) if n else 0
+            gw = float(r[5]) if r[5] else 0
+            gl = float(r[6]) if r[6] else 0
+            pf = (gw / gl) if gl > 1e-9 else (999.0 if gw > 0 else 0.0)
+            permissive = bool(r[0]) if r[0] is not None else False
+            label = (
+                "PERMISSIVE (dist > -0.1% — extra trades vs backtest)"
+                if permissive else
+                "PARITY (dist <= -0.1% — would also fire in backtest)"
+            )
+            breakdown.append({
+                "permissive_trigger": permissive,
+                "label": label,
+                "n_trades": n,
+                "wins": wins,
+                "win_rate": round(wr, 3),
+                "total_pnl": round(float(r[3]) if r[3] else 0, 2),
+                "expectancy": round(float(r[4]) if r[4] else 0, 3),
+                "pf": round(pf, 2) if pf < 999 else 999.0,
+            })
+
+        recent_dists = []
+        for r in dist_rows:
+            recent_dists.append({
+                "id": r[0], "symbol": r[1], "entry_at": r[2],
+                "pnl": round(float(r[3]) if r[3] else 0, 2),
+                "dist_pct_at_entry": round(float(r[4]), 5) if r[4] else None,
+                "gate_permissive": bool(r[5]) if r[5] is not None else None,
+            })
+
+        return jsonify({
+            "instrumented_since": "2026-05-29 — Phase 4 parity tracking",
+            "rule": "permissive trigger = dist_pct > -0.001 (live's wider gate vs backtest narrower)",
+            "by_gate_trigger": breakdown,
+            "recent_t1l_trades_with_dist": recent_dists,
+        })
+    except Exception as e:
+        logger.error(f"api_t1l_distance_gate_stats error: {e}")
         return jsonify({"error": str(e)})
 
 
@@ -2506,6 +2613,8 @@ async function loadCryptoRegime(){
 
 async function loadStrategy(){
   await loadCryptoRegime();
+  // Phase 4 cleanup: use thesis breakdown (T1L/T1S/T2) instead of legacy modes (lowvol/normal/trend).
+  // Lowvol mode was killed on 2026-05-29 for backtest/live parity. See /api/phase4-status.
   const data = await api('/api/modes/stats');
   if(!data || data.error){ return; }
   const cs    = data.current_state || {};
@@ -2513,7 +2622,17 @@ async function loadStrategy(){
   chips.innerHTML = '';
   const mk = (cls, text) => { const d = document.createElement('div'); d.className = 's-chip ' + cls; d.textContent = text; chips.appendChild(d); };
   mk(cs.broker_mode === 'paper' ? 's-chip-paper' : 's-chip-live', (cs.broker_mode || '—').toUpperCase());
-  mk('s-chip-mode',   'mode · ' + (cs.active_mode || '—'));
+
+  // Phase 4 indicator: show ROUTER_VARIANT + T1S hardblock + T2 status (not legacy "mode")
+  try {
+    const p4 = await api('/api/phase4-status');
+    if (p4 && !p4.error) {
+      mk('s-chip-mode', 'router · ' + (p4.router_variant || '—'));
+      if (p4.t1s_include_hard_block) mk('s-chip-mode', 'T1S hardblock · ON');
+      if (p4.enable_t2_short) mk('s-chip-mode', 'T2 · ON');
+    }
+  } catch(e) {}
+
   mk('s-chip-regime', 'régime · ' + (cs.regime || '—'));
   const biasLabel = ({
     longs_favored:  'biais · longs',
@@ -2523,14 +2642,57 @@ async function loadStrategy(){
   })[cs.bias] || 'biais · —';
   mk('s-chip-bias', biasLabel);
 
+  // Render the active strategies (T1L, T1S, T2) instead of dead lowvol/normal/trend modes
   const grid = $('modes-grid');
   grid.innerHTML = '';
-  ['lowvol','normal','trend'].forEach(mode => {
-    const m  = (data.by_mode || {})[mode] || {n:0};
-    const ml = (data.by_mode_live || {})[mode] || {};
-    grid.appendChild(_renderModeCard(mode, m, ml, mode === cs.active_mode));
-  });
+  try {
+    const tb = await api('/api/thesis/breakdown');
+    if (tb && !tb.error) {
+      const byThesis = tb.by_thesis || [];
+      // Map: build summary card for each available strategy
+      const available = (tb.available_strategies || []).map(s => s.id);
+      available.forEach(stratId => {
+        // Find the matching row in by_thesis
+        let row = null;
+        if (stratId === 'T1L') row = byThesis.find(r => r.thesis === 'T1' && r.side === 'long');
+        if (stratId === 'T1S') row = byThesis.find(r => r.thesis === 'T1' && r.side === 'short');
+        if (stratId === 'T2')  row = byThesis.find(r => r.thesis === 'T2');
+        const m = row || {n_trades: 0, win_rate: 0, total_pnl: 0, expectancy: 0, pf: 0};
+        grid.appendChild(_renderStrategyCard(stratId, m));
+      });
+    }
+  } catch(e) { console.warn('thesis breakdown failed:', e); }
   _renderConfidence(data);
+}
+
+function _renderStrategyCard(stratId, m) {
+  const card = document.createElement('div');
+  card.className = 's-card';
+  const n = m.n_trades || 0;
+  const wr = ((m.win_rate || 0) * 100).toFixed(1);
+  const pnl = (m.total_pnl || 0).toFixed(2);
+  const pnlSign = (m.total_pnl || 0) >= 0 ? '+' : '';
+  const exp = (m.expectancy || 0).toFixed(3);
+  const pf = (m.pf || 0).toFixed(2);
+  const title = {
+    'T1L': 'T1 long zone bounce',
+    'T1S': 'T1 short zone bounce',
+    'T2':  'T2 short trend follow',
+  }[stratId] || stratId;
+  card.innerHTML = `
+    <div class="s-card-head">
+      <div class="s-card-title">${stratId}</div>
+      <div class="s-card-sub">${title}</div>
+    </div>
+    <div class="s-card-stats">
+      <div><span>N</span><strong>${n}</strong></div>
+      <div><span>WR</span><strong>${wr}%</strong></div>
+      <div><span>PF</span><strong>${pf}</strong></div>
+      <div><span>P&L</span><strong class="${(m.total_pnl||0) >= 0 ? 'pos' : 'neg'}">${pnlSign}$${pnl}</strong></div>
+      <div><span>exp/trade</span><strong>${exp}</strong></div>
+    </div>
+  `;
+  return card;
 }
 
 // ─── LLM Cost Observability ───────────────────────────────────

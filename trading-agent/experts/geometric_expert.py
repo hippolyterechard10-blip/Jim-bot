@@ -772,15 +772,25 @@ class GeometricExpert:
                     continue
 
                 self._touches[zk] += 1
+                # Distance gate parity instrumentation (T1L only):
+                # Backtest accepted dist_pct ∈ [-0.012, +0.002] from zone.center
+                # Live accepts dist_pct ∈ [-0.015, +0.015] from zone.high
+                # Translation: backtest's +0.002 from center ≈ -0.001 from high (with ZONE_PCT=0.003).
+                # If live's dist_pct > -0.001, this trade would NOT have fired in backtest
+                # → mark as "permissive" trigger to track divergence stats.
+                distance_gate_trigger_permissive = bool(dist_pct > -0.001)
                 self._pending_add(zk, {
                     "order_id": order_id, "symbol": symbol,
                     "level": zone["center"], "high": zone["high"],
                     "stop": stop, "target": target, "deploy": deploy,
                     "side": "long",
+                    "thesis": "T1",
                     "mode": self._mode_from_target_pct(lowvol_target_pct),
                     "broker_mode": self._broker_mode(),
                     "target_pct_used": float(lowvol_target_pct),
                     "size_mult_used":  float(cr_size_mult),
+                    "dist_pct_at_entry":           round(float(dist_pct), 5),
+                    "distance_gate_trigger_permissive": distance_gate_trigger_permissive,
                     "crypto_regime":     (cr_decision or {}).get("state"),
                     "crypto_confidence": (cr_decision or {}).get("confidence"),
                     "crypto_direction":  (cr_decision or {}).get("direction"),
@@ -791,7 +801,9 @@ class GeometricExpert:
                 logger.info(
                     f"[GEO] 📋 LONG {symbol} @ ${limit_price:.4f} "
                     f"SL=${_smart_round(stop):.4f} TP=${_smart_round(target):.4f} "
-                    f"R:R={round(reward/risk,1)}x RSI={rsi_now:.0f} tests={zone['tests']} lowvol={low_vol_mode}"
+                    f"R:R={round(reward/risk,1)}x RSI={rsi_now:.0f} tests={zone['tests']} "
+                    f"lowvol={low_vol_mode} dist={dist_pct*100:+.2f}% "
+                    f"gate_permissive={distance_gate_trigger_permissive}"
                 )
                 self._log_decision("BUY", symbol, limit_price, stop, target,
                                    reward/risk, _r, rsi_now, zone)
@@ -1043,6 +1055,9 @@ class GeometricExpert:
                                 "size_mult_used":    p.get("size_mult_used"),
                                 "thesis":            p.get("thesis"),
                                 "timeout_min":       p.get("timeout_min"),
+                                # Distance gate instrumentation (T1L only — see evaluate()):
+                                "dist_pct_at_entry": p.get("dist_pct_at_entry"),
+                                "distance_gate_trigger_permissive": p.get("distance_gate_trigger_permissive"),
                                 "crypto_regime":     p.get("crypto_regime"),
                                 "crypto_confidence": p.get("crypto_confidence"),
                                 "crypto_direction":  p.get("crypto_direction"),
