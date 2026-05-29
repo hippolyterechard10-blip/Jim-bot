@@ -258,10 +258,17 @@ def api_stats_periods():
         conn = _ro_conn(_memory.db_path)
 
         src_filter = ""
-        if expert == "gap":
-            src_filter = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
-        elif expert == "geo":
+        # Geo V4 is the only expert. Optional per-thesis filtering via thesis= param.
+        if expert == "geo" or expert == "all":
             src_filter = "AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
+        # Per-thesis filter (T1L = long, T1S = short zone, T2 = trend follow)
+        thesis = flask_req.args.get("thesis", "").upper()
+        if thesis in ("T1", "T2"):
+            src_filter += f" AND json_extract(market_context, '$.thesis') = '{thesis}'"
+        elif thesis == "T1L":
+            src_filter += " AND json_extract(market_context, '$.side') = 'long'"
+        elif thesis == "T1S":
+            src_filter += " AND json_extract(market_context, '$.side') = 'short' AND COALESCE(json_extract(market_context, '$.thesis'), 'T1') = 'T1'"
 
         def _pstats(since):
             date_clause = f"AND exit_at >= '{since}'" if since else ""
@@ -346,6 +353,79 @@ def api_recent_decisions():
             d["strategy_source"] = None
             d["thesis"] = "T1"
     return jsonify(decisions)
+
+
+@app.route("/api/thesis/breakdown")
+def api_thesis_breakdown():
+    """Per-thesis stats breakdown: T1L (long zone bounce), T1S (short zone), T2 (trend follow).
+    Reflects the actual strategies active in Phase 4."""
+    if not _memory: return jsonify({})
+    try:
+        conn = _ro_conn(_memory.db_path)
+        # Per-thesis aggregation. Legacy trades have no thesis field — they're T1
+        # by definition (only T1 long and T1 short existed before Phase 4).
+        rows = conn.execute("""
+            SELECT
+                COALESCE(json_extract(market_context, '$.thesis'), 'T1') AS thesis,
+                json_extract(market_context, '$.side') AS side,
+                COUNT(*) AS n,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                COALESCE(SUM(pnl), 0) AS total_pnl,
+                COALESCE(AVG(pnl), 0) AS avg_pnl,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END), 0) AS gross_win,
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN -pnl ELSE 0 END), 0) AS gross_loss
+            FROM trades
+            WHERE status = 'closed' AND pnl IS NOT NULL
+              AND json_extract(market_context, '$.strategy_source') = 'geo_v4'
+            GROUP BY thesis, side
+            ORDER BY thesis, side
+        """).fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            thesis = r[0] or "T1"
+            side = r[1] or "?"
+            n = int(r[2]) if r[2] else 0
+            wins = int(r[3]) if r[3] else 0
+            wr = (wins / n) if n else 0
+            gw = float(r[6]) if r[6] else 0
+            gl = float(r[7]) if r[7] else 0
+            pf = (gw / gl) if gl > 1e-9 else (999.0 if gw > 0 else 0.0)
+            # Display name combining thesis + side
+            label = thesis
+            if thesis == "T1":
+                label = "T1L (long zone bounce)" if side == "long" else "T1S (short zone bounce)"
+            elif thesis == "T2":
+                label = "T2 (short trend follow)"
+            out.append({
+                "thesis": thesis,
+                "side": side,
+                "label": label,
+                "n_trades": n,
+                "wins": wins,
+                "win_rate": round(wr, 3),
+                "total_pnl": round(float(r[4]) if r[4] else 0, 2),
+                "avg_pnl": round(float(r[5]) if r[5] else 0, 3),
+                "pf": round(pf, 2) if pf < 999 else 999.0,
+            })
+        return jsonify({
+            "available_strategies": [
+                {"id": "T1L", "label": "T1 long zone bounce (Geo V4 long)"},
+                {"id": "T1S", "label": "T1 short zone bounce (Geo V4 short)"},
+                {"id": "T2",  "label": "T2 short trend follow (EMA20 1h pullback)"},
+            ],
+            "removed_strategies": [
+                {"id": "T3", "reason": "DROPPED — breakdown thesis structurally negative in crypto"},
+                {"id": "T4", "reason": "DROPPED — rally fail thesis structurally negative"},
+                {"id": "gapper", "reason": "REMOVED — old equity gapper expert archived"},
+                {"id": "alpaca", "reason": "REMOVED — Alpaca broker archived (Kraken Futures only)"},
+            ],
+            "active_router": getattr(config, "ROUTER_VARIANT", "strict"),
+            "by_thesis": out,
+        })
+    except Exception as e:
+        logger.error(f"api_thesis_breakdown error: {e}")
+        return jsonify({"error": str(e)})
 
 
 @app.route("/api/phase4-status")
@@ -649,14 +729,19 @@ def api_analysis():
         conn = _ro_conn(_memory.db_path, timeout=10)
         c    = conn.cursor()
 
-        # ── Expert filter — based on strategy_source in market_context ──
+        # Geo V4 is the only expert. Optional per-thesis filtering.
         expert = request.args.get("expert", "all").lower()
-        if expert == "gap":
-            ef = "AND json_extract(market_context, '$.strategy_source') = 'gapper'"
-        elif expert == "geo":
+        if expert in ("geo", "all"):
             ef = "AND json_extract(market_context, '$.strategy_source') = 'geo_v4'"
         else:
             ef = ""
+        thesis = request.args.get("thesis", "").upper()
+        if thesis in ("T1", "T2"):
+            ef += f" AND json_extract(market_context, '$.thesis') = '{thesis}'"
+        elif thesis == "T1L":
+            ef += " AND json_extract(market_context, '$.side') = 'long'"
+        elif thesis == "T1S":
+            ef += " AND json_extract(market_context, '$.side') = 'short' AND COALESCE(json_extract(market_context, '$.thesis'), 'T1') = 'T1'"
 
         # ── All closed trades ──────────────────────────────────────────
         c.execute(f"""

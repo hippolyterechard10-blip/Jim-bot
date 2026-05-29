@@ -605,9 +605,15 @@ class GeometricExpert:
                             f"state={state} conf={conf:.0f} — T1S short enabled despite hard block"
                         )
 
-                # Hard block: confidence too low OR policy disallows everything
+                # Hard block: confidence too low OR policy disallows everything.
+                # BYPASS: if ROUTER_VARIANT="t1_neutral" and state=="neutral", T1S short is
+                # explicitly allowed to fire (C2 diagnostic showed +0.4% avg expectancy 64%
+                # WR on T1S in neutral). The router downstream will then decide.
                 block_all = not (cr_allow_long or cr_allow_short)
-                if block_all or conf < min_conf:
+                router_neutral_bypass = (
+                    config.ROUTER_VARIANT == "t1_neutral" and state == "neutral"
+                )
+                if (block_all or conf < min_conf) and not router_neutral_bypass and not t1s_hard_block_override:
                     logger.info(
                         f"[CRYPTO_REGIME] {symbol} BLOCKED "
                         f"old={old_regime_label} new={state} eth={eth_signal} btc={btc_state} "
@@ -616,6 +622,25 @@ class GeometricExpert:
                         f"reason=\"{policy_reason}\""
                     )
                     return
+                # If we get here via router_neutral_bypass, force-enable cr_allow_short
+                # AND ensure cr_size_mult is non-zero (default size). Otherwise deploy=0
+                # and no trade can size. Use 0.5 — moderate size for unconfirmed regime.
+                if router_neutral_bypass and not cr_allow_short:
+                    cr_allow_short = True
+                    if cr_size_mult <= 0:
+                        cr_size_mult = 0.5    # default conservative size for neutral bypass
+                    logger.info(
+                        f"[CRYPTO_REGIME] {symbol} ROUTER_NEUTRAL_BYPASS applied "
+                        f"state=neutral conf={conf:.0f} dir={dir_:+.2f} "
+                        f"size_mult={cr_size_mult:.2f} — T1S short enabled"
+                    )
+                # Same fix for T1S hard-block override (size_mult might be 0 in some
+                # hard-block states like btc_chaos)
+                if t1s_hard_block_override and cr_size_mult <= 0:
+                    cr_size_mult = 0.5
+                    logger.info(
+                        f"[CRYPTO_REGIME] {symbol} T1S hard-block size_mult defaulted to 0.5"
+                    )
                 logger.info(
                     f"[CRYPTO_REGIME] {symbol} ALLOWED "
                     f"old={old_regime_label} new={state} eth={eth_signal} btc={btc_state} "
