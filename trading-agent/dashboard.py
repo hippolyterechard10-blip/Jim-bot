@@ -327,17 +327,27 @@ def api_open_trades():
 
 @app.route("/api/trades/recent")
 def api_recent_trades():
+    """Clean slate: only Phase 4 trades by default. ?include_legacy=1 to see all."""
     if not _memory: return jsonify([])
-    trades = _memory.get_recent_trades(limit=20)
-    for t in trades:
+    PHASE4_CUTOVER = "2026-05-28T21:37:00"
+    include_legacy = request.args.get("include_legacy", "0") == "1"
+    all_trades = _memory.get_recent_trades(limit=100)    # fetch more, filter, then trim
+    filtered = []
+    for t in all_trades:
+        if not include_legacy:
+            entry_at = str(t.get("entry_at", ""))
+            if entry_at and entry_at < PHASE4_CUTOVER:
+                continue
         raw = t.get("market_context") or {}
         if isinstance(raw, str):
             try: raw = json.loads(raw)
             except: raw = {}
         t["strategy_source"] = raw.get("strategy_source")
-        t["thesis"]          = raw.get("thesis", "T1")    # default T1 for legacy trades
+        t["thesis"]          = raw.get("thesis", "T1")
         t["crypto_regime"]   = raw.get("crypto_regime")
-    return jsonify(trades)
+        filtered.append(t)
+        if len(filtered) >= 20: break
+    return jsonify(filtered)
 
 @app.route("/api/decisions/recent")
 def api_recent_decisions():
@@ -1083,15 +1093,20 @@ def api_analysis_period():
 
 @app.route("/api/analysis/equity-curve")
 def api_analysis_equity_curve():
-    """Section 4 — Courbe d'équité cumulée depuis GEO_RESET_DATE."""
+    """Section 4 — Courbe d'équité cumulée. Clean slate Phase 4 cutover by default."""
     if not _memory:
         return jsonify({"capital_start": 0, "points": []})
     try:
-        capital_start = _get_alpaca_equity()
+        PHASE4_CUTOVER = "2026-05-28T21:37:00"
+        include_legacy = request.args.get("include_legacy", "0") == "1"
+        cutover_clause = "" if include_legacy else f"AND exit_at >= '{PHASE4_CUTOVER}'"
+        # Reset baseline equity from $10k when filtering Phase 4 only
+        capital_start = config.GEO_CAPITAL if not include_legacy else _get_alpaca_equity()
         conn  = _ro_conn(_memory.db_path)
         rows  = conn.execute(f"""
             SELECT exit_at, pnl FROM trades
             WHERE {_geo_filter()}
+              {cutover_clause}
             ORDER BY exit_at
         """).fetchall()
         conn.close()
@@ -1199,9 +1214,11 @@ def _get_alpaca_equity() -> float:
     if _equity_cache["value"] is not None and now - _equity_cache["ts"] < _EQUITY_CACHE_TTL:
         return _equity_cache["value"]
     try:
+        # Phase 4 clean slate: equity = capital + Phase 4 trades PnL only.
+        PHASE4_CUTOVER = "2026-05-28T21:37:00"
         conn = _ro_conn(_memory.db_path)
         row  = conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='closed'"
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='closed' AND entry_at >= '{PHASE4_CUTOVER}'"
         ).fetchone()
         conn.close()
         equity = config.GEO_CAPITAL + float((row[0] if row else 0) or 0)
