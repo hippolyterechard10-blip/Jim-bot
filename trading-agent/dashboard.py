@@ -148,8 +148,63 @@ def init_dashboard(memory, regime=None, **kwargs):
 
 @app.route("/api/stats")
 def api_stats():
+    """Performance stats. Clean slate Phase 4 cutover by default."""
     if not _memory: return jsonify({})
-    return jsonify(_memory.compute_performance_stats())
+    PHASE4_CUTOVER = "2026-05-28T21:37:00"
+    include_legacy = request.args.get("include_legacy", "0") == "1"
+    cutover_clause = "" if include_legacy else f"AND entry_at >= '{PHASE4_CUTOVER}'"
+    try:
+        conn = _ro_conn(_memory.db_path)
+        rows = conn.execute(f"""
+            SELECT pnl, symbol FROM trades
+            WHERE status='closed' AND pnl IS NOT NULL
+              {cutover_clause}
+        """).fetchall()
+        # Also pull real-time Kraken balance for transparency
+        try:
+            from broker_kraken_paper import KrakenPaperBroker
+            kraken_real_equity = round(KrakenPaperBroker().get_equity(), 2)
+        except Exception:
+            kraken_real_equity = None
+        conn.close()
+        n = len(rows)
+        if n == 0:
+            return jsonify({
+                "total_trades": 0, "winning_trades": 0, "losing_trades": 0,
+                "win_rate": 0, "total_pnl": 0, "profit_factor": 0,
+                "avg_win": 0, "avg_loss": 0, "max_drawdown": 0,
+                "best_asset": None, "asset_pnl": {},
+                "data_includes_legacy": include_legacy,
+                "kraken_real_equity": kraken_real_equity,
+                "synthetic_baseline": 10000.0 if not include_legacy else None,
+            })
+        wins = [r[0] for r in rows if r[0] > 0]
+        losses = [r[0] for r in rows if r[0] <= 0]
+        gw = sum(wins) if wins else 0
+        gl = abs(sum(losses)) if losses else 0
+        # Asset PnL
+        ap = {}
+        for pnl, sym in rows:
+            ap[sym] = round(ap.get(sym, 0) + (pnl or 0), 2)
+        best = max(ap, key=ap.get) if ap else None
+        return jsonify({
+            "total_trades": n,
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "win_rate": round(len(wins) / n * 100, 1),
+            "total_pnl": round(sum(r[0] for r in rows), 2),
+            "profit_factor": round(gw / gl, 2) if gl > 1e-9 else (999.0 if gw > 0 else 0),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+            "best_asset": best,
+            "asset_pnl": ap,
+            "data_includes_legacy": include_legacy,
+            "kraken_real_equity": kraken_real_equity,
+            "synthetic_baseline": 10000.0 if not include_legacy else None,
+        })
+    except Exception as e:
+        logger.error(f"api_stats error: {e}")
+        return jsonify({"error": str(e)})
 
 @app.route("/api/llm/usage")
 def api_llm_usage():
@@ -1093,15 +1148,22 @@ def api_analysis_period():
 
 @app.route("/api/analysis/equity-curve")
 def api_analysis_equity_curve():
-    """Section 4 — Courbe d'équité cumulée. Clean slate Phase 4 cutover by default."""
+    """Section 4 — Courbe d'équité cumulée. Clean slate Phase 4 cutover by default.
+    Returns BOTH synthetic baseline (calculated from cutover) AND real Kraken equity."""
     if not _memory:
         return jsonify({"capital_start": 0, "points": []})
     try:
         PHASE4_CUTOVER = "2026-05-28T21:37:00"
         include_legacy = request.args.get("include_legacy", "0") == "1"
         cutover_clause = "" if include_legacy else f"AND exit_at >= '{PHASE4_CUTOVER}'"
-        # Reset baseline equity from $10k when filtering Phase 4 only
+        # Synthetic baseline (display-only): start from $10k at Phase 4 cutover
         capital_start = config.GEO_CAPITAL if not include_legacy else _get_alpaca_equity()
+        # Real Kraken paper equity for honest reporting
+        try:
+            from broker_kraken_paper import KrakenPaperBroker
+            kraken_real_equity = round(KrakenPaperBroker().get_equity(), 2)
+        except Exception:
+            kraken_real_equity = None
         conn  = _ro_conn(_memory.db_path)
         rows  = conn.execute(f"""
             SELECT exit_at, pnl FROM trades
@@ -1121,6 +1183,9 @@ def api_analysis_equity_curve():
         return jsonify({
             "capital_start": round(capital_start, 2),
             "capital_now":   round(cumulative, 2),
+            "kraken_real_equity": kraken_real_equity,
+            "synthetic_note": "capital_start/now = synthetic Phase 4 baseline; kraken_real_equity = actual paper account balance",
+            "data_includes_legacy": include_legacy,
             "points":        points,
         })
     except Exception as e:
