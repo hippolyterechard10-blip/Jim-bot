@@ -1,16 +1,17 @@
 """
-geometric_expert.py — Geo V4 ETH+SOL (OKX broker)
-Stratégie validée backtest 2022-2025 :
-  - Zones ±0.3% autour des pivots 15min
-  - Limit order à zone["high"] (support × 1.003)
-  - Stop dynamique sous wick réel
-  - RSI divergence [20-65] + Pass 3b
-  - Zone freshness MAX_TOUCHES=2
-  - Target +0.9%
+geometric_expert.py — Geo V4 ETH+SOL (Kraken Futures, broker-agnostic)
 
-Broker OKX : SL + TP attachés à l'ordre d'entrée (bracket natif).
-manage_open_positions() simplifié : détecte fermeture par comparaison
-positions OKX ↔ DB. Aucun price-check bot-side.
+Multi-thesis short expert (Phase 4 paper) :
+  - T1L (long zone bounce) : pivots support 15min, RSI [20-65], div + Pass 3b
+  - T1S (short zone bounce) : miroir T1L, RSI [35-80], T1S_DIV_MODE dispatch
+  - T2 (trend follow short) : pullback EMA20 1h en trend_down_smooth
+  - Zones ±0.3% autour des pivots 15min, target +0.9%, zone freshness MAX_TOUCHES=2
+  - Stop dynamique sous/au-dessus wick réel, R:R min 1.2
+
+Broker SL/TP behavior depends on `broker.NATIVE_BRACKETS` :
+  - True  → broker matches SL/TP on its engine (e.g. Kraken Futures live).
+  - False → bot-side detection in manage_open_positions() via price compare
+            (e.g. KrakenPaperBroker — paper bracket support disabled).
 """
 from __future__ import annotations
 import logging, json, threading, uuid, datetime, time, os
@@ -132,7 +133,7 @@ class GeometricExpert:
                     })
                     logger.info(f"[GEO] 🔄 Recovered pending order: {symbol} {side.upper()} GTC@{lim}")
 
-            # 2. Réconcilier les positions OKX sans trade DB correspondant
+            # 2. Réconcilier les positions broker sans trade DB correspondant
             positions   = self.broker.get_positions()
             open_db     = {t["symbol"] for t in self.memory.get_open_trades()}
             _now        = datetime.datetime.now(datetime.timezone.utc)
@@ -203,7 +204,7 @@ class GeometricExpert:
     def _live_capital(self) -> float:
         try:
             eq = self.broker.get_equity()
-            logger.debug(f"[GEO] live capital OKX: ${eq:.2f}")
+            logger.debug(f"[GEO] live capital broker: ${eq:.2f}")
             return eq
         except Exception as e:
             logger.warning(f"[GEO] _live_capital fallback: {e}")
@@ -1040,7 +1041,9 @@ class GeometricExpert:
 
     def manage_pending_orders(self):
         """Vérifie les ordres GTC en attente : fill → log trade.
-        SL + TP sont déjà attachés à l'ordre OKX → aucun ordre supplémentaire à placer.
+        SL + TP sont déjà attachés à l'ordre broker (si NATIVE_BRACKETS=True) →
+        aucun ordre supplémentaire à placer. Sinon manage_open_positions détecte
+        bot-side.
         Itère sur un snapshot pour éviter mutation concurrente avec evaluate()."""
         for zk, p in self._pending_snapshot().items():
             try:
