@@ -37,6 +37,15 @@ RSI_LOW          = 20
 RSI_HIGH         = 65
 RSI_LOW_S        = 35
 RSI_HIGH_S       = 80
+
+# T1S divergence requirement mode (Phase 4 paper diagnostic 2026-05-29).
+# Grid-able via T1S_DIV_MODE.
+#   "strict"       → div bear required (legacy live pre-Phase 4.1, kept for rollback)
+#   "rsi_fallback" → div OR rsi ∈ [45,70] passes (C3 backtest sweet spot)
+#   "never"        → div not checked; only RSI band [RSI_LOW_S, RSI_HIGH_S]
+# DEFAULT aligned with config.py and validated phase4-divergence-validation.md
+# (7-test campaign concluded "never" strictly dominates "strict" on all axes).
+T1S_DIV_MODE     = "never"
 TARGET_PCT       = 0.009
 TIMEOUT_BARS     = 48          # 48 × 5m = 4h
 MIN_RR           = 1.2
@@ -298,6 +307,57 @@ def _nearest_support_1h_below(lows_1h, current_price, lookback=20, min_dist_pct=
     return max(pivots)    # closest below (highest among those < current)
 
 
+def _detect_breakdown(l1h, c1h, current_close, prev_close, lookback=20,
+                      near_band_pct=0.01, min_dist_pct=0.001):
+    """Detect a breakdown event: price just punched through a 1h pivot support.
+
+    Logic:
+    - Look at 1h pivot lows in the last `lookback` 1h bars (5-bar pivot)
+    - Filter to pivots near current price: within +/- `near_band_pct` of current_close
+    - Confirm the break event at 5m granularity:
+        * prev_close (5m, one bar ago) was >= level
+        * current_close (5m, now) is < level * (1 - min_dist_pct)
+    - Return the HIGHEST such level (most recently broken / most relevant)
+    - Return None if no breakdown event detected.
+
+    Parameters
+    ----------
+    l1h : np.array
+        1h low series.
+    c1h : np.array or None
+        1h close series (for context check). Pass None if unavailable.
+    current_close : float
+        Current 5m close.
+    prev_close : float
+        Previous 5m close.
+    lookback : int
+        How many 1h bars to scan for pivots (default 20 = ~20h).
+    near_band_pct : float
+        Pivots must be within +/- this % of current price (default 1%).
+    min_dist_pct : float
+        Current must be at least this % below level to count as broken (default 0.1%).
+    """
+    if len(l1h) < 5: return None
+    sub_l = l1h[-lookback:] if len(l1h) > lookback else l1h
+    upper = current_close * (1 + near_band_pct)
+    lower = current_close * (1 - near_band_pct)
+    candidates = []
+    for i in range(2, len(sub_l) - 2):
+        # 5-bar pivot low
+        if not (sub_l[i] < sub_l[i-1] and sub_l[i] < sub_l[i-2]
+                and sub_l[i] < sub_l[i+1] and sub_l[i] < sub_l[i+2]):
+            continue
+        level = float(sub_l[i])
+        if level < lower or level > upper:
+            continue
+        # Breakdown confirmation at 5m close: prev >= level, current < level - buffer
+        if prev_close >= level and current_close < level * (1 - min_dist_pct):
+            candidates.append(level)
+    if not candidates:
+        return None
+    return max(candidates)
+
+
 def _find_next_lower_support(lows_1h, current_price, lookback=50, max_dist_pct=0.05):
     """Find next 1h support below current_price, within max_dist_pct."""
     if len(lows_1h) < 5: return None
@@ -366,11 +426,12 @@ class SharedPool:
             if p["id"] != pid: continue
             sign = 1 if p["side"] == "long" else -1
             pnl_gross = sign * (exit_price - p["entry"]) * p["qty"]
-            pnl_net = pnl_gross - fee_exit
+            fee_entry = p.get("fee_entry", 0.0)
+            pnl_net = pnl_gross - fee_exit - fee_entry
             self.equity += pnl_net
             closed = {**p, "exit": exit_price, "exit_reason": exit_reason,
                       "pnl_gross": pnl_gross, "pnl_net": pnl_net,
-                      "fee_exit": fee_exit}
+                      "fee_exit": fee_exit, "total_fees": fee_entry + fee_exit}
             self.open_positions.pop(i)
             return closed
         return None
@@ -441,8 +502,14 @@ def get_short_signal_t1(arr_5m, arr_15m, arr_1h):
         dist = (zone["center"] - curr) / curr
         if not (-0.002 <= dist <= 0.012): continue
         if not (RSI_LOW_S <= rsi <= RSI_HIGH_S): continue
-        div = _rsi_bear_div(cl5, rsi)
-        if not div and not (45 <= rsi <= 70): continue
+        # T1S divergence gate — modulé par T1S_DIV_MODE pour A/B testing parity live/backtest.
+        if T1S_DIV_MODE == "never":
+            pass  # skip div check entirely
+        elif T1S_DIV_MODE == "strict":
+            if not _rsi_bear_div(cl5, rsi): continue
+        else:  # "rsi_fallback" (default — C3 sweet spot)
+            div = _rsi_bear_div(cl5, rsi)
+            if not div and not (45 <= rsi <= 70): continue
         if not any(h5[-8:] >= zone["low"]): continue
         if cl5[-1] >= zone["high"]: continue
         stop = _dyn_stop_short(h5[-8:], zone["center"], zone["wick"])
@@ -458,12 +525,12 @@ def get_short_signal_t1(arr_5m, arr_15m, arr_1h):
 
 # ─── T2: TREND FOLLOW (pullback EMA20 1h in trend_down_smooth) ────────────────
 
-# T2 params
-T2_PULLBACK_BUFFER_PCT = 0.002    # 0.2%
-T2_SWING_LOOKBACK_1H   = 10
-T2_STOP_BUFFER_PCT     = 0.003    # 0.3%
-T2_TIMEOUT_MIN         = 90
-T2_RSI_5M_MAX          = 70
+# T2 params (validated best from refinement grid)
+T2_PULLBACK_BUFFER_PCT = 0.012    # 0.2% → 1.2% (wider pullback zone)
+T2_SWING_LOOKBACK_1H   = 12       # 10 → 12 bars
+T2_STOP_BUFFER_PCT     = 0.003    # 0.3% (unchanged)
+T2_TIMEOUT_MIN         = 120      # 90 → 120 min
+T2_RSI_5M_MAX          = 65       # 70 → 65 (tighter)
 T2_TARGET_PCT_DEFAULT  = 0.015    # fallback if regime doesn't carry target_pct
 T2_INITIAL_CAP         = 0.7
 
@@ -549,6 +616,7 @@ T3_MIN_RR               = 1.5
 T3_TIMEOUT_MIN          = 60
 T3_RSI_5M_MAX           = 50
 T3_INITIAL_CAP          = 0.5
+T3_RETEST_LOOKBACK_BARS = 50    # set to 0 to disable the "recent retest" filter entirely
 
 
 def get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision):
@@ -565,28 +633,25 @@ def get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision):
     current_close = float(c5[-1])
     prev_close    = float(c5[-2]) if len(c5) >= 2 else current_close
 
-    # 1. Identify NEAREST support 1h below current price (not absolute plancher).
-    #    The "support to break" is the closest pivot low just under us.
-    support_level = _nearest_support_1h_below(l1h, current_close,
-                                              lookback=20, min_dist_pct=0.001)
+    # 1. + 2. Detect breakdown event: find a 1h pivot support near current price
+    #    that prev_close was at/above AND current_close has just dropped through.
+    support_level = _detect_breakdown(
+        l1h, None, current_close, prev_close,
+        lookback=T3_SUPPORT_LOOKBACK_1H,
+        near_band_pct=0.01,
+        min_dist_pct=T3_BREAKDOWN_BUFFER_PCT,
+    )
     if support_level is None: return None
-
-    # 2. Confirmation breakdown:
-    threshold_break = support_level * (1 - T3_BREAKDOWN_BUFFER_PCT)
-    if current_close >= threshold_break: return None
-    if prev_close <= support_level * (1 - T3_BREAKDOWN_BUFFER_PCT): return None
 
     # 3. Volume confirm: bar 5m de breakdown >= 1.5 * avg(20)
     if len(v5) < 21: return None
     avgv = float(np.mean(v5[-21:-1]))
     if avgv > 0 and v5[-1] < avgv * T3_VOLUME_MULTIPLIER: return None
 
-    # 4. Not a fresh retest:
-    #    Quick check — was support tested in the last 4 hours (48 bars 5m) by bouncing up?
-    #    Test: lows in [-50:-3] reached support and recovered above it
-    if len(l5) >= 50:
-        sub_lows  = l5[-50:-3]
-        sub_highs = h5[-50:-3]
+    # 4. Not a fresh retest (optional check, gated on T3_RETEST_LOOKBACK_BARS).
+    if T3_RETEST_LOOKBACK_BARS > 0 and len(l5) >= T3_RETEST_LOOKBACK_BARS:
+        sub_lows  = l5[-T3_RETEST_LOOKBACK_BARS:-3]
+        sub_highs = h5[-T3_RETEST_LOOKBACK_BARS:-3]
         recent_touch = any(sub_lows <= support_level * 1.002) and any(sub_highs >= support_level * 1.008)
         if recent_touch: return None    # already retested+bounced, T1 territory
 
@@ -631,6 +696,7 @@ T4_TARGET_PCT           = 0.012    # 1.2%
 T4_MIN_RR_T4            = 1.3
 T4_TIMEOUT_MIN          = 45
 T4_RSI_AT_SWING_MIN     = 65
+T4_SWING_RECENT_MAX     = 5        # swing high must be within last N bars of CURRENT_HIGH_LOOKBACK
 T4_INITIAL_CAP          = 0.6
 
 
@@ -649,11 +715,11 @@ def get_short_signal_t4(arr_5m, arr_15m, arr_1h, regime_decision):
     if abs(s) > len(h5): return None
     prev_high = float(np.max(h5[s:e]))
 
-    # 2. Identify current swing high (last 8 bars)
+    # 2. Identify current swing high (last N bars)
     idx_rel, current_swing_high = _swing_high_5m(h5, T4_CURRENT_HIGH_LOOKBACK)
     if current_swing_high is None: return None
-    # Swing should be in last 5 bars (recent rejection)
-    if T4_CURRENT_HIGH_LOOKBACK - idx_rel > 5: return None
+    # Swing must be in last T4_SWING_RECENT_MAX bars (recent rejection)
+    if T4_CURRENT_HIGH_LOOKBACK - idx_rel > T4_SWING_RECENT_MAX: return None
 
     # 3. Lower-high check
     if current_swing_high >= prev_high: return None    # not a lower-high
@@ -728,6 +794,20 @@ _T1_ELIGIBLE_STATES = {
     "range_quiet", "aligned_short_trend", "btc_led_short", "trend_down_choppy",
 }
 
+# Router variant — controls which states allow T1 short + fallback behavior
+# - "strict"            : T1 only in _T1_ELIGIBLE_STATES, no fallback (Sharpe 3.87)
+# - "t1_neutral"        : T1 ALSO fires in `neutral` state (Sharpe 21 but unrealistic)
+# - "t1_trend_fallback" : T1 fires as fallback in `trend_down_smooth` if T2 fails
+#                         (Sharpe 9.71 SWEET SPOT — C3 grid validated)
+# DEFAULT aligned with config.py (validated sweet spot, not live override).
+ROUTER_VARIANT = "t1_trend_fallback"
+
+# When True, T1 short ALSO fires in states normally hard-blocked
+# (btc_chaos, btc_trend_eth_weak). C2 diagnostic showed T1S has positive
+# expectancy in these states (64.4% WR, +0.479% avg pnl), so allowing them
+# recovers real edge. DEFAULT aligned with config.py and validated C3.
+T1S_INCLUDE_HARD_BLOCK = True
+
 
 def route_short_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
     """Returns (thesis_id, signal_dict) or (None, None).
@@ -745,6 +825,10 @@ def route_short_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
     dirn  = regime_decision.get("direction", 0)
 
     if state in _HARD_BLOCK_STATES:
+        # Optional: allow T1S in hard-block states (C3 hypothesis test)
+        if T1S_INCLUDE_HARD_BLOCK and "t1" in enabled:
+            sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
+            if sig: return "T1", sig
         return None, None
 
     # ── trend_down_smooth branch ──────────────────────────────────────────────
@@ -761,6 +845,10 @@ def route_short_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
         if "t3" in enabled:
             sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
             if sig: return "T3", sig
+        # Variant: t1_trend_fallback adds T1 zone bounce as last-resort in trend_down_smooth
+        if ROUTER_VARIANT == "t1_trend_fallback" and "t1" in enabled:
+            sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
+            if sig: return "T1", sig
         return None, None
 
     # ── trend_down_choppy branch ──────────────────────────────────────────────
@@ -781,6 +869,10 @@ def route_short_signal(arr_5m, arr_15m, arr_1h, regime_decision, enabled):
         if "t3" in enabled:
             sig = get_short_signal_t3(arr_5m, arr_15m, arr_1h, regime_decision)
             if sig: return "T3", sig
+        # Variant: t1_neutral allows T1 short to fire in neutral state
+        if ROUTER_VARIANT == "t1_neutral" and "t1" in enabled:
+            sig = get_short_signal_t1(arr_5m, arr_15m, arr_1h)
+            if sig: return "T1", sig
         return None, None
 
     # ── T1-only states ────────────────────────────────────────────────────────
@@ -885,6 +977,7 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
     pool = SharedPool(initial_capital=CAPITAL)
     closed_trades = []
     equity_curve = []
+    rejection_log = []   # list of dicts: {ts, symbol, thesis, side, state, conf, dir, reason, entry, stop, target, timeout_min}
 
     # Regime evaluation cache (1 per 5m bar per symbol).
     # If regime_cache_shared is provided, reuse across runs (params don't
@@ -1003,6 +1096,11 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
                 _try_enter(pool, "short_expert", t_id, sym, short_sig, rd, i,
                            common_5m, arrays[sym], closed_trades, rng)
 
+            # ── DIAGNOSTIC SHADOW PASS (rejection logging) ──────────────────
+            # Always evaluate all thesis triggers regardless of router gates;
+            # log what would have happened.
+            _shadow_log(rejection_log, pool, i, t_now, sym, arr5, arr15, arr1h, rd)
+
         if verbose and time.time() - last_progress > 5:
             print(f"  [{t_now}] equity=${pool.equity:.2f}  open={len(pool.open_positions)}  closed={len(closed_trades)}")
             last_progress = time.time()
@@ -1012,7 +1110,134 @@ def run_backtest(symbols, start, end, enabled, verbose=True, data=None, df_btc=N
         "equity_curve": equity_curve,
         "final_equity": pool.equity,
         "start_capital": CAPITAL,
+        "rejection_log": rejection_log,
     }
+
+
+def _shadow_log(rejection_log, pool, i, t_now, sym, arr5, arr15, arr1h, rd):
+    """Shadow diagnostic pass: evaluate all thesis triggers unconditionally and
+    log would-be signals with the rejection reason that would have blocked them."""
+    state = rd.get("state", "")
+    conf  = rd.get("confidence", 0)
+    dirn  = rd.get("direction", 0)
+
+    def _open_sides(sym):
+        return {p["side"] for p in pool.open_positions if p["symbol"] == sym}
+
+    def _pool_full():
+        return len(pool.open_positions) >= MAX_SIM_GLOBAL
+
+    def _append(thesis, side, sig, reason):
+        rejection_log.append({
+            "ts": t_now, "symbol": sym, "thesis": thesis, "side": side,
+            "state": state, "conf": conf, "dir": dirn, "reason": reason,
+            "entry": sig["entry"], "stop": sig["stop"], "target": sig["target"],
+            "timeout_min": sig.get("timeout_min"),
+            "fill_type": sig.get("fill_type", "limit"),
+        })
+
+    # T1 LONG shadow
+    t1l_sig = get_long_signal_t1(arr5, arr15, arr1h)
+    if t1l_sig:
+        if not rd.get("allow_long", False):
+            reason = "regime_blocks_long"
+        elif _pool_full():
+            reason = "pool_full"
+        elif "short" in _open_sides(sym):
+            reason = "same_symbol_conflict"
+        elif any(p["expert_id"] == "long_geo_v4" and p["symbol"] == sym
+                 and p["bar_idx"] == i for p in pool.open_positions):
+            reason = "taken"
+        else:
+            # Check if it was actually entered this bar (any long_geo_v4 just opened this bar)
+            taken_this_bar = any(
+                p["expert_id"] == "long_geo_v4" and p["symbol"] == sym
+                and p["bar_idx"] == i for p in pool.open_positions
+            )
+            reason = "taken" if taken_this_bar else "no_signal_other"
+        _append("T1L", "long", t1l_sig, reason)
+
+    # T1 SHORT shadow
+    t1s_sig = get_short_signal_t1(arr5, arr15, arr1h)
+    if t1s_sig:
+        if state in _HARD_BLOCK_STATES:
+            reason = "hard_block_state"
+        elif state not in _T1_ELIGIBLE_STATES:
+            reason = "t1_not_eligible_state"
+        elif _pool_full():
+            reason = "pool_full"
+        elif "long" in _open_sides(sym):
+            reason = "same_symbol_conflict"
+        else:
+            taken_this_bar = any(
+                p["expert_id"] == "short_expert" and p["thesis_id"] == "T1"
+                and p["symbol"] == sym and p["bar_idx"] == i
+                for p in pool.open_positions
+            )
+            reason = "taken" if taken_this_bar else "no_signal_other"
+        _append("T1S", "short", t1s_sig, reason)
+
+    # T2 SHORT shadow
+    t2_sig = get_short_signal_t2(arr5, arr15, arr1h, rd)
+    if t2_sig:
+        if state in _HARD_BLOCK_STATES:
+            reason = "hard_block_state"
+        elif state != "trend_down_smooth":
+            reason = "t2_wrong_state"
+        elif not (conf >= 75 and dirn <= -0.85):
+            reason = "t2_conf_or_dir_gate"
+        elif _pool_full():
+            reason = "pool_full"
+        elif "long" in _open_sides(sym):
+            reason = "same_symbol_conflict"
+        else:
+            taken_this_bar = any(
+                p["expert_id"] == "short_expert" and p["thesis_id"] == "T2"
+                and p["symbol"] == sym and p["bar_idx"] == i
+                for p in pool.open_positions
+            )
+            reason = "taken" if taken_this_bar else "no_signal_other"
+        _append("T2", "short", t2_sig, reason)
+
+    # T3 SHORT shadow
+    t3_sig = get_short_signal_t3(arr5, arr15, arr1h, rd)
+    if t3_sig:
+        if state in _HARD_BLOCK_STATES:
+            reason = "hard_block_state"
+        elif state not in {"trend_down_smooth", "trend_down_choppy", "neutral"}:
+            reason = "t3_wrong_state"
+        elif _pool_full():
+            reason = "pool_full"
+        elif "long" in _open_sides(sym):
+            reason = "same_symbol_conflict"
+        else:
+            taken_this_bar = any(
+                p["expert_id"] == "short_expert" and p["thesis_id"] == "T3"
+                and p["symbol"] == sym and p["bar_idx"] == i
+                for p in pool.open_positions
+            )
+            reason = "taken" if taken_this_bar else "no_signal_other"
+        _append("T3", "short", t3_sig, reason)
+
+    # T4 SHORT shadow
+    t4_sig = get_short_signal_t4(arr5, arr15, arr1h, rd)
+    if t4_sig:
+        if state in _HARD_BLOCK_STATES:
+            reason = "hard_block_state"
+        elif state not in {"trend_down_smooth", "trend_down_choppy"}:
+            reason = "t4_wrong_state"
+        elif _pool_full():
+            reason = "pool_full"
+        elif "long" in _open_sides(sym):
+            reason = "same_symbol_conflict"
+        else:
+            taken_this_bar = any(
+                p["expert_id"] == "short_expert" and p["thesis_id"] == "T4"
+                and p["symbol"] == sym and p["bar_idx"] == i
+                for p in pool.open_positions
+            )
+            reason = "taken" if taken_this_bar else "no_signal_other"
+        _append("T4", "short", t4_sig, reason)
 
 
 def _try_enter(pool, expert_id, thesis_id, symbol, signal, regime, i,
