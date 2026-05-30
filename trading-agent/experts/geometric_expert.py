@@ -1215,6 +1215,16 @@ class GeometricExpert:
                             f"{symbol} @ ${fill_price:.4f} pnl=${pnl:.2f}"
                         )
                         self.memory.log_trade_close(trade_id, fill_price, reason, pnl=pnl)
+                        # P0 fix : cancel le bracket twin survivant pour éviter qu'il
+                        # tire plus tard sur une position fantôme.
+                        # Optional ID-aware variant — broker peut absorber NoOp.
+                        try:
+                            if hasattr(self.broker, "cancel_twin_brackets"):
+                                n_cxl = self.broker.cancel_twin_brackets(symbol)
+                                if n_cxl:
+                                    logger.info(f"[GEO] 🧹 Cancelled {n_cxl} twin bracket(s) for {symbol}")
+                        except Exception as e:
+                            logger.warning(f"[GEO] cancel_twin_brackets({symbol}) failed: {e}")
                     else:
                         live = self.broker.get_live_price(symbol) or entry
                         pnl  = mult * (live - entry) * qty_t

@@ -290,7 +290,11 @@ class KrakenBroker:
 
     def _place_stop_close(self, kraken_sym: str, close_side: str,
                           qty: float, stop_price: float) -> str | None:
-        """Stop order to CLOSE position. close_side='sell' for long, 'buy' for short."""
+        """Stop order to CLOSE position. close_side='sell' for long, 'buy' for short.
+        reduceOnly=true : Kraken Futures n'autorise pas l'ordre à ouvrir une nouvelle
+        position s'il survit à la disparition de la position originale (P0 fix: prévient
+        SL orphelin → phantom position après fill du TP jumeau).
+        """
         try:
             r = self._post("/derivatives/api/v3/sendorder", {
                 "orderType":     "stp",
@@ -299,6 +303,7 @@ class KrakenBroker:
                 "size":          str(qty),
                 "stopPrice":     str(_smart_round(stop_price)),
                 "triggerSignal": "last",
+                "reduceOnly":    "true",
             })
             if r.get("result") == "success":
                 return r.get("sendStatus", {}).get("order_id")
@@ -309,7 +314,10 @@ class KrakenBroker:
 
     def _place_limit_close(self, kraken_sym: str, close_side: str,
                            qty: float, limit_price: float) -> str | None:
-        """Limit order to CLOSE position. close_side='sell' for long TP, 'buy' for short TP."""
+        """Limit order to CLOSE position. close_side='sell' for long TP, 'buy' for short TP.
+        reduceOnly=true : empêche ouverture d'une position nouvelle si l'ordre tire après
+        la disparition de la position originale (P0 fix).
+        """
         try:
             r = self._post("/derivatives/api/v3/sendorder", {
                 "orderType":  "lmt",
@@ -317,6 +325,7 @@ class KrakenBroker:
                 "side":       close_side,
                 "size":       str(qty),
                 "limitPrice": str(_smart_round(limit_price)),
+                "reduceOnly": "true",
             })
             if r.get("result") == "success":
                 return r.get("sendStatus", {}).get("order_id")
@@ -324,6 +333,27 @@ class KrakenBroker:
         except Exception as e:
             logger.error(f"[Kraken] _place_limit_close: {e}")
         return None
+
+    def cancel_twin_brackets(self, symbol: str, exclude_order_id: str | None = None) -> int:
+        """Cancel any cached SL/TP bracket order for `symbol` except `exclude_order_id`.
+        Called by geometric_expert.manage_open_positions when a native fill is detected,
+        to prevent the surviving twin from later firing on a phantom position.
+        Returns count of cancelled orders. Also pops `_sltp[sym]` once both gone.
+        """
+        sym = self._to_kraken(symbol)
+        cached = self._sltp.get(sym, {})
+        cancelled = 0
+        for k in ("sl_order_id", "tp_order_id"):
+            oid = cached.get(k)
+            if oid and oid != exclude_order_id:
+                if self.cancel_order(symbol, oid):
+                    cancelled += 1
+                    cached[k] = None
+        # If both twins now cleared (or not set), drop the cache entry entirely
+        if not cached.get("sl_order_id") and not cached.get("tp_order_id"):
+            self._sltp.pop(sym, None)
+            self._save_sltp_cache()
+        return cancelled
 
     # ── Prix live ────────────────────────────────────────────────────────────
 
