@@ -3,9 +3,10 @@ kraken_broker.py — Broker Kraken Futures (Perpetual)
 Interface identique à bybit_broker.py.
 US-compatible — pas de blocage IP — tourne sur Replit directement.
 ETH/USD → PF_ETHUSD, SOL/USD → PF_SOLUSD
-SL = ordre stop resting sur Kraken, TP = limit sell resting.
+SL = ordre stop resting sur Kraken, TP = limit ordre resting (sell pour long, buy pour short).
 Les deux survivent à un crash du bot (sur le matching engine Kraken).
 """
+from __future__ import annotations
 import base64
 import hashlib
 import hmac
@@ -74,14 +75,16 @@ def _smart_round(price: float) -> float:
 # ── Data classes ───────────────────────────────────────────────────────────────
 
 class Position:
-    def __init__(self, kraken_symbol, qty, avg_px, current_px, upl):
+    def __init__(self, kraken_symbol, qty, avg_px, current_px, upl, side="long"):
         self.kraken_symbol   = kraken_symbol
         self.symbol          = kraken_symbol
         self.db_symbol       = _KRAKEN_TO_DB.get(kraken_symbol, kraken_symbol)
-        self.qty             = qty
+        self.qty             = abs(float(qty))   # taille toujours positive
         self.avg_entry_price = avg_px
         self.current_price   = current_px or avg_px
         self.unrealized_pnl  = upl
+        self.unrealized_pl   = upl                # alias compat
+        self.side            = side               # "long" | "short"
 
 
 class OrderInfo:
@@ -216,10 +219,16 @@ class KrakenBroker:
                 return []
             out = []
             for p in r.get("openPositions", []):
-                if p.get("side", "").lower() != "long":
-                    continue
+                # Kraken Futures: `size` toujours positif, sens dans `side`.
+                api_side = (p.get("side") or "").lower()
+                if api_side not in ("long", "short"):
+                    # Fallback signe pour brokers qui encodent sens dans size.
+                    sz_raw = float(p.get("size", 0) or 0)
+                    if sz_raw == 0:
+                        continue
+                    api_side = "long" if sz_raw > 0 else "short"
                 sym = p.get("symbol", "").upper()
-                qty = float(p.get("size", 0) or 0)
+                qty = abs(float(p.get("size", 0) or 0))
                 if qty <= 0:
                     continue
                 avg_px  = float(p.get("price", 0) or 0)
@@ -227,7 +236,7 @@ class KrakenBroker:
                     _KRAKEN_TO_DB.get(sym, sym)
                 ) or avg_px
                 pnl = float(p.get("pnl", 0) or 0)
-                pos = Position(sym, qty, avg_px, mark_px, pnl)
+                pos = Position(sym, qty, avg_px, mark_px, pnl, side=api_side)
                 out.append(pos)
                 self._ensure_sltp(pos)
             return out
@@ -245,65 +254,75 @@ class KrakenBroker:
     # ── Auto SL/TP ───────────────────────────────────────────────────────────
 
     def _ensure_sltp(self, pos: Position):
-        """Place SL et TP orders si absents pour cette position."""
+        """Place SL et TP orders si absents pour cette position.
+        Route les sides en fonction du sens de la position :
+          - long  → SL = sell stp,  TP = sell lmt
+          - short → SL = buy  stp,  TP = buy  lmt
+        Lit `side` depuis le cache `_sltp` (set à l'open), fallback `pos.side`.
+        """
         sym    = pos.kraken_symbol
         cached = self._sltp.get(sym, {})
         sl     = cached.get("sl")
         tp     = cached.get("tp")
+        side   = (cached.get("side") or pos.side or "long").lower()
         if not sl or not tp:
             return
 
+        close_side = "sell" if side == "long" else "buy"
+
         changed = False
         if not cached.get("sl_order_id"):
-            sl_id = self._place_stop(sym, pos.qty, sl)
+            sl_id = self._place_stop_close(sym, close_side, pos.qty, sl)
             if sl_id:
                 self._sltp[sym]["sl_order_id"] = sl_id
-                logger.info(f"[Kraken] 🛡️  SL placed {sym} @ ${sl} id={sl_id}")
+                logger.info(f"[Kraken] 🛡️  SL placed {sym} {side} @ ${sl} id={sl_id}")
                 changed = True
 
         if not cached.get("tp_order_id"):
-            tp_id = self._place_limit_sell(sym, pos.qty, tp)
+            tp_id = self._place_limit_close(sym, close_side, pos.qty, tp)
             if tp_id:
                 self._sltp[sym]["tp_order_id"] = tp_id
-                logger.info(f"[Kraken] 🎯 TP placed {sym} @ ${tp} id={tp_id}")
+                logger.info(f"[Kraken] 🎯 TP placed {sym} {side} @ ${tp} id={tp_id}")
                 changed = True
 
         if changed:
             self._save_sltp_cache()
 
-    def _place_stop(self, kraken_sym: str, qty: float,
-                    stop_price: float) -> str | None:
+    def _place_stop_close(self, kraken_sym: str, close_side: str,
+                          qty: float, stop_price: float) -> str | None:
+        """Stop order to CLOSE position. close_side='sell' for long, 'buy' for short."""
         try:
             r = self._post("/derivatives/api/v3/sendorder", {
                 "orderType":     "stp",
                 "symbol":        kraken_sym,
-                "side":          "sell",
+                "side":          close_side,
                 "size":          str(qty),
                 "stopPrice":     str(_smart_round(stop_price)),
                 "triggerSignal": "last",
             })
             if r.get("result") == "success":
                 return r.get("sendStatus", {}).get("order_id")
-            logger.warning(f"[Kraken] _place_stop: {r.get('error')}")
+            logger.warning(f"[Kraken] _place_stop_close: {r.get('error')}")
         except Exception as e:
-            logger.error(f"[Kraken] _place_stop: {e}")
+            logger.error(f"[Kraken] _place_stop_close: {e}")
         return None
 
-    def _place_limit_sell(self, kraken_sym: str, qty: float,
-                          limit_price: float) -> str | None:
+    def _place_limit_close(self, kraken_sym: str, close_side: str,
+                           qty: float, limit_price: float) -> str | None:
+        """Limit order to CLOSE position. close_side='sell' for long TP, 'buy' for short TP."""
         try:
             r = self._post("/derivatives/api/v3/sendorder", {
                 "orderType":  "lmt",
                 "symbol":     kraken_sym,
-                "side":       "sell",
+                "side":       close_side,
                 "size":       str(qty),
                 "limitPrice": str(_smart_round(limit_price)),
             })
             if r.get("result") == "success":
                 return r.get("sendStatus", {}).get("order_id")
-            logger.warning(f"[Kraken] _place_limit_sell: {r.get('error')}")
+            logger.warning(f"[Kraken] _place_limit_close: {r.get('error')}")
         except Exception as e:
-            logger.error(f"[Kraken] _place_limit_sell: {e}")
+            logger.error(f"[Kraken] _place_limit_close: {e}")
         return None
 
     # ── Prix live ────────────────────────────────────────────────────────────
@@ -387,6 +406,7 @@ class KrakenBroker:
             if r.get("result") == "success":
                 ord_id = r.get("sendStatus", {}).get("order_id")
                 self._sltp[sym] = {
+                    "side": "long",
                     "sl": stop_loss, "tp": take_profit,
                     "qty": qty,
                     "sl_order_id": None, "tp_order_id": None,
@@ -401,6 +421,54 @@ class KrakenBroker:
                          f"{r.get('error')}")
         except Exception as e:
             logger.error(f"[Kraken] place_limit_buy {symbol}: {e}")
+        return None
+
+    def place_limit_sell(self, symbol: str, price: float,
+                         stop_loss: float, take_profit: float,
+                         deploy_usdt: float) -> str | None:
+        """Entrée SHORT — miroir de place_limit_buy.
+        SL au-dessus du prix d'entrée, TP en-dessous.
+        Cache _sltp.side='short' pour router le close correctement.
+        """
+        sym = self._to_kraken(symbol)
+        qty = _round_qty(sym, deploy_usdt / price)
+        if qty < _MIN_QTY.get(sym, 0.01):
+            logger.warning(f"[Kraken] place_limit_sell {symbol}: "
+                           f"qty {qty} < min")
+            return None
+        if not (stop_loss > price > take_profit):
+            logger.warning(
+                f"[Kraken] place_limit_sell {symbol}: invalid SL/TP "
+                f"(SL={stop_loss} entry={price} TP={take_profit}) — "
+                f"short requires SL > entry > TP"
+            )
+            return None
+        try:
+            r = self._post("/derivatives/api/v3/sendorder", {
+                "orderType":  "lmt",
+                "symbol":     sym,
+                "side":       "sell",
+                "size":       str(qty),
+                "limitPrice": str(_smart_round(price)),
+            })
+            if r.get("result") == "success":
+                ord_id = r.get("sendStatus", {}).get("order_id")
+                self._sltp[sym] = {
+                    "side": "short",
+                    "sl": stop_loss, "tp": take_profit,
+                    "qty": qty,
+                    "sl_order_id": None, "tp_order_id": None,
+                }
+                self._save_sltp_cache()
+                logger.info(
+                    f"[Kraken] 📋 LIMIT SELL: {symbol} @ ${price} "
+                    f"qty={qty} SL=${stop_loss} TP=${take_profit} id={ord_id}"
+                )
+                return ord_id
+            logger.error(f"[Kraken] place_limit_sell {symbol}: "
+                         f"{r.get('error')}")
+        except Exception as e:
+            logger.error(f"[Kraken] place_limit_sell {symbol}: {e}")
         return None
 
     def cancel_order(self, symbol: str, order_id: str) -> bool:
@@ -452,8 +520,9 @@ class KrakenBroker:
                 side = d.get("side", "buy").lower()
                 if symbol and sym != self._to_kraken(symbol):
                     continue
-                if side != "buy":
-                    continue
+                # Inclure buy ET sell : long-entry, short-entry, et close orders.
+                # Le caller filtre selon ses besoins (geometric_expert.manage_pending
+                # ne s'intéresse qu'aux entry orders limit non-fillés).
                 orders.append(OrderInfo(
                     ord_id      = d.get("order_id"),
                     kraken_symbol = sym,
@@ -488,8 +557,13 @@ class KrakenBroker:
         if not pos or pos.qty <= 0:
             logger.info(f"[Kraken] close_position {symbol}: pas de position")
             return True
+        # Close side dispatch — bug critique : pour un SHORT, close = BUY,
+        # pas SELL. Sinon on DOUBLE la position au lieu de la fermer.
+        # Source de vérité = pos.side (lu depuis l'API), fallback cache _sltp.
+        cached = self._sltp.get(sym, {})
+        pos_side = (pos.side or cached.get("side") or "long").lower()
+        close_side = "sell" if pos_side == "long" else "buy"
         try:
-            cached = self._sltp.get(sym, {})
             for k in ("sl_order_id", "tp_order_id"):
                 oid = cached.get(k)
                 if oid:
@@ -498,13 +572,13 @@ class KrakenBroker:
             r = self._post("/derivatives/api/v3/sendorder", {
                 "orderType": "mkt",
                 "symbol":    sym,
-                "side":      "sell",
+                "side":      close_side,
                 "size":      str(pos.qty),
             })
             if r.get("result") == "success":
                 self._sltp.pop(sym, None)
                 self._save_sltp_cache()
-                logger.info(f"✅ Kraken position closed: {symbol}")
+                logger.info(f"✅ Kraken position closed: {symbol} {pos_side} via {close_side}")
                 return True
             logger.error(f"[Kraken] close_position {symbol}: "
                          f"{r.get('error')}")
@@ -523,13 +597,22 @@ class KrakenBroker:
 
     def get_close_info(self, symbol: str,
                        since_ts_ms: int = 0) -> dict | None:
+        """Trouve le fill qui a fermé la position.
+        Pour un LONG : close fill = side 'sell'.
+        Pour un SHORT : close fill = side 'buy'.
+        Trade side lu depuis le cache _sltp (set à l'open).
+        """
+        sym = self._to_kraken(symbol)
+        cached = self._sltp.get(sym, {})
+        trade_side = (cached.get("side") or "long").lower()
+        close_side = "sell" if trade_side == "long" else "buy"
         try:
             r = self._get("/derivatives/api/v3/fills")
             for fill in r.get("fills", []):
-                sym = fill.get("symbol", "").upper()
-                if sym != self._to_kraken(symbol):
+                fsym = fill.get("symbol", "").upper()
+                if fsym != sym:
                     continue
-                if fill.get("side", "").lower() != "sell":
+                if fill.get("side", "").lower() != close_side:
                     continue
                 fill_time = fill.get("fillTime", "")
                 if since_ts_ms:
@@ -543,15 +626,24 @@ class KrakenBroker:
                 price = float(fill.get("price", 0) or 0)
                 if price <= 0:
                     continue
-                cached = self._sltp.get(self._to_kraken(symbol), {})
                 sl = cached.get("sl", 0)
                 tp = cached.get("tp", 0)
-                if tp and price >= tp * 0.999:
-                    reason = "target"
-                elif sl and price <= sl * 1.001:
-                    reason = "stop"
-                else:
-                    reason = None
+                # SL/TP comparison logic dépend du sens :
+                #   LONG : TP au-dessus entry → atteint si fill ≥ TP.
+                #          SL en-dessous entry → atteint si fill ≤ SL.
+                #   SHORT: TP en-dessous entry → atteint si fill ≤ TP.
+                #          SL au-dessus entry → atteint si fill ≥ SL.
+                reason = None
+                if trade_side == "long":
+                    if tp and price >= tp * 0.999:
+                        reason = "target"
+                    elif sl and price <= sl * 1.001:
+                        reason = "stop"
+                else:  # short
+                    if tp and price <= tp * 1.001:
+                        reason = "target"
+                    elif sl and price >= sl * 0.999:
+                        reason = "stop"
                 return {
                     "price":  price,
                     "qty":    float(fill.get("size", 0) or 0),

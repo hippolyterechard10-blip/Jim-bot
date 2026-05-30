@@ -145,7 +145,13 @@ class KrakenPaperBroker:
             sz  = float(p.get("size", 0) or p.get("qty", 0) or 0)
             if sz == 0:
                 continue
-            side    = "long" if sz > 0 else "short"
+            # Kraken Futures retourne `size` toujours positif et le sens dans `side`.
+            # Fallback signe pour brokers qui encodent le sens dans le signe.
+            api_side = (p.get("side") or "").lower()
+            if api_side in ("long", "short"):
+                side = api_side
+            else:
+                side = "long" if sz > 0 else "short"
             avg_px  = float(p.get("price", 0) or p.get("entry_price", 0) or 0)
             mark_px = float(p.get("mark_price", 0) or avg_px)
             upl     = float(p.get("pnl", 0) or p.get("unrealized_pnl", 0) or 0)
