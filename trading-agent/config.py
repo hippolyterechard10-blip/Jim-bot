@@ -72,6 +72,17 @@ ROUTER_VARIANT = os.getenv("ROUTER_VARIANT", "t1_trend_fallback")
 # Shadow log showed these states have 64.4% WR + 0.479% avg expectancy on T1S.
 T1S_INCLUDE_HARD_BLOCK = os.getenv("T1S_INCLUDE_HARD_BLOCK", "1") == "1"
 
+# T1S divergence filter mode (validated via 7-test campaign 2026-05-29).
+# Live ran "strict" implicit prior to fix — backtester C3 sweet spot validated
+# with "rsi_fallback". 7 independent backtests (portfolio + solo ETH + solo SOL
+# + realistic frictions + statistical artifact analysis) converged that
+# "never" strictly dominates strict on every axis (n, WR, PF, Sharpe).
+# See vault doc: phase4-divergence-validation.md
+#   "strict"       → div bear required (legacy live, no fallback)
+#   "rsi_fallback" → div OR rsi ∈ [45,70] passes (C3 backtest sweet spot)
+#   "never"        → div not checked; only RSI band [GEO_RSI_SHORT_LOW, _HIGH]
+T1S_DIV_MODE = os.getenv("T1S_DIV_MODE", "never")
+
 # ── Boucles ───────────────────────────────────────────────────────────────────
 FAST_LOOP_SECONDS = 30     # manage_pending + manage_positions
 SLOW_LOOP_SECONDS = 300    # evaluate() — nouveau signal

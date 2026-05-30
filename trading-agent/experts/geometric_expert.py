@@ -127,7 +127,7 @@ class GeometricExpert:
                         "stop":     stop,
                         "target":   target,
                         "qty":      o.filled_qty or 0,
-                        "deploy":   lim * (o.qty_contracts or 0) * self.broker._ct(o.okx_symbol),
+                        "deploy":   lim * (o.qty_contracts or 0) * self.broker._ct(getattr(o, "kraken_symbol", getattr(o, "symbol", None))),
                         "side":     "long" if side == "buy" else "short",
                     })
                     logger.info(f"[GEO] 🔄 Recovered pending order: {symbol} {side.upper()} GTC@{lim}")
@@ -161,18 +161,32 @@ class GeometricExpert:
                 if sym not in open_db and any(s in sym for s in config.GEO_SYMBOLS):
                     entry  = float(pos.avg_entry_price)
                     qty    = float(pos.qty)
-                    center = entry / (1 + config.GEO_ZONE_PCT)
-                    stop   = round(center * (1 - config.GEO_ZONE_PCT) * 0.999, 4)
-                    target = round(entry * (1 + config.GEO_TARGET_PCT), 4)
-                    _reco_target_pct = (target - entry) / entry if entry else None
+                    # Dispatch SL/TP + side per broker pos.side (fix 2026-05-30)
+                    # Legacy bug : hardcoded "buy"/"long" → tracked shorts as longs,
+                    # SL/TP inversed, PnL sign wrong. cf. broker side mapping family.
+                    pos_side = (getattr(pos, "side", None) or "long").lower()
+                    if pos_side == "short":
+                        center = entry * (1 + config.GEO_ZONE_PCT)
+                        stop   = round(center * (1 + config.GEO_ZONE_PCT) * 1.001, 4)
+                        target = round(entry * (1 - config.GEO_TARGET_PCT), 4)
+                        mem_side = "sell"
+                        ctx_side = "short"
+                        _reco_target_pct = (entry - target) / entry if entry else None
+                    else:
+                        center = entry / (1 + config.GEO_ZONE_PCT)
+                        stop   = round(center * (1 - config.GEO_ZONE_PCT) * 0.999, 4)
+                        target = round(entry * (1 + config.GEO_TARGET_PCT), 4)
+                        mem_side = "buy"
+                        ctx_side = "long"
+                        _reco_target_pct = (target - entry) / entry if entry else None
                     self.memory.log_trade_open(
                         trade_id=str(uuid.uuid4()),
-                        symbol=sym, side="buy",
+                        symbol=sym, side=mem_side,
                         qty=qty, entry_price=entry,
                         stop_loss=stop, take_profit=target,
                         market_context={
                             "strategy_source": "geo_v4",
-                            "side": "long", "level": entry,
+                            "side": ctx_side, "level": entry,
                             "stop": stop, "target": target,
                             "reconciled": True,
                             "mode": self._mode_from_target_pct(_reco_target_pct),
@@ -180,7 +194,7 @@ class GeometricExpert:
                             "target_pct_used": _reco_target_pct,
                         }
                     )
-                    logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} qty={qty:.4f} entry={entry}")
+                    logger.info(f"[GEO] 🔄 Recovered orphan position: {sym} {ctx_side} qty={qty:.4f} entry={entry} SL={stop} TP={target}")
         except Exception as e:
             logger.warning(f"[GEO] _reconcile_state: {e}")
 
@@ -931,8 +945,17 @@ class GeometricExpert:
                         continue
                     if not (config.GEO_RSI_SHORT_LOW <= rsi_now <= config.GEO_RSI_SHORT_HIGH):
                         n_rsi_s += 1; continue
-                    if not self._rsi_bearish_divergence(closes_5m, rsi_now):
-                        n_div_s += 1; continue
+                    # T1S divergence gate — modulé par T1S_DIV_MODE pour
+                    # backtest/live parity (cf. phase4-divergence-validation 2026-05-29).
+                    if config.T1S_DIV_MODE == "never":
+                        pass  # skip divergence check entirely
+                    elif config.T1S_DIV_MODE == "strict":
+                        if not self._rsi_bearish_divergence(closes_5m, rsi_now):
+                            n_div_s += 1; continue
+                    else:  # "rsi_fallback" (intermediate palier — C3 sweet spot)
+                        if not self._rsi_bearish_divergence(closes_5m, rsi_now):
+                            if not (45 <= rsi_now <= 70):
+                                n_div_s += 1; continue
 
                     # Pass 3b symmetry: recent highs test resistance, and price
                     # stays below the zone high on the current close.
