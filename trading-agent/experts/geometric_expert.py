@@ -843,6 +843,17 @@ class GeometricExpert:
         # ── SHORTS : multi-thesis router ──────────────────────────────────────
         # Validated config: ROUTER_VARIANT="t1_trend_fallback", T1S_INCLUDE_HARD_BLOCK=True
         # Pas d'entrée short si uptrend 1h fort (HH + HL) — SAUF T2 (trend-follow) et T1S hard-block override
+
+        # P1 BUGFIX 2026-05-30 (Opus 4.8 audit) :
+        # Re-check per-symbol cap AFTER potential LONG entry. The check at line 540
+        # only runs at evaluate() entry — if a LONG just opened, _pending_for_symbol(symbol)
+        # is now 1, but open_count_global was still 0 from the initial snapshot,
+        # so open_count < GEO_MAX_SIM and the SHORT router would fire on the same symbol.
+        # In perp netting, that produces long+short cancel + double fees + reconcile risk.
+        if self._pending_for_symbol(symbol) >= 1:
+            logger.debug(f"[GEO] {symbol} long already opened this eval — skip short router")
+            return
+
         lh_up = h1h[-1] > h1h[-4]; ll_up = l1h[-1] > l1h[-4]
 
         # ── SHORT ROUTER (multi-thesis per ROUTER_VARIANT) ─────────────────────
