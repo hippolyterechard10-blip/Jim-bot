@@ -29,11 +29,23 @@ récentes sont ici, `main` est en retard).
   - Short gated par `GEO_ENABLE_SHORT` (env)
   - `evaluate()` → dispatch vers `_eval_side("long"|"short")`
   - `_pending` / `_touches` keys en tuples `(dir, zone_key)` pour éviter collisions
-- `trading-agent/kraken_broker.py` — broker Kraken Futures :
-  - `place_limit_buy` (long) + `place_limit_sell` (short)
-  - SL + TP natifs sur le matching engine (survivent au crash bot)
-  - OHLCV via `/api/charts/v1/trade` (pas de yfinance)
+- `trading-agent/kraken_broker.py` — broker Kraken Futures (LIVE, fix 2026-05-29) :
+  - `place_limit_buy` (long) + `place_limit_sell` (short, ajouté)
+  - `get_positions` lit `side` API (long ET short), pas le signe de `size`
+  - `close_position` dispatche SELL pour long / BUY pour short selon `pos.side`
+  - SL + TP natifs paramétrés par side dans `_ensure_sltp` :
+    - long → SL stp sell + TP lmt sell
+    - short → SL stp buy + TP lmt buy
+  - `list_open_orders` retourne buy ET sell (entries + close orders)
+  - `get_close_info` cherche le fill close-direction selon `_sltp.side` cached
+  - Cache `_sltp` contient maintenant `side: "long"|"short"`
   - Signature HMAC-SHA512 sur `SHA256(postData + nonce + endpoint)`
+  - ⚠️ OHLCV encore via `yfinance` (TODO Phase 2 : migrer vers `/api/charts/v1/trade`)
+  - Tests anti-régression : `tests/test_kraken_broker_side.py` (14 tests)
+- `trading-agent/broker_kraken_paper.py` — broker Kraken Futures Paper :
+  - Wrap CLI `kraken futures paper`
+  - `get_positions` lit `side` API (fix 2026-05-29)
+  - Tests anti-régression : `tests/test_broker_kraken_paper_side.py` (5 tests)
 - `trading-agent/config.py` — config env-driven :
   - `ACTIVE_BROKER=kraken` par défaut
   - `GEO_SYMBOLS`, `GEO_MAX_SIM`, `GEO_POS_PCT` env-configurables
@@ -137,15 +149,43 @@ Variance forte entre années (2022 ranges = top, 2023 trends = juste positif).
 
 ## Bugs corrigés récemment
 
-1. **Crash `okx_symbol`** dans `_reconcile_state` (`geometric_expert.py`) →
-   référence à un attribut absent sur KrakenBroker. Remplacé par accès
-   broker-agnostique.
+1. **Crash `okx_symbol`** dans `_reconcile_state` (`geometric_expert.py:130`) →
+   référence à un attribut absent sur KrakenBroker. Remplacé par
+   `getattr(o, "kraken_symbol", getattr(o, "symbol", None))` (broker-agnostique).
 2. **Signature HMAC-SHA512** dans `kraken_broker.py` → ordre incorrect
    (était `nonce + endpoint + hex(sha256(...))`, maintenant correct
    `SHA256(postData + nonce + endpoint)` puis HMAC sur bytes).
-3. **OHLCV via yfinance** remplacé par endpoint natif Kraken `/api/charts/v1/trade`.
-4. **broker_kraken.py** (stub incomplet) supprimé, `main_kraken.py` pointe sur
+3. **broker_kraken.py** (stub incomplet) supprimé, `main_kraken.py` pointe sur
    `kraken_broker.py` (complet).
+4. **broker_kraken_paper.py LONG-ONLY** (2026-05-29) : `get_positions` dérivait
+   le sens du SIGNE de `size` (toujours positif chez Kraken). Un T1S short paper
+   apparaissait comme long → `close_position` envoyait SELL → position DOUBLÉE.
+   Fix : lire le champ `side` API en priorité. Tests : 5 cases dans
+   `tests/test_broker_kraken_paper_side.py`.
+5. **kraken_broker.py LONG-ONLY** (2026-05-29) : même bug pattern, PLUS
+   `place_limit_sell` n'existait pas et tous les helpers SL/TP hardcodaient
+   `side: "sell"`. T1S/T2 short auraient crashé en Phase 2 LIVE. Fix complet :
+   ajout `place_limit_sell`, helpers close paramétrisés par side, dispatch
+   buy/sell dans `close_position`, `get_close_info` side-aware via cache `_sltp`,
+   `list_open_orders` retourne buy ET sell. Tests : 14 cases dans
+   `tests/test_kraken_broker_side.py`.
+6. **T1S divergence filter dispatch** (2026-05-30) : `geometric_expert.py:934`
+   exigeait `_rsi_bearish_divergence=True` en strict, ce qui filtrait des
+   bons signaux. 7 backtests indépendants (portfolio + solo ETH + solo SOL +
+   réaliste avec frictions + statistical artifact) ont convergé que le mode
+   `never` (skip divergence) domine `strict` sur tous les axes (Sharpe ×2-3,
+   n_trades ×10-15, WR +7 pts). Patch : `config.T1S_DIV_MODE` env var dispatch
+   sur 3 modes (never|rsi_fallback|strict), default `never`. Tests : 7 cases
+   dans `tests/test_t1s_div_mode.py`. Validation doc complète :
+   vault `phase4-divergence-validation.md`.
+
+## TODOs Phase 2 LIVE (avant d'activer short)
+
+- [x] `kraken_broker.py` short support (fix 2026-05-29)
+- [ ] Migrer OHLCV `yfinance` → Kraken `/api/charts/v1/trade` (yfinance unreliable, throttle silent)
+- [ ] Vérifier auth Kraken live (compte pro.kraken.com, IP whitelist `178.104.145.1`)
+- [ ] Smoke test paper avec `place_limit_sell` réel (T1S fire en t1_neutral bypass)
+- [ ] Activer `KRAKEN_PAPER=0` seulement après ces 4 items
 
 ---
 
