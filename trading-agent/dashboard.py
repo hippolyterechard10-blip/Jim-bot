@@ -407,6 +407,19 @@ def _compute_estimated_costs(trade: dict) -> dict:
 def api_open_trades():
     if not _memory: return jsonify([])
     trades = _memory.get_open_trades()
+
+    # ── Live enrichment via broker (1 HTTP call total for all symbols) ─────
+    # Adds: live_price, pnl_live_gross/pct/net_est, dist_to_tp_abs/pct,
+    # dist_to_sl_abs/pct, progress_pct (0=SL side, 100=TP side)
+    live_prices = {}
+    try:
+        from broker_kraken_paper import KrakenPaperBroker
+        _br = KrakenPaperBroker()
+        for pos in (_br.get_positions() or []):
+            live_prices[pos.db_symbol] = float(pos.current_price)
+    except Exception as e:
+        logger.warning(f"[api_open_trades] live price fetch failed: {e}")
+
     for t in trades:
         raw = t.get("market_context") or {}
         if isinstance(raw, str):
@@ -419,6 +432,51 @@ def api_open_trades():
         t["deployed"] = round(
             float(t.get("entry_price") or 0) * float(t.get("qty") or 0), 2
         )
+
+        # ── Live-trade enrichment ──────────────────────────────────────────
+        entry = float(t.get("entry_price") or 0)
+        qty   = float(t.get("qty") or 0)
+        sl    = float(t.get("stop_loss") or 0)
+        tp    = float(t.get("take_profit") or 0)
+        ctx_side = (raw.get("side") or "long").lower()
+        is_long  = ctx_side == "long"
+        live  = live_prices.get(t.get("symbol"))
+        t["ctx_side"]   = ctx_side
+        t["live_price"] = round(live, 4) if live else None
+
+        if live and entry > 0 and qty > 0:
+            mult = 1 if is_long else -1
+            pnl_gross = mult * (live - entry) * qty
+            pnl_pct   = mult * (live - entry) / entry * 100
+            t["pnl_live_gross"] = round(pnl_gross, 2)
+            t["pnl_live_pct"]   = round(pnl_pct, 3)
+            # Estimated net at current live (round-trip fees + slippage estimate)
+            est_fees = (entry * qty * FEE_TAKER_PCT) + (live * qty * FEE_TAKER_PCT)
+            est_slip = (entry + live) * qty * (SLIPPAGE_BPS_LIVE / 10000.0)
+            t["pnl_live_net_est"] = round(pnl_gross - est_fees - est_slip, 2)
+
+            if tp > 0:
+                dist_tp = (tp - live) if is_long else (live - tp)
+                t["dist_to_tp_abs"] = round(dist_tp, 4)
+                t["dist_to_tp_pct"] = round(dist_tp / live * 100, 3)
+            if sl > 0:
+                dist_sl = (live - sl) if is_long else (sl - live)
+                t["dist_to_sl_abs"] = round(dist_sl, 4)
+                t["dist_to_sl_pct"] = round(dist_sl / live * 100, 3)
+
+            # Progress: 0% (live at SL) → 100% (live at TP). Entry typically ~33-50%.
+            if sl > 0 and tp > 0:
+                if is_long:
+                    rng = tp - sl
+                    prog  = (live  - sl) / rng if rng > 0 else 0.5
+                    eprog = (entry - sl) / rng if rng > 0 else 0.5
+                else:
+                    rng = sl - tp
+                    prog  = (sl - live)  / rng if rng > 0 else 0.5
+                    eprog = (sl - entry) / rng if rng > 0 else 0.5
+                t["progress_pct"]       = round(max(-20, min(120, prog  * 100)), 1)
+                t["entry_progress_pct"] = round(max(-20, min(120, eprog * 100)), 1)
+
     return jsonify(trades)
 
 @app.route("/api/trades/recent")
@@ -1889,6 +1947,31 @@ header{
 .creg-feats{display:flex;justify-content:space-between;gap:8px;margin-top:8px;font-family:'SF Mono','Monaco',monospace;font-size:10px;color:var(--text3);flex-wrap:wrap}
 .creg-feats span b{color:var(--text2);font-weight:500}
 .creg-disabled{padding:12px 14px;background:var(--surface);border:1px dashed var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--text3);text-align:center;margin-bottom:14px;font-family:'SF Mono','Monaco',monospace;letter-spacing:.04em}
+/* ── Live trade cards (Phase 4.1 enriched positions view) ─────────────────── */
+.pos-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
+.pos-card.card-long{border-left:3px solid var(--green)}
+.pos-card.card-short{border-left:3px solid var(--red)}
+.pos-card-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.thesis-chip{font-size:10px;padding:3px 8px;background:rgba(255,255,255,0.05);border-radius:6px;color:var(--text3);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.pos-card-prices{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}
+.pos-card-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:12px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px}
+.val-live{color:var(--text);font-weight:700}
+.metric-block .lbl{font-size:10px;color:var(--text3);margin-bottom:4px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.metric-block .val{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.metric-secondary{font-size:11px;font-weight:400;color:var(--text3)}
+.metric-tertiary{font-size:10px;color:var(--text3);margin-top:2px;font-style:italic}
+.pnl-pos{color:var(--green)}
+.pnl-neg{color:var(--red)}
+.pos-progress-wrap{padding-top:16px}
+.progress-track{position:relative;height:32px;border-radius:16px;background:linear-gradient(to right,rgba(244,63,94,0.18) 0%,rgba(244,63,94,0.04) 40%,rgba(16,185,129,0.04) 60%,rgba(16,185,129,0.18) 100%);border:1px solid var(--border);overflow:visible}
+.progress-label-left,.progress-label-right{position:absolute;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700;letter-spacing:.08em;pointer-events:none}
+.progress-label-left{left:10px;color:var(--red)}
+.progress-label-right{right:10px;color:var(--green)}
+.progress-marker-entry{position:absolute;top:4px;bottom:4px;width:2px;background:rgba(255,255,255,0.4);transform:translateX(-1px);z-index:1}
+.progress-marker-entry span{position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.progress-marker-live{position:absolute;top:-4px;bottom:-4px;width:4px;border-radius:2px;transform:translateX(-2px);z-index:2;transition:left .4s cubic-bezier(.4,0,.2,1)}
+.progress-marker-live.live-long{background:var(--green);box-shadow:0 0 12px rgba(16,185,129,.6)}
+.progress-marker-live.live-short{background:var(--green);box-shadow:0 0 12px rgba(16,185,129,.6)}
 </style>
 </head>
 <body>
@@ -2397,45 +2480,82 @@ async function loadPositions() {
     return;
   }
 
-  const COLS = '100px 56px 1fr 1fr 1fr 80px';
-  const hdr = `<div class="pos-header" style="grid-template-columns:${COLS}">
-    <div>Symbole</div><div>Dir.</div><div>Entrée</div><div>Stop Loss</div><div>Take Profit</div><div>R:R</div>
-  </div>`;
-
-  const rows = trades.map(t => {
+  const fmt = (n, dec=2) => Number(n).toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+  const cards = trades.map(t => {
     const entry = parseFloat(t.entry_price || 0);
     const sl    = parseFloat(t.stop_loss   || 0);
     const tp    = parseFloat(t.take_profit || 0);
-    const side  = (t.side || 'long').toLowerCase();
-    const isLong = side === 'buy' || side === 'long';
-    const slDist = sl && entry ? Math.abs((entry-sl)/entry*100).toFixed(2) : null;
-    const tpDist = tp && entry ? Math.abs((tp-entry)/entry*100).toFixed(2) : null;
-    const rr     = sl && tp && entry ? Math.abs((tp-entry)/(entry-sl)).toFixed(2) : null;
-    const rrNum  = rr ? parseFloat(rr) : 0;
-
-    return `<div class="pos-row" style="grid-template-columns:${COLS}">
-      <div class="pos-sym">${t.symbol||'—'}</div>
-      <div><span class="side-tag ${isLong?'side-long':'side-short'}">${isLong?'LONG':'SHORT'}</span></div>
-      <div class="price-block">
-        <div class="lbl">Prix d'entrée</div>
-        <div class="val">$${entry.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+    const side  = (t.ctx_side || t.side || 'long').toLowerCase();
+    const isLong = side === 'long' || side === 'buy';
+    const live = (t.live_price !== null && t.live_price !== undefined) ? parseFloat(t.live_price) : null;
+    const pnlG = (t.pnl_live_gross !== null && t.pnl_live_gross !== undefined) ? parseFloat(t.pnl_live_gross) : null;
+    const pnlP = (t.pnl_live_pct !== null && t.pnl_live_pct !== undefined) ? parseFloat(t.pnl_live_pct) : null;
+    const pnlN = (t.pnl_live_net_est !== null && t.pnl_live_net_est !== undefined) ? parseFloat(t.pnl_live_net_est) : null;
+    const dSL  = (t.dist_to_sl_abs !== null && t.dist_to_sl_abs !== undefined) ? parseFloat(t.dist_to_sl_abs) : null;
+    const dSLp = t.dist_to_sl_pct;
+    const dTP  = (t.dist_to_tp_abs !== null && t.dist_to_tp_abs !== undefined) ? parseFloat(t.dist_to_tp_abs) : null;
+    const dTPp = t.dist_to_tp_pct;
+    const prog = t.progress_pct;
+    const ePr  = t.entry_progress_pct;
+    const rr   = sl && tp && entry ? Math.abs((tp-entry)/(entry-sl)).toFixed(2) : null;
+    const rrNum = rr ? parseFloat(rr) : 0;
+    const pnlCls = pnlG !== null ? (pnlG >= 0 ? 'pnl-pos' : 'pnl-neg') : '';
+    const pnlSgn = pnlG !== null && pnlG >= 0 ? '+' : '';
+    const dec = entry > 100 ? 2 : 4;
+    // progress bar (only if all data available)
+    let progBar = '';
+    if (prog !== null && prog !== undefined && ePr !== null && ePr !== undefined) {
+      const pC = Math.max(0, Math.min(100, prog));
+      const eC = Math.max(0, Math.min(100, ePr));
+      progBar = `
+        <div class="pos-progress-wrap">
+          <div class="progress-track">
+            <span class="progress-label-left">SL</span>
+            <span class="progress-label-right">TP</span>
+            <div class="progress-marker-entry" style="left:${eC}%"><span>entry</span></div>
+            <div class="progress-marker-live ${isLong?'live-long':'live-short'}" style="left:${pC}%"></div>
+          </div>
+        </div>`;
+    }
+    return `<div class="pos-card ${isLong?'card-long':'card-short'}">
+      <div class="pos-card-header">
+        <span class="pos-sym">${t.symbol||'—'}</span>
+        <span class="side-tag ${isLong?'side-long':'side-short'}">${isLong?'LONG':'SHORT'}</span>
+        <span class="thesis-chip">${t.thesis||'T1'}</span>
+        ${t.crypto_regime ? `<span class="thesis-chip">${t.crypto_regime}</span>` : ''}
       </div>
-      <div class="price-block">
-        <div class="lbl">Stop Loss${slDist?` (−${slDist}%)`:''}</div>
-        <div class="val val-sl">${sl?'$'+sl.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</div>
+      <div class="pos-card-prices">
+        <div class="price-block"><div class="lbl">Entry</div><div class="val">$${fmt(entry,dec)}</div></div>
+        <div class="price-block"><div class="lbl">Live</div><div class="val ${live?'val-live':''}">${live!==null?'$'+fmt(live,dec):'—'}</div></div>
+        <div class="price-block"><div class="lbl">SL${dSLp!==undefined?` <span class="metric-secondary">(${dSLp>=0?'−':'+'}${Math.abs(dSLp).toFixed(2)}%)</span>`:''}</div><div class="val val-sl">$${fmt(sl,dec)}</div></div>
+        <div class="price-block"><div class="lbl">TP${dTPp!==undefined?` <span class="metric-secondary">(+${dTPp.toFixed(2)}%)</span>`:''}</div><div class="val val-tp">$${fmt(tp,dec)}</div></div>
       </div>
-      <div class="price-block">
-        <div class="lbl">Take Profit${tpDist?` (+${tpDist}%)`:''}</div>
-        <div class="val val-tp">${tp?'$'+tp.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</div>
+      <div class="pos-card-metrics">
+        <div class="metric-block">
+          <div class="lbl">PnL Live</div>
+          <div class="val ${pnlCls}">${pnlG!==null?pnlSgn+'$'+fmt(pnlG):'—'} <span class="metric-secondary">${pnlP!==null?'('+pnlSgn+pnlP.toFixed(2)+'%)':''}</span></div>
+          ${pnlN!==null?`<div class="metric-tertiary">Net est. ${pnlN>=0?'+':''}$${fmt(pnlN)}</div>`:''}
+        </div>
+        <div class="metric-block">
+          <div class="lbl">Distance TP</div>
+          <div class="val">${dTP!==null?'$'+fmt(dTP):'—'}</div>
+          ${dTPp!==undefined?`<div class="metric-tertiary">${dTPp>=0?'+':''}${dTPp.toFixed(2)}%</div>`:''}
+        </div>
+        <div class="metric-block">
+          <div class="lbl">Distance SL</div>
+          <div class="val">${dSL!==null?'$'+fmt(dSL):'—'}</div>
+          ${dSLp!==undefined?`<div class="metric-tertiary">${dSLp>=0?'−':'+'}${Math.abs(dSLp).toFixed(2)}%</div>`:''}
+        </div>
+        <div class="metric-block">
+          <div class="lbl">R:R</div>
+          <div class="val ${rrNum>=2?'rr-good':rrNum>=1.5?'rr-ok':''}">${rr?'1:'+rr:'—'}</div>
+        </div>
       </div>
-      <div class="rr-block">
-        <div class="lbl">Risk/Reward</div>
-        <div class="val ${rrNum>=2?'rr-good':rrNum>=1.5?'rr-ok':''}">${rr?'1:'+rr:'—'}</div>
-      </div>
+      ${progBar}
     </div>`;
   }).join('');
 
-  el.innerHTML = hdr + rows;
+  el.innerHTML = cards;
 }
 
 /* ── Trades ─────────────────────────────────────────────────────────────── */
