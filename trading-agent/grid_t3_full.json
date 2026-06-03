@@ -1,16 +1,16 @@
 {
-  "name": "T3 breakdown grid 2022-2024",
+  "name": "T3 breakdown grid 2022-2024 (relaxed filters, 48 combos)",
   "symbols": ["ETH/USD", "SOL/USD"],
   "start": "2022-01-01",
   "end":   "2024-12-31",
   "enabled": ["t3"],
   "output_csv": "grid_t3_full.csv",
   "grid": {
-    "T3_BREAKDOWN_BUFFER_PCT": [0.001, 0.002, 0.005],
-    "T3_VOLUME_MULTIPLIER":    [1.2, 1.5, 2.0],
-    "T3_SUPPORT_LOOKBACK_1H":  [10, 15, 20],
-    "T3_RSI_5M_MAX":           [45, 50, 55],
-    "T3_TARGET_PCT_FIXED":     [0.015, 0.020, 0.025],
-    "T3_MIN_RR":               [1.2, 1.5]
+    "T3_BREAKDOWN_BUFFER_PCT": [0.001, 0.003],
+    "T3_VOLUME_MULTIPLIER":    [1.0, 1.5],
+    "T3_SUPPORT_LOOKBACK_1H":  [10, 20],
+    "T3_RSI_5M_MAX":           [50, 60],
+    "T3_TARGET_PCT_FIXED":     [0.020],
+    "T3_RETEST_LOOKBACK_BARS": [0, 25, 50]
   }
 }

@@ -1228,7 +1228,10 @@ class GeometricExpert:
                     else:
                         live = self.broker.get_live_price(symbol) or entry
                         pnl  = mult * (live - entry) * qty_t
-                        reason = "stop" if pnl < 0 else "target"
+                        # Une fermeture forcée (broker absent, CLI timeout) n'est ni
+                        # un TP hit ni un SL hit — tagger par signe(PnL) gonfle les
+                        # stats "target". Label honnête → "forced_close".
+                        reason = "forced_close"
                         logger.warning(
                             f"[GEO] {symbol} absent broker, fermeture approx "
                             f"@ ${live:.4f} pnl=${pnl:.2f}"

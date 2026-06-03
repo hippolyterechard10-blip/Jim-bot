@@ -18,9 +18,9 @@ import urllib.parse
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 import config
+from kraken_candles import fetch_kraken_bars
 
 logger = logging.getLogger(__name__)
 
@@ -391,28 +391,13 @@ class KrakenBroker:
 
     def get_bars(self, symbol: str, timeframe: str = "15Min",
                  limit: int = 100) -> pd.DataFrame | None:
-        yf_sym = _YF_MAP.get(symbol, symbol)
-        yf_tf  = _TF_MAP.get(timeframe, "15m")
-        period = _PERIOD_MAP.get(yf_tf, "8d")
+        # Signaux désormais sur Kraken Futures public candles (parité avec
+        # l'exécution) — cf. Option A 2026-06-01.
         try:
-            ticker = yf.Ticker(yf_sym)
-            df = ticker.history(period=period, interval=yf_tf,
-                                auto_adjust=True)
-            if df is None or df.empty:
-                return None
-            df = df.rename(columns={
-                "Open": "open", "High": "high", "Low": "low",
-                "Close": "close", "Volume": "volume",
-            })
-            df["symbol"] = symbol
-            df.index     = pd.to_datetime(df.index, utc=True)
-            df = df[["open", "high", "low", "close", "volume", "symbol"]]
-            if len(df) > 1:
-                df = df.iloc[:-1]
-            return df.tail(limit)
+            return fetch_kraken_bars(symbol, timeframe, limit)
         except Exception as e:
             logger.error(f"[Kraken] get_bars {symbol}: {e}")
-        return None
+            return None
 
     # ── Orders ───────────────────────────────────────────────────────────────
 

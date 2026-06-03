@@ -2572,7 +2572,43 @@ async function loadTrades(period) {
     body.innerHTML = '<tr><td class="tbl-empty" colspan="13">Aucun trade sur cette période</td></tr>';
     return;
   }
+  // Compute daily "in the pocket" (post-tax) sum for each day present.
+  // Fallback : si pas de pocket calculé, on retombe sur le PnL broker brut.
+  const dayNet = {}, dayCount = {};
+  trades.forEach(t => {
+    const at = t.entry_at;
+    if (!at) return;
+    const k = String(at).slice(0, 10);  // YYYY-MM-DD
+    const pocket = t.post_tax_pnl_est;
+    const fallback = t.pnl;
+    const v = (pocket != null) ? parseFloat(pocket) : parseFloat(fallback);
+    dayNet[k] = (dayNet[k] || 0) + (isNaN(v) ? 0 : v);
+    dayCount[k] = (dayCount[k] || 0) + 1;
+  });
+  let lastDay = null;
   body.innerHTML = trades.map(t => {
+    // Day separator row inserted on day change.
+    const at = t.entry_at;
+    const dayKey = at ? String(at).slice(0, 10) : 'unknown';
+    let sep = '';
+    if (dayKey !== lastDay) {
+      lastDay = dayKey;
+      let dayLabel = '—';
+      if (at) {
+        try {
+          dayLabel = new Date(at).toLocaleDateString('fr-FR', {weekday:'long', day:'2-digit', month:'short', year:'numeric'});
+        } catch(e) { dayLabel = dayKey; }
+      }
+      const net = dayNet[dayKey] || 0;
+      const n   = dayCount[dayKey] || 0;
+      const netCss = net >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+      const netStr = (net >= 0 ? '+' : '−') + '$' + Math.abs(net).toFixed(2);
+      sep = `<tr class="day-sep"><td colspan="12" style="background:var(--bg2,#1a1d23);padding:6px 12px;font-size:12px;font-weight:600;border-top:1px solid var(--text3,#666)">
+        📅 <span style="color:var(--text1,#fff);text-transform:capitalize">${dayLabel}</span>
+        <span style="color:var(--text3,#999);margin-left:14px;font-weight:400">${n} trade${n>1?'s':''}</span>
+        <span style="margin-left:14px;${netCss}" title="Net après frais, slippage et impôts (in the pocket)">in pocket ${netStr}</span>
+      </td></tr>`;
+    }
     const pnl    = t.pnl;
     const isOpen = t.status === 'open';
     const side   = (t.side||'').toLowerCase();
@@ -2587,7 +2623,7 @@ async function loadTrades(period) {
     const netCss  = netEst != null ? (parseFloat(netEst)>=0?'color:var(--green)':'color:var(--red)') : '';
     const pocketCss = pocketEst != null ? (parseFloat(pocketEst)>=0?'color:var(--green)':'color:var(--red)') : '';
     const fmt = (v, signed=false) => v == null ? '—' : (signed && parseFloat(v)>=0 ? '+' : '') + '$' + Math.abs(parseFloat(v)).toFixed(2);
-    return `<tr>
+    return sep + `<tr>
       <td style="font-weight:700">${t.symbol||'—'}</td>
       <td><span class="side-tag ${isLong?'side-long':'side-short'}" style="font-size:10px;padding:2px 7px">${isLong?'L':'S'}</span></td>
       <td>$${parseFloat(t.entry_price||0).toFixed(2)}</td>
@@ -2900,6 +2936,17 @@ async function loadStrategy(){
   } catch(e) {}
 
   mk('s-chip-regime', 'régime · ' + (cs.regime || '—'));
+  // P11 fix : also display crypto_regime state(s) — the actual driver of strategy decisions.
+  // Legacy chip above shows OLD VIX/SPY label, this one shows NEW crypto state.
+  try {
+    const cr = await api('/api/crypto-regime');
+    if (cr && cr.by_symbol) {
+      const states = Object.values(cr.by_symbol).map(s => (s.state || '?'));
+      const uniq = [...new Set(states)];
+      const label = uniq.length === 1 ? uniq[0] : uniq.join('/');
+      mk('s-chip-regime', 'crypto · ' + label.replace(/_/g, ' '));
+    }
+  } catch(e) {}
   const biasLabel = ({
     longs_favored:  'biais · longs',
     shorts_favored: 'biais · shorts',
