@@ -1,0 +1,53 @@
+# Artefacts de recherche & backtest (non-runtime) — ne polluent pas l'historique.
+# NB: grid_t3_full.json / grid_t4_full.json sont des CONFIGS validées déjà
+# trackées — un .gitignore n'affecte pas les fichiers déjà suivis, elles restent
+# versionnées normalement.
+
+# ── Walk-forward / long-short sweeps ──
+wf_*.csv
+wf_*.json
+wfls_*.csv
+wfls_*.json
+wf_report.json
+wf_rolling_report.json
+wfls_report.json
+
+# ── Ablation / parity / replay / timeout grids ──
+ablation_*.csv
+p1abl_*.csv
+kab_*.csv
+ls_*.csv
+p2_*.csv
+regtp_*.csv
+timeout_*.csv
+grid_*.csv
+grid_c3_*.json
+grid_solo_*.json
+grid_t1s_*.json
+grid_t2_*.json
+phase41_*.csv
+phase5_explore_results.csv
+realistic_results.csv
+*_trades.csv
+
+# ── Scripts de recherche (drivers, hors runtime) ──
+run_*.py
+backtest_*.py
+fetch_p2_data.py
+fetch_kraken_5m.py
+
+# ── Caches de données marché ──
+kraken_cache/
+kraken_cache_p2/
+btc_cache_p2/
+yahoo_cache_p2/
+archive/backtests/binance_us_cache/
+
+# ── État runtime local (jamais commit) ──
+kraken_sltp_cache.json
+kraken_paper_sltp_cache.json
+
+# ── Secrets & backups (jamais commit) ──
+.env.bak*
+*.bak_*
+*.backup_*
