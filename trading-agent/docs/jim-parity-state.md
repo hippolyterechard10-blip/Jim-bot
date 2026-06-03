@@ -2827,3 +2827,80 @@ Extraire `get_long_signal_t1` / `get_short_signal_t1` dans un module partagé
 Aujourd'hui : 2 implémentations parallèles, divergence subtile possible (la 4e
 gate divergente trouvée si on creuse plus, ou la prochaine introduction
 intentionnelle qui passe sous le radar). Module partagé = zéro chance de drift.
+
+## P12 — Incident ETH "TP raté" : part sleep vs part bug brackets/réconciliation — 2026-06-03
+
+> Analyse post-mortem. Position fermée manuellement (opérationnel), **aucune modif de code**.
+> Contexte matériel fourni par l'opérateur : **lid du Mac fermé une grande partie de la
+> journée du 3 juin, AVANT le restart de 18:16 et AVANT que Jim soit protégé du sleep**
+> (batterie, pas de caffeinate/Amphetamine actif). À pondérer dans l'analyse.
+
+### Résumé de l'incident
+Position `ETH/USD short 2.61 @ 1859.9999` (ouverte 01:04 le 3 juin) restée ouverte ~17 h
+alors que le prix avait **franchi son TP** (TP=1843.26, prix descendu jusqu'à ~1828) :
+"au-dessus du TP, ne sort pas". Récupérée comme orpheline au restart de 18:16
+(`🔄 Recovered orphan position`), puis **fermée manuellement au CLI** à 22:37
+(fill @1831.5, realized +74.38 brut / +72.00 net, collatéral 9838.89→9910.89).
+DB réconciliée : `close_reason=manual_reconcile_tp_missed`.
+
+### Timeline (preuves /tmp/jimbot.log + futures_state.json)
+- **02/06 22:08→23:59** : log continu, **0 gap** → machine éveillée. Lock `futures_state.json.lock` créé à **23:54** (mtime) **en veille active**, pas pendant un sleep.
+- **03/06 01:04:59** : position ETH ouverte (broker). **01:05:02** : 1er SL placé (FP-00323) → les ops broker fonctionnaient encore à 01:05.
+- **03/06 ~01:50** : lock devenu **bloquant** → `Futures paper state is locked by another process` en boucle. **Machine éveillée.**
+- **01:50 → 10:10** : `market sell ETH/USD failed` répétés (~16 clusters), **machine éveillée** (matin = 0 gap > 4 min). Le bot ne peut ni gérer ni fermer la position.
+- **03:54** : DB enregistre un **forced_close fantôme** (+75.69) alors que le broker **garde** la position → désync DB↔broker.
+- **11:31 → 18:08** : **6.4 h de gel** réparties en **19 trous** de 15–36 min = lid fermé, process figé. **Aucune récupération possible** (watchdog figé lui aussi).
+- **18:16** : restart manuel (sur `main`). Reconcile récupère l'orpheline. Lock périmé **retiré manuellement** (`rm`).
+- État au restart : broker = **3 SL orphelins empilés** (FP-00323/00331/00343) + **0 ordre TP**. Cache local = `tp_order_id=FP-00344, tp_missing:false` → **ordre inexistant côté broker**.
+- **22:37** : fermeture manuelle + cancel des 3 SL. Broker ETH : 0 position / 0 ordre.
+
+### Estimation : part sleep vs part bug
+
+**Part SLEEP / interruption — surtout la DURÉE (amplificateur), ~60-70 % du "temps bloqué") :**
+- L'après-midi (6.4 h de gel) est la raison **directe** pour laquelle la position est restée
+  bloquée jusqu'au restart de 18:16 : machine endormie → ni le bot ni le watchdog ne pouvaient
+  agir. C'est le sleep qui a transformé un glitch en blocage de ~17 h.
+- **MAIS le sleep n'explique PAS le déclenchement** : le lock était déjà bloquant à **01:50 en
+  pleine veille**, tous les `market sell failed` du matin (01:50-10:10) sont **hors sommeil**, et
+  la nuit du 2 (création du lock à 23:54) ne montre **aucun gap de sommeil**.
+- Confiance : **élevée** que le sleep est le facteur d'aggravation/durée ; **faible/nulle** qu'il
+  soit la cause du lock ou du TP manquant.
+
+**Part BUG RÉEL — indépendante du sleep, reproductible (~30-40 %, mais c'est la cause racine) :**
+1. **Lock périmé jamais auto-réclamé.** Le broker retente (hardening OK) mais ne supprime jamais
+   un lock prouvablement périmé (aucun PID détenteur). Il a fallu un `rm` manuel. Or un lock
+   périmé peut naître de **tout** crash/kill de subprocess CLI — pas besoin de sleep (timeout CLI
+   15 s déjà observé le 31/05). **Ce seul fix aurait évité tout l'incident, quelle que soit la cause.**
+2. **TP enregistré "placé" sans confirmation broker.** Cache `tp_missing:false` + `tp_order_id=FP-00344`
+   alors que l'ordre **n'existe pas** côté broker. Sous contention lock, le placement TP a échoué
+   mais le bot l'a noté comme réussi → la position court **sans TP** et le self-healing
+   (re-placement si `tp_missing`) est **neutralisé**.
+3. **Réconciliation ne vérifie pas l'existence des brackets.** Au restart, le reconcile récupère la
+   **position** (correct) mais fait confiance au flag `tp_missing` du cache plutôt que de comparer
+   aux **ordres ouverts réels** du broker. Un TP manquant n'est jamais détecté/réparé à la récupération.
+4. **forced_close marque un trade clos en DB sans confirmation broker** → désync (close fantôme 03:54).
+   Repli volontaire (broker injoignable) mais qui **autorise** la désync.
+- Symptôme annexe : **3 SL dupliqués** = retries de placement sous lock ; le `reduceOnly` empêche
+  heureusement la sur-fermeture (le fix bracket fonctionne sur ce point).
+
+### Conclusion
+- **Ne pas classer l'incident "100 % sleep".** Le sleep est l'**amplificateur** (il a allongé le
+  blocage à ~17 h en gelant la machine tout l'après-midi), **pas la cause racine**.
+- **Cause racine = lock périmé (origine ambiguë, non clairement sleep) + absence de 3 garde-fous**
+  (auto-clear lock, confirmation TP, vérif brackets au reconcile). Ces points sont de **vrais bugs**,
+  reproductibles dès qu'un appel CLI échoue, **sans sleep**.
+- **Priorité de fix** (par impact, indépendante du sleep) :
+  1. Auto-clear d'un lock périmé (PID détenteur absent/mort) avant retry.
+  2. Confirmation broker du TP avant d'écrire `tp_missing=false`.
+  3. Reconcile qui compare le cache aux **ordres bracket réels** du broker et re-pose ce qui manque.
+- **Mitigation matérielle complémentaire** (n'est pas un fix) : empêcher le sleep
+  (caffeinate/Amphetamine + secteur) → réduit la fenêtre d'exposition mais ne corrige pas les bugs.
+
+### Reste ouvert au moment de l'écriture
+- Résidu cache `PF_ETHUSD` (`tp_missing:false`, ordre mort) — inerte (manage loop itère sur les
+  positions broker, vide pour ETH) ; sera écrasé au prochain trade ETH ou purgé par un restart.
+- 2 SL orphelins SOL **sans position SOL** (hors périmètre de l'intervention ETH).
+- Boucle de ré-instanciation broker ~2 s : présente avant ET après la clôture → **non liée** à
+  l'incident (pattern de code, bruit de log).
+
+_Aucune correction de code appliquée (consigne opérateur). Ce document = analyse seule._
