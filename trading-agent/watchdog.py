@@ -19,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MAIN = ROOT / "main.py"
+MAIN_PIDFILE = "/tmp/jimbot.pid"  # pidfile singleton (flock) écrit par main.py
 LOG = ROOT / "watchdog.log"
 PIDFILE = ROOT / ".jim_watchdog.pid"
 RESTART_GUARD = ROOT / ".jim_watchdog.restart.lock"
@@ -47,29 +48,16 @@ def _pid_running(pid: int) -> bool:
 
 
 def _find_main_pids() -> list[int]:
+    # Source de vérité = le pidfile singleton maintenu par main.py
+    # (/tmp/jimbot.pid, flock). L'ancien parsing `ps` cherchait le chemin
+    # complet (`str(MAIN)` / "jim-bot/trading-agent") alors que main.py est
+    # lancé en "main.py" relatif (cwd=ROOT) → jamais matché → misfire "dead"
+    # en boucle + race au restart. Le pidfile est fiable et déjà unique.
     try:
-        out = subprocess.check_output([
-            "ps", "-ax", "-o", "pid=,command="
-        ], text=True)
-    except Exception as e:
-        _log(f"[watchdog] ps failed: {e}")
+        pid = int(Path(MAIN_PIDFILE).read_text().strip())
+    except Exception:
         return []
-
-    pids: list[int] = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            pid_str, cmd = line.split(None, 1)
-            pid = int(pid_str)
-        except Exception:
-            continue
-        if "main.py" not in cmd:
-            continue
-        if str(MAIN) in cmd or "jim-bot/trading-agent" in cmd:
-            pids.append(pid)
-    return sorted(set(pids))
+    return [pid] if _pid_running(pid) else []
 
 
 def _send_alert(text: str):
