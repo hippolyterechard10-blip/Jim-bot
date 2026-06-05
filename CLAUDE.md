@@ -10,8 +10,10 @@ contexte du projet pour qu'une nouvelle session Claude reprenne sans re-briefer.
 **Jim Bot** est un bot de trading algorithmique exécutant la stratégie **GEO V4**
 sur Kraken Futures (perpétuels ETH/USD et SOL/USD).
 
-**Branche active** : `claude/jim-bot-kraken-futures-Zo9t6` (toutes les modifs
-récentes sont ici, `main` est en retard).
+**Branche active** : `main`. C'est la ligne à jour : tout le travail récent y est,
+et `origin/main` est synchro. La branche `claude/jim-bot-kraken-futures-Zo9t6` est
+**archivée** au commit `672e8bb` — un vieil ancêtre, 36 commits derrière `main` au
+2026-06-05 ; ne pas y travailler.
 
 **Hub Notion** : <https://www.notion.so/348568d64f5c8184b8e6debdffa22546>
 (état session du 19/04, blocage actuel, checklist de reprise).
@@ -194,7 +196,7 @@ Variance forte entre années (2022 ranges = top, 2023 trends = juste positif).
 - Commentaires en français OK dans le code
 - **Pas de quote dans le `.env`** (juste `KEY=VALUE`)
 - Tester chaque modif avec `python -m py_compile <file>.py` avant commit
-- `git push` sur la branche `claude/jim-bot-kraken-futures-Zo9t6`, **pas main**
+- Le travail vit sur `main` (et `origin/main`). Pas de workflow de branches imposé.
 - Quand auth Kraken passe : `systemctl restart jimbot` puis `tail -f /var/log/jimbot.log`
 - Vérifier `[GEO] evaluating ETH/USD | régime=...` tourne toutes les 5 min
 
